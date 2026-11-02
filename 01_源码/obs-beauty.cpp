@@ -4786,7 +4786,17 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	// supportsGpu()=true 用于验证开关；真正着色器在 Phase 2–5 接入后启用此分支。
 	// =======================================================================
 
-	// 2) download to CPU
+	// S1 (Q1): 全 0 参数直通短路。verified 预热完成、未开镜像、且开关未关时，
+	// 整段跳过 GPU→CPU→GPU 往返，最终直接画输入纹理 in_tex（等价于"滤镜禁用"）。
+	BeautySettings s;
+	beauty_filter_settings(f, s);
+	const bool skip_sdk = s.allZero();
+	const char *azs = getenv("BEAUTY_ALLZERO_SKIP");
+	const bool allow_allzero_skip = !(azs && azs[0] == '0');
+	const bool passthrough = allow_allzero_skip && skip_sdk && f->verified && !f->mirror;
+
+	// 2) download to CPU  —— 直通时整段跳过
+	if (!passthrough) {
 	bool got = false;
 	const double t_dl = f->prof_on ? beauty_now_ms() : 0.0;
 	gs_stage_texture(f->stage, in_tex);
@@ -4813,10 +4823,12 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	}
 	if (f->prof_on)
 		f->prof_dl += beauty_now_ms() - t_dl;
+	}  // end if (!passthrough)：下载/回读/计时整段跳过
 
 	// 5b-2 切片 4：帧号 + 把本帧原样拷进显存环。
 	// 顺序要紧：帧号必须在 process 之前设好（引擎要把它和送检测的那一帧绑定），
 	// 拷贝也必须在本帧画完之前完成 —— 同一命令流内有序，钩子采样时一定已到位。
+	if (!passthrough) {
 	f->frame_tag++;
 	beautyCoreSetFrameTag(f->frame_tag);
 	if (f->gpu_ring_ok &&
@@ -4824,14 +4836,14 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			       gs_texture_get_height(in_tex),
 			       gs_texture_get_color_format(in_tex)))
 		beauty_ring_put(f, f->frame_tag, in_tex);
+	}
 
 	// 3) 引擎处理（自研核）。
 	//
 	// 全 0 参数时引擎输出与输入逐字节一致，直接透传，省掉一整个 CPU 往返
 	// （含一次 BGRA 双换和一次 render 调用）。
-	BeautySettings s;
-	beauty_filter_settings(f, s);
-	const bool skip_sdk = s.allZero();
+	// S1 (Q1): s / skip_sdk / passthrough 已在下载前入口分支（见上方 ~4791 行）算好，
+	// 此处不再重复定义，直接复用 skip_sdk 决定是否跳过引擎 process。
 	const double t_proc = f->prof_on ? beauty_now_ms() : 0.0;
 
 	if (!skip_sdk) {
@@ -4866,7 +4878,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		// 在估计」全靠这一行 —— worker 一次性置位，这里取走即清，之后每帧零开销。
 		if (beautyCoreSkinAnnounce())
 			blog(LOG_INFO, "[" PLUGIN_NAME "] %s", beautyCoreSkinInfo());
-	} else {
+	} else if (!passthrough) {
 		memcpy(f->buf_out, f->buf_in, (size_t)cx * cy * 4);
 	}
 	if (f->prof_on) {
@@ -4931,7 +4943,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		beauty_gpu_warp_selfcheck(f, in_tex, cx, cy);
 	// =======================================================================
 
-	// 4) 上传（5b-1：直绘时整段跳过）
+	// 4) 上传（5b-1 直绘 / S1 全0直通 时整段跳过：直通帧直接画 in_tex）
 	//
 	// 老路把 buf_out 传进 out_tex 再画。这条路径顺带干三件与画质相关的事
 	// （强制不透明、首帧上传自检、镜像翻转），所以只在「本帧链没交出纹理」
@@ -4955,7 +4967,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		beauty_chainout_cmp(f, cx, cy);
 	const double t_up = f->prof_on ? beauty_now_ms() : 0.0;
 	double detail_in_check = 0.0, detail_out_check = 0.0;
-	if (!chain_direct) {
+	if (!chain_direct && !passthrough) {   // 直通帧：直接画 in_tex，跳过整段上传
 		// the engine may leave alpha at 0 in areas it did not touch; force opaque
 		//
 		// 3.1.21：改成按 32 位整像素写。原来是每隔 4 字节写一次的单字节循环，
@@ -5268,7 +5280,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	const bool prev_srgb = gs_framebuffer_srgb_enabled();
 	gs_enable_framebuffer_srgb(linear_srgb);
 
-	gs_texture_t *draw_tex = chain_direct ? f->chain_out_tex : f->out_tex;
+	gs_texture_t *draw_tex = passthrough ? in_tex
+					   : (chain_direct ? f->chain_out_tex : f->out_tex);
 
 	// === DIAG A：验证"最终绘制纹理是否为半分辨率／陈旧 RT"（方案 A）===
 	//   仅当环境变量 BEAUTY_DIAG_DIMS=1 时启用（2.2.1：默认关 —— 原来判据写成

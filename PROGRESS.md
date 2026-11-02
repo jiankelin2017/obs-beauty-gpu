@@ -1,11 +1,11 @@
 # OBS 美颜 GPU 版 — 进度追踪
 
 - **分支来源**：`D:\插件\OBS美颜源码`（滤镜 v3.1.39 / 引擎 core 1.4.0）
-- **当前版本**：GPU 滤镜 **2.2.1** ｜ GPU 引擎 **2.0.0**（启动日志 `engine=gpu/2.0.0`）｜ CPU `CoreEngine` **1.6.0**（兜底 + golden 基准）
+- **当前版本**：GPU 滤镜 **2.3.0** ｜ GPU 引擎 **2.0.0**（启动日志 `engine=gpu/2.0.0`）｜ CPU `CoreEngine` **1.6.0**（兜底 + golden 基准）
   - 版本号取自 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR`，与构建产物、装机 DLL 三方一致
     （MD5 `484CCF71606A1765187AF0DDB56BDC59`，2.2.0：**修复「装机环境 GPU 路径整体失效」的部署缺口 + BUG 4 预热扩展**。**缺口根因**：GPU 效果经 `obs_module_file()` 从装机 data 目录加载；对用户插件（dll 位于 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty\bin\64bit\`），该目录解析为 `<插件根>\data\`（依据 obs64.exe 内 `obs-studio/plugins/%module%` + `/bin/64bit` + `/data` 路径串 + OBS 用户插件布局），而 2.x 分支的部署**只装了 dll、从未装 shaders** → 所有不走 `BEAUTY_SHADER_DIR` 的启动（含设了 `BEAUTY_ENGINE_IMPL=gpu` 后直接双击 OBS）里六个 effect 全部加载失败并静默回落 CPU：720p 引擎从 ~1 ms 恶化到 **11.5–13.8 ms/帧**（磨皮 9.4 ms 全在 CPU）、链钩子 `S/T/R/D/W` 全 0、A/B 两臂都测的是 CPU 路径**数据无效**。solo 启动器一直设 `BEAUTY_SHADER_DIR=D:/obs_beauty_gpu/shaders`，所以开发期数据一直正常，缺口被完全掩盖。**修复**：新增 `03_装机\7_install_gpu.ps1`（dll + `data\shaders\*.hlsl` 一并装机、含备份与 MD5 校验），本次已执行；solo 的 shader 目录同步为源码最新版（此前 smooth.hlsl 为旧注释版）。**BUG 4 预热扩展**：预热块在纹理之外追加六个 effect 的加载（`gs_effect_create_from_file` 创建时即完成 HLSL 编译，首次 draw 不再有编译耗时），失败时日志明确区分 `textures=0/effects=0` 并提示 data 目录缺 shaders。2.1.1：引擎资源预热（A 方案）+ 拆 6_launch 引擎陷阱。2.1.0：修 `chain_rt` 创建顺序，色调/细节首次被链认领，720p 省约 4.3 ms/帧。2.0.2：补 `beauty_ensure_mask()` 闭环磨皮对拍。2.0.1：`strong` 等待 600→有界 60 帧 + 全帧兜底、CopyMask 区分尺寸/无掩码、`:2174` 笔误、清临时日志。2.0.0：版本重置 GPU=2.0.0 + Phase 3.5 默认开启 + prod bat 退役）。
 - **版本号方案（2026-11-02 重置）**：
-  - GPU 源码（本分支滤镜）**2.2.1** ｜ CPU 源码（OBS美颜源码）**1.0.0**（DLL 暂不部署）｜ UI（obs-beauty-ui）**1.0.0**（同步 CPU，DLL 暂不部署）。
+  - GPU 源码（本分支滤镜）**2.3.0** ｜ CPU 源码（OBS美颜源码）**1.0.0**（DLL 暂不部署）｜ UI（obs-beauty-ui）**1.0.0**（同步 CPU，DLL 暂不部署）。
   - 递增规则（三套共用）：**小更新** → 最右 +1（x.x.N）；**重要更新** → 中间 +1、最右归零（x.N.0）；**超大型更新**（架构/不兼容） → 最左 +1、后两位归零（N.0.0）。
   - 内部 `engine=` 引擎号（gpu/2.0.0、core/1.6.0）为核心引擎自身编号轴，不随上述产品版本重置。
 - **移植进度**：五段（磨皮 / 色调 / 五官 / 细节 / 美形）**全部 GPU 化完成**，每段均有 720p + 4K 逐像素对拍证据。
@@ -334,6 +334,8 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 | **2.1.0** | **修 `chain_rt` 创建顺序：色调/细节段从未被链认领** | `chain_rt` 只由细节段创建，而链里色调排在细节之前 → 色调恒 return NULL，且 `tone_ok=false` 连带拦掉细节、令 `chain_direct` 恒假。720p 实测白付约 4.3 ms/帧（色调 1.03 + 细节 1.00 + 全帧回读 1.92/0.34）。修复：`chain_rt` 拆为独立 `beauty_ensure_chain_rt()`，链钩子入口即建。**已验证（2026-11-02 09:29 实跑）：`S/T/R/D/W=180/180/0/180/0`（T/D 认领）、`sm=0.03/0.00/0.00`（回读归零）、引擎 4.02–4.11→0.78–0.98 ms、无回退无异常** |
 | **2.2.0** | **修复装机环境 GPU 路径整体失效 + 预热扩展（effect 也预热）** | 2.x 部署只装 dll 未装 shaders，而 GPU 效果经 `obs_module_file()` 从 `<插件根>\data\` 加载 → 不走 `BEAUTY_SHADER_DIR` 的启动里六个 effect 全失败并静默回落 CPU（720p 引擎 ~1 ms → 11.5–13.8 ms/帧、`S/T/R/D/W` 全 0、A/B 数据无效）。修复：新增 `7_install_gpu.ps1` 一并装机 dll + shaders（已执行）；预热块追加六个 effect 加载，首次 draw 零编译耗时；失败日志区分 textures/effects。**待用户复跑验证** |
 | **2.1.1** | **BUG 4：美颜开启瞬间抽搐（资源预热）+ 启动器引擎陷阱** | 引擎 GPU 资源历来在「参数首次非 0」那一帧才懒加载，开启首帧同时承担纹理创建 + 检测首帧推理 + 完整渲染链 → 渲染线程卡几十毫秒 → 抽搐一帧。修复：尺寸就绪第一帧即预热全部链上资源（`f->warm`，尺寸变化重置）；`6_launch_obs_test.bat` 补 `BEAUTY_ENGINE_IMPL=gpu`（原先漏设 → 跑它必落 CPU 引擎）。**待用户实测开启瞬间** |
+| **2.2.1** | **BUG 5：磨皮 > 0 时整帧放大（投影矩阵泄漏）** | 绘制恒 1:1 满 quad，但 quad 落进被放大的投影矩阵 → 画面整帧放大。修复投影矩阵泄漏后定格为 2.2.1，即 S0 门禁固化基线（720p 2.04 ms / 4K 13.0 ms）。详细根因见上方第 15 行「2.2.1」章节。 |
+| **2.3.0** | **S1 性能优化：全 0 参数直通短路（Q1）** | `beauty_filter_render()` 入口新增 `passthrough` 分支：`allow_allzero_skip && skip_sdk && f->verified && !f->mirror` 时整段跳过 GPU→CPU→GPU 往返（下载/回读/计时、帧环 put、memcpy、上传全跳过），`draw_tex` 直接画 `in_tex`（等价于滤镜禁用）。回退开关 `BEAUTY_ALLZERO_SKIP=0`。**代码/编译/装机完成（dll MD5 `D3B6CDEADC092EA66EF0860680572EB4`）；正确性/性能门槛待用户运行时验收。** |
 
 > ⚠ **一个诚实的偏差记录**：4K 走帧环时 M1 出现 **24 px 的 1 灰阶差异（0.0003%，判定仍通过）**。
 > 怀疑是 `gs_copy_texture` 的格式/舍入路径，未深究：影响面 0.0003% 的掩码像素、≤1 灰阶，
@@ -805,5 +807,6 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 
 | 阶段 | 状态 | 备注 |
 |---|---|---|
-| S0 | **进行中** | 门禁脚本 `gate.py` + `.gitignore`/`git` 基线（`1ad11fc`）就绪；2.2.1 基线值已录入上表，待用户跑 `gate.py` 两遍固化 Δ≤0.15 门槛 |
-| S1–S7 | 待启动 | 全部按 9.2–9.8 门槛待实施；S0 门槛过后再进 S1 |
+| S0 | **门禁就绪·待用户固化** | 门禁脚本 `gate.py` + `.gitignore`/`git` 基线（`1ad11fc`）就绪；2.2.1 基线值已录入 9.1；待用户跑 `gate.py` 两遍固化 Δ≤0.15 ms 门槛 |
+| S1 | **代码/编译/装机完成·待运行时验收** | 2.3.0：入口 `passthrough` 分支短路全 0 态往返；dll MD5 `D3B6CDEADC092EA66EF0860680572EB4`、6 个 hlsl 装机 OK；正确性（全0 vs 滤镜禁用 `maxdiff=0` / 四组合 vs 2.2.1 `maxdiff=0` / 开关20次无闪退黑帧）+ 性能（720p 2.04→≤0.3、4K ≤0.8）+ 回退 `BEAUTY_ALLZERO_SKIP=0` 待用户 OBS 实跑 `gate.py` 验收 |
+| S2–S7 | 待启动 | 按 9.3–9.8 门槛；S2 需先解 2026-11-01 4K 崩溃根因 |
