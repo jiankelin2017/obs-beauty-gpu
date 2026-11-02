@@ -138,13 +138,21 @@ def close_obs(timeout=20):
     for hwnd, pid, title in hwnds:
         user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
     t0 = time.time()
+    gone = False
     while time.time() - t0 < timeout:
         if not obs_running():
-            return True
+            gone = True
+            break
         time.sleep(0.5)
-    subprocess.run(["taskkill", "/IM", "obs64.exe", "/F"], capture_output=True)
-    time.sleep(2)
-    canvas_restore(_CANVAS_BAK); _CANVAS_BAK = None
+    if not gone:
+        subprocess.run(["taskkill", "/IM", "obs64.exe", "/F"], capture_output=True)
+        time.sleep(2)
+    # 还原画布必须走这里，而且要在进程消失后再等一会儿：OBS 退出时会把
+    # basic.ini 整体重新写一遍，写在我们还原之后就把 4K/720p 又盖回去了
+    # （本次实测踩到两次：收工后画布停在 1280x720 / 3840x2160）。
+    time.sleep(1.5)
+    canvas_restore(_CANVAS_BAK)
+    _CANVAS_BAK = None
     return not obs_running()
 
 
@@ -730,7 +738,13 @@ def main(argv=None):
     p.set_defaults(func=cmd_swaplib)
 
     a = ap.parse_args(argv)
-    return a.func(a)
+    try:
+        return a.func(a)
+    finally:
+        # 兜底：任何分支异常退出都要把画布还回去，别把用户的 profile 留在
+        # 测试分辨率上（画布是用户的推流画布，不是本项目的私有配置）。
+        if _CANVAS_BAK:
+            canvas_restore(_CANVAS_BAK)
 
 
 if __name__ == "__main__":
