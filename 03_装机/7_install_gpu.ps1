@@ -55,6 +55,40 @@ if (-not (Test-Path $dllSrc)) { throw "MISSING dll source under 02_*" }
 if (-not $shaderSrc)          { throw "MISSING shader source dir (01_*\shaders)" }
 if ($hlsl.Count -eq 0)        { throw "MISSING *.hlsl under $shaderSrc" }
 
+# --- P2-1: shader copies must not drift --------------------------------
+# The 2.2.0 outage was caused by a stale smooth.hlsl being picked up from a
+# second copy (source said RGBA16F, the packaged copy still said RGBA32F).
+# Collect every shader folder that could be installed from - the 01_* source,
+# any other *\shaders under the project, and the legacy solo dir - and refuse
+# to install if ANY copy differs from the authoritative 01_* source. Multiple
+# identical copies are tolerated (warned), because the installer bundle and
+# the solo dev dir are legitimate; only DRIFT is fatal.
+function Get-ShaderSig([string]$dir) {
+    $parts = @()
+    foreach ($f in (Get-ChildItem $dir -Filter "*.hlsl" | Sort-Object Name)) {
+        $parts += ($f.Name + ":" + (Get-FileHash $f.FullName -Algorithm MD5).Hash)
+    }
+    return ($parts -join "|")
+}
+$authSig = Get-ShaderSig $shaderSrc
+$shaderCopies = @($shaderSrc)
+foreach ($d in (Get-ChildItem $srcRoot -Directory -ErrorAction SilentlyContinue)) {
+    $sd2 = Join-Path $d.FullName "shaders"
+    if ((Test-Path $sd2) -and ($sd2 -ne $shaderSrc)) { $shaderCopies += $sd2 }
+}
+$soloSd = "D:\obs_beauty_gpu\shaders"
+if (Test-Path $soloSd) { $shaderCopies += $soloSd }
+$drift = @()
+foreach ($sd in $shaderCopies) {
+    if ((Get-ShaderSig $sd) -ne $authSig) { $drift += $sd }
+}
+if ($drift.Count -gt 0) {
+    Write-Output "FATAL: shader copies drifted from source ($shaderSrc):"
+    foreach ($sd in $drift) { Write-Output "  $sd" }
+    throw "shader copies not identical to source - sync or delete the drifted copies before installing"
+}
+Write-Output "shader copies: $($shaderCopies.Count) (all identical to source)"
+
 $proc = Get-Process obs64 -ErrorAction SilentlyContinue
 if ($proc) { throw "obs64.exe is still running (pid $($proc.Id)). Close OBS first." }
 

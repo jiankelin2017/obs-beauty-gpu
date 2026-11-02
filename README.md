@@ -1,8 +1,10 @@
 # OBS 美颜 GPU 版（方案 A：GPU 主 + CPU 辅/兜底）
 
 > 从 `D:\插件\OBS美颜源码`（滤镜 v3.1.39 / 引擎 core 1.4.0）移植的 **GPU 化分支**。
-> 详细方案见 [`04_文档/方案A_GPU移植开发计划.md`](04_文档/方案A_GPU移植开发计划.md)，
-> 进度追踪见 [`PROGRESS.md`](PROGRESS.md)，文档索引见 [`04_文档/README.md`](04_文档/README.md)。
+> **当前计划与开发流程**见 [`04_文档/开发流程与优化计划.md`](04_文档/开发流程与优化计划.md)，
+> 开关字典见 [`04_文档/开关总表.md`](04_文档/开关总表.md)，
+> 证据总账见 [`PROGRESS.md`](PROGRESS.md)，文档索引见 [`04_文档/README.md`](04_文档/README.md)。
+> （`04_文档/方案A_GPU移植开发计划.md` 是当初的规划书，保留作设计参考，进度已过时。）
 
 ## 为什么做这个版本
 
@@ -352,6 +354,9 @@ cd 06_离线验证 && python offline_regress.py check
 rem 5) 工程验收（一条命令出 PASS/FAIL 表，不需管理员）
 powershell -NoProfile -ExecutionPolicy Bypass -File 05_验证\acceptance.ps1
 ```
+
+> 验证脚本第三方依赖（一次性）：`py -3 -m pip install -r 05_验证\requirements.txt`
+> （websocket-client / Pillow / numpy；opencv-python 仅 `make_motion_assets.py` 生成动图素材用）。
 
 环境变量：`BEAUTY_GPU`（0=纯 CPU 回退）、`BEAUTY_GPU_SMOOTH_PROD`（磨皮生产路径）、
 `BEAUTY_GPU_SMOOTH`（=1 跑磨皮对拍；**与 TONE 无关，单开即可**）、

@@ -1,0 +1,14 @@
+# 05_验证 脚本的第三方依赖（Python 3.9+）
+# 安装：py -3 -m pip install -r 05_验证/requirements.txt
+#
+# 用途：
+#   websocket-client  obsctl.py —— obs-websocket v5 客户端（起停 OBS / 改滤镜 / 截图）
+#   Pillow            截图读取与像素对比（make_assets / obsctl / verify_s1_correct）
+#   numpy             像素统计、直方图、逐像素 maxdiff（verify_s1_correct）
+#   opencv-python     仅 make_motion_assets.py（生成逐帧匀速移脸 mp4）需要，可选
+#
+# 注意：Pillow 的包名是 Pillow（import 时叫 PIL）；opencv-python（import 时叫 cv2）。
+websocket-client>=1.6
+Pillow>=9.0
+numpy>=1.23
+opencv-python>=4.6

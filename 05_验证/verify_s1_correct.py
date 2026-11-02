@@ -36,6 +36,7 @@ import glob
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,20 +95,33 @@ def backup_dir():
 
 
 def dll_version(path):
-    """从 dll 里读 BEAUTY_BUILD_STR（形如 2.3.0）。"""
+    """从 dll 里读 BEAUTY_BUILD_STR（形如 2.7.1）。
+
+    原实现是硬编码候选表（止于 2.6.0）。2.7.x 不在表里 → 只剩引擎固定版本
+    `2.0.0` 命中 → 剔除后列表为空 → 回退成 `2.0.0`，于是 2.7.x 被误读成
+    2.0.0（按版本选 DLL 会选错）。改为：
+      1) 锚定模块描述串 "… standalone core) vX.Y.Z" 取真实滤镜版本；
+      2) 取不到再正则扫所有 `2.x.y`，剔除引擎 2.0.0，按数值取最大。
+    以后升版本不用再改这张表。
+    """
     try:
         with open(path, "rb") as fh:
             blob = fh.read()
     except Exception:
         return "?"
-    cands = []
-    for v in (b"2.0.0", b"2.1.0", b"2.1.1", b"2.2.0", b"2.2.1", b"2.3.0", b"2.3.1",
-              b"2.4.0", b"2.4.1", b"2.5.0", b"2.5.1", b"2.6.0"):
-        if v in blob:
-            cands.append(v.decode())
-    # 引擎版本固定是 2.0.0，滤镜版本取最大的那个
-    cands = [c for c in cands if c != "2.0.0"] or cands
-    return max(cands) if cands else "?"
+
+    # 主锚点：模块描述 "OBS Beauty, standalone core) v2.7.1"
+    m = re.search(rb"standalone core\) v(\d+\.\d+\.\d+)", blob)
+    if m:
+        return m.group(1).decode()
+
+    # 退路：扫所有 2.x.y，剔除引擎固定 2.0.0，按数值取最大
+    cands = {x.decode() for x in
+             re.findall(rb"(?<![\d.])(2\.\d+\.\d+)(?![\d.])", blob)}
+    cands.discard("2.0.0")
+    if cands:
+        return max(cands, key=lambda s: tuple(int(p) for p in s.split(".")))
+    return "?"
 
 
 def obs_running():
