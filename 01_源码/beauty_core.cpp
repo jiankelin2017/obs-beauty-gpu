@@ -2380,15 +2380,32 @@ private:
     // 刻意做成**只读 src、不碰任何成员**的函数：异步化时它整段跑在 worker 线程上，
     // 只要不碰成员就不存在数据竞争。这也是异步化能做得这么轻的原因 ——
     // 不需要给磨皮链加锁。
+    //
+    // ---- 2.7.0（S4b）：双坐标系 ----------------------------------------
+    // 默认（geomW/geomH = 0、mapScale = 0）一切照旧：src 就是全帧，w/h 既是像素
+    // 尺寸也是几何坐标系。传 geomW/geomH + mapScale/mapOx/mapOy 时语义变成：
+    //   · src 是 **GPU 预缩放好的检测缩略图**（w×h，通常 side×side、带 letterbox 黑边）；
+    //   · detect 用缩略图，肤色估计也在缩略图上（它只需要主脸内部那块像素）；
+    //   · 之后把 faces 的坐标从缩略图坐标系反算到 gw×gh（全帧），后面的全部几何
+    //     （框、羽化、脖子、眼睛）都在全帧坐标里算 —— 与老路径逐字相同。
+    // 这条路上**没有全帧像素**，所以 maskOut/protectOut 不会被写（强制 geomOnly），
+    // 宿主必须用 GPU 掩码链出图。
     bool buildMaskInto(const unsigned char* src, int w, int h,
                        std::vector<unsigned char>& maskOut,
                        std::vector<unsigned char>& protectOut,
                        beautycore::RoiRect& boundsOut,
                        std::vector<beautycore::FaceBox>& fboxOut,
                        int& pxOut, int& facesOut, std::string& msgOut,
-                       BeautyMaskDiag* diagOut = nullptr) {
-        if (maskOut.size() != (size_t)w * h) maskOut.assign((size_t)w * h, 0);
-        if (protectOut.size() != (size_t)w * h) protectOut.assign((size_t)w * h, 0);
+                       BeautyMaskDiag* diagOut = nullptr,
+                       int geomW = 0, int geomH = 0,
+                       float mapScale = 0.0f, int mapOx = 0, int mapOy = 0) {
+        const bool mapped = (mapScale > 0.0f) && geomW > 0 && geomH > 0;
+        const int gw = mapped ? geomW : w;
+        const int gh = mapped ? geomH : h;
+        if (maskOut.size() != (size_t)gw * gh)
+            maskOut.assign((size_t)gw * gh, 0);
+        if (protectOut.size() != (size_t)gw * gh)
+            protectOut.assign((size_t)gw * gh, 0);
         // 5b-2：几何快照。count 归零是「没脸」的语义，宿主据此决定要不要跑 GPU 掩码。
         // ⚠ 肤色椭圆（cb/cr）**不能在这里记**：estimateSkinCenter() 在本函数后面才跑，
         // 落笔用的是更新后的中心。在这里记 = 拿到上一帧的中心，GPU 侧必然对不上
@@ -2422,8 +2439,16 @@ private:
         // 判据与宿主的 gpu_mask_ok **同构**（单脸 + shape 不含 bit2），再加上
         // 宿主「有 GPU 掩码链」的声明。条件任一不满足就走完整路径并在 diag 里
         // 置 0 —— 所以宿主看到 0 时永远可以退回 CPU 上传，不存在「没掩码」的帧。
-        const bool geomOnly = g_maskGeomOnly && diagOut && faces.size() == 1 &&
-                              !(g_maskShape & 4);
+        const bool geomOnly = (mapped || g_maskGeomOnly) && diagOut &&
+                              faces.size() == 1 && !(g_maskShape & 4);
+        if (mapped && !geomOnly) {
+            /* 缩略图模式下 src 只有 w×h 那么大，而几何坐标与掩码缓冲都是全帧 ——
+             * 多脸 / shape 带 bit2 时**画不出全帧掩码**（没有像素）。
+             * 这里直接报「本帧没有可用掩码」，宿主据此整帧跳过并回退全帧回读。 */
+            msgOut = "thumb: full-res mask needed";
+            facesOut = 0;
+            return false;
+        }
         if (diagOut) diagOut->geomOnly = geomOnly ? 1 : 0;
 
         unsigned char* mask = &maskOut[0];
@@ -2452,6 +2477,26 @@ private:
                 }
             }
             // 估计失败（脸太小 / 被遮挡 / 极暗）时保持上一帧中心，不重置
+        }
+
+        // 2.7.0（S4b）：缩略图 → 全帧。肤色估计**必须**在这之前做完 ——
+        // estimateSkinCenter 采的是 src 的像素，而 src 此刻还是缩略图。
+        // 换算公式与 FaceDetector::detect 里的反算完全对称：
+        //   t = (full * scale + offset)  →  full = (t - offset) / scale
+        // 关键点一起换，否则眼睛保护椭圆会落在错的地方。
+        if (mapped) {
+            for (size_t i = 0; i < faces.size(); i++) {
+                beautycore::FaceBox& f = faces[i];
+                f.x = (f.x - (float)mapOx) / mapScale;
+                f.y = (f.y - (float)mapOy) / mapScale;
+                f.w /= mapScale;
+                f.h /= mapScale;
+                for (int k = 0; k < 10; k += 2) {
+                    f.kps[k] = (f.kps[k] - (float)mapOx) / mapScale;
+                    f.kps[k + 1] = (f.kps[k + 1] - (float)mapOy) / mapScale;
+                }
+            }
+            fboxOut = faces;   // 交给宿主/五官段的那一份也要是全帧坐标
         }
 
         // 5b-2：中心定稿之后再记快照 —— 落笔用的就是这两个值（见函数开头的警告）。
