@@ -356,6 +356,9 @@ def cmd_capture(args):
     print("采集 tag=%s  集合=%s  运行时 dll 版本=%s" % (tag, coll, ver))
     print("=" * 62)
     canvas = (3840, 2160) if coll == COLLECTION_4K else (1280, 720)
+    if getattr(args, "canvas", None):
+        w, h = args.canvas.lower().split("x")
+        canvas = (int(w), int(h))
 
     # 预热启动：OBS 启动时会先按旧画布排一次源位置，再切到 basic.ini 里的新
     # 画布重排，这个竞态会让「前几张图」和「后几张图」构图不同（实测：同一次
@@ -711,6 +714,10 @@ def main(argv=None):
     p.add_argument("tag")
     p.add_argument("--collection-4k", action="store_true")
     p.add_argument("--collection", help="覆盖集合名（如 beauty_s1 用摄像头）")
+    p.add_argument("--canvas", metavar="WxH",
+                   help="覆盖画布（如 3840x2160）。⚠ 不用它时画布只按**集合名**推断："
+                        "传 --collection beauty_soak4k 会得到 720p 画布，截图被降采样，"
+                        "4K 对拍就白做了（2026-11-02 踩过）")
     p.add_argument("--source", help="覆盖源名")
     p.add_argument("--filter", help="覆盖滤镜名")
     p.add_argument("--env", action="append", metavar="K=V",

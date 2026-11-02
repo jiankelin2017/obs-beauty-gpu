@@ -673,6 +673,26 @@ uint64_t g_alignTotal = 0;
 // 宿主也只认「引擎」这一个对象；一个进程内只有一份引擎，全局量足够且最不容易传丢。
 unsigned long long g_frameTag = 0;
 
+// 2.7.0（S4b）：检测输入缩略图。宿主在 GPU 上把整帧 letterbox 到 S×S（默认
+// 640×640）后回读，引擎拿它跑检测 —— 全帧回读（4K 33 MB）从此只在「认领不全、
+// 需要 CPU 全帧像素」的帧上发生。
+//
+// 为什么不塞进 Engine 成员：与 g_frameTag 同一个理由，宿主只认「引擎」这一个
+// 对象，而 updateMask 是 Engine 的私有方法，全局量是最短的一条线。
+//
+// 语义（三个都必须给对，否则几何会系统性偏移）：
+//   · p / tw / th   缩略图像素本体（RGBA8，stride = tw*4）；
+//   · fullW / fullH 几何坐标系（全帧尺寸）—— 掩码几何/五官椭圆都在这个系里算；
+//   · scale/ox/oy   宿主做 letterbox 时用的那三个数，必须与 FaceDetector 内部
+//                   的 letterboxRgb 同一套算法（scale=min(S/w,S/h) 等），因为
+//                    反算 full=(t-offset)/scale 是它的逆。
+// p 为 nullptr 即「本帧没有缩略图」，行为与 2.6.0 逐字节相同。
+static const unsigned char* g_thumbPx = nullptr;
+static int g_thumbW = 0, g_thumbH = 0;
+static int g_thumbFullW = 0, g_thumbFullH = 0;
+static float g_thumbScale = 0.0f;
+static int g_thumbOx = 0, g_thumbOy = 0;
+
 // 掩码参数：人脸框外扩倍数。S1 对拍扫出来 IoU 峰值在 1.15
 // （IoU 0.727 / 精确率 0.934 / 召回率 0.767），见 05_文档/S1_掩码对拍结论.md。
 const float kFaceBoxGrow = 1.15f;
@@ -1592,10 +1612,21 @@ public:
         // 5b-2 切片 4：本帧 `src` 到底是哪一帧。默认就是他自己的帧号；
         // 对齐换帧时改成 held 帧的帧号（宿主靠它在帧环里取到同一帧的纹理）。
         unsigned long long srcTagThisFrame = curTag;
-        if (alignOn_ && maskFresh_ && haveMask && heldFrame_.size() == need) {
-            src = &heldFrame_[0];
-            srcTagThisFrame = heldTag_;
-            g_alignUsed++;
+        if (alignOn_ && maskFresh_ && haveMask) {
+            if (heldFrame_.size() == need) {
+                src = &heldFrame_[0];
+                srcTagThisFrame = heldTag_;
+                g_alignUsed++;
+            } else if (g_thumbPx) {
+                /* 2.7.0（S4b）：缩略图帧不能当 src（1.6 MB ≠ 全帧），但**帧号
+                 * 照样要对齐** —— 这份掩码描述的是 heldTag_ 那一帧，链就必须画
+                 * 那一帧（宿主按 srcTag 从显存环里取）。不改 srcTag 的话，宿主会
+                 * 拿「当前帧纹理 + 上一帧掩码」，3.1.10 修掉的拖影带立刻复现。
+                 * src 保持调用方给的那个（缩略图模式下 CPU 段本来就不该跑，
+                 * 宿主在认领不全时整帧跳过，不会用到它）。 */
+                srcTagThisFrame = heldTag_;
+                g_alignUsed++;
+            }
         }
         g_alignTotal++;
         // 5b-2：这一帧的掩码是不是「刚换进来的」——只有那时 mask_ 与 src 同帧。
@@ -2338,6 +2369,23 @@ private:
             everHadMask_ = false;    // 新尺寸下第一帧按「透传」处理，见 process()
         }
 
+        /* 2.7.0（S4b）：本帧有没有 GPU 缩略图。有就把「检测吃什么」从全帧 src
+         * 换成它 —— 像素系是缩略图（dw×dh），几何系仍是全帧（w×h）。
+         * 这个换法只影响 updateMask：process 的其它段落（磨皮/色调…）在
+         * 「全认领」的帧上本来就不读 src，宿主那条路也不给全帧像素。
+         * fullW/fullH 必须与本帧 w/h 严格相等：宿主分辨率变了（画布切换）而
+         * 缩略图还是上一帧的尺寸时，用旧几何去算新帧的掩码会越界读，宁可不用。 */
+        const bool thumb = (g_thumbPx != nullptr) &&
+                           g_thumbFullW == w && g_thumbFullH == h;
+        const unsigned char* dsrc = thumb ? g_thumbPx : src;
+        const int dw = thumb ? g_thumbW : w;
+        const int dh = thumb ? g_thumbH : h;
+        const int gW = thumb ? w : 0;
+        const int gH = thumb ? h : 0;
+        const float mScale = thumb ? g_thumbScale : 0.0f;
+        const int mOx = thumb ? g_thumbOx : 0;
+        const int mOy = thumb ? g_thumbOy : 0;
+
         if (asyncOn_) {
             startAsyncIfNeeded();
             collectAsync();                 // 每帧都收，不受周期限制
@@ -2347,7 +2395,7 @@ private:
             // 会自我节流成「隔帧一次」，滞后从 1 帧变成 1~2 帧，不会堆积。
             if (maskAge_ >= g_cfg.maskEveryAsync) {
                 maskAge_ = 0;
-                submitAsync(src, w, h);
+                submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy);
             } else {
                 maskAge_++;
             }
@@ -2363,7 +2411,8 @@ private:
         std::string msg;
         int px = 0, faces = 0;
         BeautyMaskDiag dg;   // 5b-2：随 mask_ 一起换进来的几何
-        if (!buildMaskInto(src, w, h, mask_, protect_, bounds_, faces_, px, faces, msg, &dg)) {
+        if (!buildMaskInto(dsrc, dw, dh, mask_, protect_, bounds_, faces_, px, faces,
+                           msg, &dg, gW, gH, mScale, mOx, mOy)) {
             return onDetectFailed(msg, face_.inputSize(), face_.lastBestScore());
         }
         maskDiag_ = dg;
@@ -2553,15 +2602,21 @@ private:
             int y0 = (int)(cy - hh), y1 = (int)(cy + hh);
             if (x0 < 0) x0 = 0;
             if (y0 < 0) y0 = 0;
-            if (x1 > w) x1 = w;
-            if (y1 > h) y1 = h;
+            /* 2.7.1（S4b1）⚠ 钳位边界必须是**几何坐标系**的 gw/gh，不能是 w/h。
+             * mapped（缩略图）模式下 w/h 是缩略图尺寸（640），而 faces 已经换成
+             * 全帧坐标（x1≈2540），拿 640 去钳会把矩形压成反向的 (1629,666,640,640)
+             * —— mask.hlsl 的 faceRect 直接退化，皮肤掩码全零，于是
+             * **磨皮整段失效**（美形只吃椭圆，所以照常生效，特别容易漏看）。
+             * 2026-11-02 23:04 的 chainDBG 就是这么抓到的。 */
+            if (x1 > gw) x1 = gw;
+            if (y1 > gh) y1 = gh;
 
             // 脖子通道的横向范围。脸框底边在它之内时**不做下羽化**，否则下巴
             // 与脖子之间会出现一条水平接缝。
             int nx0 = (int)(cx - f.w * g_neck.halfW);
             int nx1 = (int)(cx + f.w * g_neck.halfW);
             if (nx0 < 0) nx0 = 0;
-            if (nx1 > w) nx1 = w;
+            if (nx1 > gw) nx1 = gw;
 
             int fe = (g_maskFeatherPx >= 0)
                          ? g_maskFeatherPx
@@ -2595,14 +2650,14 @@ private:
                     int ey0 = (int)(cyN - B);
                     int ey1 = (int)(cyN + B);
                     if (ey0 < 0) ey0 = 0;
-                    if (ey1 > h) ey1 = h;
+                    if (ey1 > gh) ey1 = gh;
                     mg.nyLo = ey0; mg.nyHi = ey1;
                     mg.neckA = A; mg.neckB = B; mg.neckCy = cyN;
                 } else {
                     int n0 = y1;
                     int n1 = (int)(cy + hh + f.h * g_neck.len);
                     if (n0 < 0) n0 = 0;
-                    if (n1 > h) n1 = h;
+                    if (n1 > gh) n1 = gh;
                     mg.nyLo = n0; mg.nyHi = n1;
                     mg.neckA = 0.0f; mg.neckB = 0.0f; mg.neckCy = 0.0f;
                 }
@@ -2674,7 +2729,7 @@ private:
             int ny0 = y1;
             int ny1 = (int)(cy + hh + f.h * g_neck.len);
             if (ny0 < 0) ny0 = 0;
-            if (ny1 > h) ny1 = h;
+            if (ny1 > gh) ny1 = gh;
             if (g_maskShape & 4) {
                 // 脖子：**逐行跟随肤色的实际边界**（3.1.20）。
                 //
@@ -2901,6 +2956,13 @@ private:
         bool ready = false;       // 输出槽有结果待取
         std::vector<unsigned char> frame;
         int w = 0, h = 0;
+        // 2.7.0（S4b）：这一份帧的像素系与实际几何系要不要分开。
+        // geomW/geomH 为 0 = 老路径（像素系 == 几何系，mapScale 不参与）。
+        // 缩略图帧下 w/h 是 640×640、geomW/geomH 是全帧，mapScale/ox/oy 是
+        // 宿主做 letterbox 时的三个参数（buildMaskInto 用它们反算）。
+        int geomW = 0, geomH = 0;
+        float mapScale = 0.0f;
+        int mapOx = 0, mapOy = 0;
         std::vector<unsigned char> mask;
         std::vector<unsigned char> protect;
         beautycore::RoiRect bounds;
@@ -2963,7 +3025,9 @@ private:
 
     // 把本帧交给 worker。worker 忙就直接放弃这一轮（下一个周期再说）——
     // 排队没有意义，掩码只需要最新的那份。
-    void submitAsync(const unsigned char* src, int w, int h) {
+    void submitAsync(const unsigned char* src, int w, int h,
+                     int geomW = 0, int geomH = 0, float mapScale = 0.0f,
+                     int mapOx = 0, int mapOy = 0) {
         {
             std::lock_guard<std::mutex> lk(async_.m);
             if (async_.hasJob || async_.working) return;
@@ -2971,6 +3035,11 @@ private:
                 async_.frame.resize((size_t)w * h * 4);
             async_.w = w;
             async_.h = h;
+            async_.geomW = geomW;
+            async_.geomH = geomH;
+            async_.mapScale = mapScale;
+            async_.mapOx = mapOx;
+            async_.mapOy = mapOy;
         }
         // 拷贝放在锁外：1080p 下这是一次 8MB memcpy（约 0.7ms），
         // 持锁做会把 worker 的收尾也堵住。
@@ -3048,6 +3117,8 @@ private:
         for (;;) {
             std::vector<unsigned char> mask, protect;
             int w = 0, h = 0;
+            int geomW = 0, geomH = 0, mapOx = 0, mapOy = 0;
+            float mapScale = 0.0f;
             {
                 std::unique_lock<std::mutex> lk(async_.m);
                 async_.cv.wait(lk, [this] { return async_.quit || async_.hasJob; });
@@ -3056,6 +3127,11 @@ private:
                 protect.swap(async_.protect);
                 w = async_.w;
                 h = async_.h;
+                geomW = async_.geomW;
+                geomH = async_.geomH;
+                mapScale = async_.mapScale;
+                mapOx = async_.mapOx;
+                mapOy = async_.mapOy;
                 async_.hasJob = false;
                 async_.working = true;
             }
@@ -3068,7 +3144,8 @@ private:
             std::string msg;
             const double t0 = nowMsCore();
             const bool ok = buildMaskInto(&async_.frame[0], w, h, mask, protect,
-                                          b, fbox, px, faces, msg, &dgcol);
+                                          b, fbox, px, faces, msg, &dgcol,
+                                          geomW, geomH, mapScale, mapOx, mapOy);
             inputSize = face_.inputSize();
             best = face_.lastBestScore();
             const double ms = nowMsCore() - t0;
@@ -3877,6 +3954,36 @@ void beautyCoreSetFrameTag(unsigned long long tag) { g_frameTag = tag; }
 void beautyCoreSetMaskGeomOnly(bool on) {
     const char *mgo = getenv("BEAUTY_MASK_GEOM_ONLY");
     g_maskGeomOnly = on && !(mgo && mgo[0] == '0');
+}
+
+// 2.7.0（S4b）：本帧的检测输入换成一 GPU 预缩放的缩略图。
+// 传 nullptr（或 tw/th/fullW/fullH 任一非正）即关闭，回到「用全帧 src」。
+// 每帧都要设：宿主在 render 里算完缩略图就设，帧末清掉 —— 绝不能跨帧残留，
+// 否则某帧回退全帧路径时引擎仍会去读上一帧的缩略图，几何直接错一帧。
+void beautyCoreSetThumbSource(const unsigned char *p, int tw, int th,
+                              int fullW, int fullH, float scale,
+                              int ox, int oy) {
+    if (!p || tw <= 0 || th <= 0 || fullW <= 0 || fullH <= 0 ||
+        !(scale > 0.0f)) {
+        beautyCoreClearThumbSource();
+        return;
+    }
+    g_thumbPx = p;
+    g_thumbW = tw;
+    g_thumbH = th;
+    g_thumbFullW = fullW;
+    g_thumbFullH = fullH;
+    g_thumbScale = scale;
+    g_thumbOx = ox;
+    g_thumbOy = oy;
+}
+
+void beautyCoreClearThumbSource() {
+    g_thumbPx = nullptr;
+    g_thumbW = g_thumbH = 0;
+    g_thumbFullW = g_thumbFullH = 0;
+    g_thumbScale = 0.0f;
+    g_thumbOx = g_thumbOy = 0;
 }
 
 // 皮肤判据快照（C20，只用于日志）。定义放在匿名命名空间外面 —— 否则外部

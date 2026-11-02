@@ -67,6 +67,9 @@ DLSPLIT_RE = re.compile(r"dlw=([\d.]+)\s+dlm=([\d.]+)")
 # 2.6.0 / S4a：本窗口内「只出几何、掩码由 GPU 重画」的帧数（gonly）与
 # 「geomOnly 但 GPU 建图失败 → 整帧跳过」的帧数（gskip）。gskip 正常应恒为 0。
 GONLY_RE = re.compile(r"gonly=(\d+)\s+gskip=(\d+)")
+# 2.7.0 / S4b：本窗口内走缩略图检测的帧数（tsm）、因认领不全而整帧跳过的帧数
+# （tskip）、缩略图「缩放 + 回读」的平均耗时（tdl，毫秒）。
+THUMB_RE = re.compile(r"tsm=(\d+)\s+tskip=(\d+)\s+tdl=([\d.]+)")
 
 SEG_KEYS = ["掩码", "磨皮", "色调", "五官", "细节", "美形"]
 
@@ -116,6 +119,7 @@ def parse_file(path):
                     ab = AB_RE.search(line)
                     ds = DLSPLIT_RE.search(line)
                     go = GONLY_RE.search(line)
+                    tb = THUMB_RE.search(line)
                     perf.append({
                         "res": "%sx%s" % (w, h),
                         "w": int(w), "h": int(h),
@@ -129,6 +133,9 @@ def parse_file(path):
                         "dlw": _f(ds, 1), "dlm": _f(ds, 2),
                         "gonly": int(go.group(1)) if go else None,
                         "gskip": int(go.group(2)) if go else None,
+                        "tsm": int(tb.group(1)) if tb else None,
+                        "tskip": int(tb.group(2)) if tb else None,
+                        "tdl": _f(tb, 3),
                     })
                     continue
 

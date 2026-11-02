@@ -409,6 +409,33 @@ struct beauty_filter {
 	uint32_t an_geomskip;
 	// S4a：本窗口内「只出几何、由 GPU 画掩码」的帧数。应 ≈ 窗口帧数（对比 gskip）。
 	uint32_t an_geomonly;
+	// ---- 2.7.0（S4b）：检测输入缩略图 -----------------------------------
+	// 检测要的只是「整帧等比压到 640×640」这一张，而现行办法是把**整帧**回读到
+	// CPU（4K 33 MB ≈ 2.5~3 ms）再用 letterboxRgb 缩一遍。这里改成 GPU 上缩、
+	// 只回读 1.6 MB —— 省下来的正是「下载」里那段 memcpy 及它占的队列时间。
+	//
+	// 前提只有一条：**上一帧全认领**（chain_out_valid —— flags 每一位都被钩子
+	// 拿下，CPU 侧一个字节都不需要）。这时 buf_in 可以整帧不更新。
+	// 本帧掉链子（认领不全）时没法补救：没有全帧像素，任何 CPU 段都跑不了，
+	// 只能整帧跳过（画面原样）并让下一帧回退全帧。这是缩略图模式的固有代价，
+	// 也是 an_thumbskip 要盯住的那个数。
+	bool detect_small;         // BEAUTY_DETECT_SMALL=0 回退全帧回读
+	gs_texrender_t *thumb_rt;  // S×S 检测缩略图（RGBA8，带 letterbox 黑边）
+	gs_stagesurf_t *thumb_stage;
+	uint32_t thumb_w, thumb_h; // = S（默认 640）
+	gs_color_format thumb_fmt;  // 与 in_tex 同格式（sRGB 对称，避免色偏）
+	unsigned char *thumb_buf;  // 回读目标（S*S*4 字节）
+	float thumb_scale;         // 与 letterboxRgb 同源的三个数（每帧算）
+	int thumb_ox, thumb_oy;
+	bool thumb_prev_ok;        // 上一帧 chain_out_valid → 本帧可以只回读缩略图
+	bool thumb_frame;          // 本帧真的走了缩略图路径（钩子据此拒绝上传旧帧）
+	uint32_t an_thumb;         // 走缩略图的帧数（窗口内）
+	uint32_t an_thumbskip;     // 走了缩略图、但本帧认领不全 → 整帧跳过
+	int thumb_dbg_done;        // 一次性判据快照是否已打
+	bool thumb_fail_logged;    // 构建失败只报一次（防刷屏）
+	bool thumb_skip_logged;    // 认领不全导致跳过的原因只报一次
+	bool thumb_dumped;         // BEAUTY_THUMB_DUMP：缩略图只落盘一次
+	double prof_dl_thumb;      // 缩略图「缩放 + 回读」耗时（窗口累加）
 	// 4d：五官椭圆族的 GPU 对拍（R1-lite，BEAUTY_REGION_CMP=1）
 	bool region_cmp;                 // 开关
 	bool region_reported;
@@ -648,6 +675,16 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		f->stage_async = (as && as[0] == '1') && f->gpu_ring_ok;
 		f->stage_submit = -1;
 	}
+	// S4b（2.7.0）：检测输入走 GPU 缩略图（默认开，`BEAUTY_DETECT_SMALL=0` 回退）。
+	// 与 S3 的 stage_async **互斥**：S3 让 CPU 侧晚一帧（引擎手上是 n−1 帧的像素），
+	// 而缩略图是按本帧 in_tex 缩的 —— 两个都开会把第 n 帧的掩码盖在第 n−1 帧上。
+	// 这里不强行关（那是 init 时的静态选择），render 里 want_thumb 直接要求
+	// !stage_async，两者同时设时缩略图让位（S3 的收益更大且已验证）。
+	{
+		const char *ds = getenv("BEAUTY_DETECT_SMALL");
+		f->detect_small = (!ds || ds[0] != '0') && f->gpu_mask_chain &&
+				  f->gpu_ring_ok;
+	}
 	// S4a（2.6.0）：告诉引擎「有 GPU 掩码链」—— 单脸时它就可以只算几何、
 	// 不画那张 4K 全帧 CPU 掩码（实测 `seg 掩码` 2.27~2.82 ms 的大头）。
 	// 必须在本处调用：gpu_mask_chain 要到 acquireSlot 之后才确定。
@@ -843,6 +880,13 @@ static void beauty_filter_destroy(void *data)
 		gs_stagesurface_destroy(f->stage);
 	if (f->stage_alt)
 		gs_stagesurface_destroy(f->stage_alt);
+	// S4b：检测缩略图三件套
+	if (f->thumb_rt)
+		gs_texrender_destroy(f->thumb_rt);
+	if (f->thumb_stage)
+		gs_stagesurface_destroy(f->thumb_stage);
+	if (f->thumb_buf)
+		bfree(f->thumb_buf);
 	if (f->tr)
 		gs_texrender_destroy(f->tr);
 	free(f->buf_in);
@@ -3775,6 +3819,30 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	gs_texture_t *ring = NULL;
 	if (gpu_mask_ok && f->gpu_ring_ok)
 		ring = beauty_ring_get(f, job.srcTag);
+	/* S4b：缩略图帧的 job.src 是**上一帧的旧像素**（本帧没有回读全帧）。
+	 * 环没命中时绝不能落到 beauty_hook_prepare 的「从 job.src 上传」那条路 ——
+	 * 那会把上一帧的画面送进链，动态场景直接错帧。整帧不认领，让宿主跳过。 */
+	if (f->thumb_frame && !ring) {
+		f->an_thumbskip++;
+		if (!f->thumb_skip_logged) {
+			f->thumb_skip_logged = true;
+			blog(LOG_WARNING,
+			     "[" PLUGIN_NAME "] 缩略图帧在帧环里找不到 tag=%llu "
+			     "的纹理 → 本帧跳过｜环=%llu/%llu/%llu "
+			     "frame_tag=%llu gpu_mask_ok=%d geom_only=%d "
+			     "count=%d shape=%d fresh=%d maskGeomOnly=%d "
+			     "mask=%p",
+			     (unsigned long long)job.srcTag,
+			     (unsigned long long)f->ring_tag[0],
+			     (unsigned long long)f->ring_tag[1],
+			     (unsigned long long)f->ring_tag[2],
+			     (unsigned long long)f->frame_tag,
+			     gpu_mask_ok ? 1 : 0, geom_only ? 1 : 0, mg.count,
+			     (int)mg.shape, (int)mg.fresh,
+			     job.maskGeomOnly ? 1 : 0, (const void *)job.mask);
+		}
+		return 0;
+	}
 
 	gs_texture_t *in = ring ? ring
 			       : beauty_hook_prepare(f, job.src, job.w, job.h,
@@ -4682,6 +4750,163 @@ static bool beauty_stage_readback(struct beauty_filter *f, gs_stagesurf_t *st,
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// S4b（2.7.0）：GPU 侧 letterbox 缩略图
+// ---------------------------------------------------------------------------
+// 要产出的是**与 FaceDetector::letterboxRgb 同源**的一张 S×S 缩略图。三个参数
+// 必须照抄那个函数的算式，因为引擎反算 full=(t-ox)/scale 就是它的逆：
+//     scale = min(S/w, S/h)
+//     nw    = (int)(w*scale + 0.5f)     nh = (int)(h*scale + 0.5f)
+//     ox    = (S-nw)/2                  oy = (S-nh)/2
+// 这里差 1 像素，到全帧上就是 1/scale（4K 下 6 像素）的整体偏移 —— 所以
+// 这四个数**算完要回传给引擎**，不能让它自己猜。
+//
+// 采样用 OBS 内置 default effect（Linear + Clamp），与 CPU 的双线性同一族；
+// 唯一的差异是 GPU 在（sRGB 格式下）线性空间插值、CPU 在 sRGB 空间插值，
+// 表现为高对比边缘上的几个灰阶 —— 对检测是噪声级，验收时按「人脸框差 ≤1 px
+// 缩略图尺度」判，不按逐像素相等判。
+//
+// 检测输入边长固定 640：YuNet 模型把输入声明成固定 640×640（见 beauty_core.cpp
+// 的 kFaceInputDefault），换别的尺寸 ORT 直接拒绝，所以这里不暴露配置。
+static const uint32_t kThumbSide = 640;
+
+static bool beauty_ensure_thumb(struct beauty_filter *f, uint32_t side,
+				gs_color_format fmt)
+{
+	if (f->thumb_rt && f->thumb_stage && f->thumb_buf &&
+	    f->thumb_w == side && f->thumb_h == side && f->thumb_fmt == fmt)
+		return true;
+	if (f->thumb_rt) {
+		gs_texrender_destroy(f->thumb_rt);
+		f->thumb_rt = NULL;
+	}
+	if (f->thumb_stage) {
+		gs_stagesurface_destroy(f->thumb_stage);
+		f->thumb_stage = NULL;
+	}
+	if (f->thumb_buf) {
+		bfree(f->thumb_buf);
+		f->thumb_buf = NULL;
+	}
+	f->thumb_rt = gs_texrender_create(fmt, GS_ZS_NONE);
+	f->thumb_stage = gs_stagesurface_create(side, side, fmt);
+	f->thumb_buf = (unsigned char *)bzalloc((size_t)side * side * 4);
+	f->thumb_w = f->thumb_h = side;
+	f->thumb_fmt = fmt;
+	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_buf) {
+		blog(LOG_WARNING,
+		     "[" PLUGIN_NAME "] 检测缩略图资源不可用：本帧回退全帧回读"
+		     "（不影响画面，只是慢一点）");
+		return false;
+	}
+	return true;
+}
+
+// 把 src 等比缩到 S×S（居中黑边），再回读到 f->thumb_buf。
+// 成功时 f->thumb_scale / thumb_ox / thumb_oy 就是引擎需要的映射参数。
+static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
+			       uint32_t cx, uint32_t cy)
+{
+	// 失败原因只报一次：这条路每帧都会试一次，不收敛的理由会刷屏。
+	auto fail = [](const char *why) {
+		static bool once = false;
+		if (!once) {
+			once = true;
+			blog(LOG_WARNING, "[" PLUGIN_NAME "] 缩略图不可用：%s", why);
+		}
+		return false;
+	};
+	if (!src || !cx || !cy)
+		return fail("no src");
+	const uint32_t S = kThumbSide;
+	const gs_color_format fmt = gs_texture_get_color_format(src);
+	// 只支持 32-bit 单像素格式（RGBA8 / BGRA8 及其 sRGB 变体）：
+	// 16F/32F 回读出来是浮点，而引擎侧按 8-bit RGBA 读。
+	// ⚠ gs_get_format_bpp 返回的是**位**不是字节（GS_RGBA = 32）。
+	if (gs_get_format_bpp(fmt) != 32)
+		return fail("format bpp != 32");
+	if (!beauty_ensure_thumb(f, S, fmt))
+		return fail("ensure resources");
+
+	const float scale = fminf((float)S / (float)cx, (float)S / (float)cy);
+	const int nw = (int)((float)cx * scale + 0.5f);
+	const int nh = (int)((float)cy * scale + 0.5f);
+	if (nw <= 0 || nh <= 0 || nw > (int)S || nh > (int)S)
+		return fail("bad letterbox rect");
+	const int ox = ((int)S - nw) / 2;
+	const int oy = ((int)S - nh) / 2;
+
+	gs_effect_t *fx = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_technique_t *tech = fx ? gs_effect_get_technique(fx, "Draw") : NULL;
+	if (!tech)
+		return fail("default effect Draw technique missing");
+
+	const double t0 = f->prof_on ? beauty_now_ms() : 0.0;
+	// smooth_rt_begin 会把整张 S×S 清成黑 —— letterbox 的黑边就是这一步来的，
+	// 不要另外再画一个黑底（多一趟 draw 没意义）。
+	if (!smooth_rt_begin(f->thumb_rt, S, S))
+		return fail("texrender begin");
+	gs_viewport_push();
+	gs_set_viewport(ox, oy, nw, nh);
+	gs_ortho(0.0f, (float)nw, 0.0f, (float)nh, -100.0f, 100.0f);
+	gs_eparam_t *img = gs_effect_get_param_by_name(fx, "image");
+	if (img)
+		gs_effect_set_texture(img, src);
+	// 与 smooth_draw 同一形态：手动跑一个 technique，不用 gs_effect_loop
+	// （外层可能已有 active technique，loop 会直接退出）。
+	const size_t passes = gs_technique_begin(tech);
+	for (size_t i = 0; i < passes; i++) {
+		gs_technique_begin_pass(tech, i);
+		gs_draw_sprite(src, 0, (uint32_t)nw, (uint32_t)nh);
+		gs_technique_end_pass(tech);
+	}
+	gs_technique_end(tech);
+	gs_viewport_pop();
+	smooth_rt_end(f->thumb_rt);
+
+	gs_texture_t *tex = gs_texrender_get_texture(f->thumb_rt);
+	if (!tex)
+		return fail("texrender texture null");
+	gs_stage_texture(f->thumb_stage, tex);
+	uint8_t *ptr = NULL;
+	uint32_t linesize = 0;
+	if (!gs_stagesurface_map(f->thumb_stage, &ptr, &linesize) || !ptr)
+		return fail("stage map");
+	const size_t row = (size_t)S * 4;
+	if (linesize == row) {
+		memcpy(f->thumb_buf, ptr, row * S);
+	} else {
+		for (uint32_t y = 0; y < S; y++)
+			memcpy(f->thumb_buf + (size_t)y * row,
+			       ptr + (size_t)y * linesize, row);
+	}
+	gs_stagesurface_unmap(f->thumb_stage);
+	/* 取证用：BEAUTY_THUMB_DUMP=1 时把这张缩略图原样落盘一份（RGBA 裸数据）。
+	 * 缩略图一旦有翻转 / 通道错 / 黑边偏移，检测会检出一堆假脸，但日志只报个
+	 * 数字 —— 只有把图拿出来看才能一次定位。 */
+	if (!f->thumb_dumped && getenv("BEAUTY_THUMB_DUMP")) {
+		f->thumb_dumped = true;
+		// 路径必须是纯 ASCII：fopen 走 ANSI 代码页，中文目录在这里直接失败。
+		FILE *fp = fopen("C:/Users/Administrator/AppData/Local/Temp/thumb_dump.rgba",
+				 "wb");
+		if (fp) {
+			fwrite(f->thumb_buf, 1, row * S, fp);
+			fclose(fp);
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 缩略图已 dump：%ux%u scale=%.4f "
+			     "ox=%d oy=%d（源 %ux%u）",
+			     S, S, scale, ox, oy, cx, cy);
+		}
+	}
+	if (f->prof_on)
+		f->prof_dl_thumb += beauty_now_ms() - t0;
+
+	f->thumb_scale = scale;
+	f->thumb_ox = ox;
+	f->thumb_oy = oy;
+	return true;
+}
+
 static void beauty_filter_render(void *data, gs_effect_t *effect)
 {
 	struct beauty_filter *f = (struct beauty_filter *)data;
@@ -4794,6 +5019,9 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		// S3：只有开着异步回读才建第二张面（4K 33 MB），并让 ping-pong 从
 		// 「没有上一帧」的干净状态开始；尺寸一变，旧面里的内容一定不能再用。
 		f->stage_submit = -1;
+		// S4b：分辨率变了，上一帧的「全认领」判断不能再沿用（掩码几何、缩略图
+		// 映射全按旧尺寸算的），第一帧老实回读全帧。
+		f->thumb_prev_ok = false;
 		if (f->tr)
 			gs_texrender_destroy(f->tr);
 		f->tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
@@ -4932,6 +5160,70 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	if (!passthrough) {
 	bool got = false;
 	const double t_dl = f->prof_on ? beauty_now_ms() : 0.0;
+	/* S4b（2.7.0）：只回读缩略图这条路。四个条件缺一不可：
+	 *   · detect_small   —— 开关（BEAUTY_DETECT_SMALL=0 回退全帧）
+	 *   · gpu_mask_chain —— 掩码由 GPU 按几何重画，否则掩码就是 CPU 全帧画的，
+	 *                       那些像素只存在于 buf_in 里，缩略图顶不上
+	 *   · thumb_prev_ok  —— **上一帧全认领**。这是唯一的预测依据：本帧的 flags
+	 *                       要等 process() 内部钩子跑完才知道，而回读发生在那之前
+	 *   · !stage_async   —— S3 的延迟路径下引擎手上是 n−1 帧，而缩略图来自本帧，
+	 *                       两者错一帧；两个 opt-in 开关互斥，见 9.5.3
+	 * f->verified 是自检已完成（缩略图模式下 buf_in 是旧的，自检不能跑）。 */
+	/* S4b：上一轮检测必须是**单脸**。缩略图模式下没有全帧像素，多脸时引擎
+	 * 画不出那张跨脸的全帧掩码（buildMaskInto 直接返回 false）。不预判的话
+	 * 就会「试一帧 → 跳过 → 回退全帧 → 再试」，画面每两帧掉一帧。 */
+	int mkpx0 = -1, mkfaces0 = 0;
+	beautyCoreMaskStat(&mkpx0, &mkfaces0);
+	const bool want_thumb = f->detect_small && f->gpu_mask_chain &&
+				f->gpu_ring_ok && f->thumb_prev_ok &&
+				!f->stage_async && !f->mirror && f->verified &&
+				mkfaces0 == 1;
+	f->thumb_frame = false;
+	// S4b 一次性判据快照：缩略图路径「为什么会/不会生效」只看这一行。
+	if (!f->thumb_dbg_done && f->verified) {
+		f->thumb_dbg_done = 1;
+		blog(LOG_INFO,
+		     "[" PLUGIN_NAME "] S4b 判据：detect_small=%d mask_chain=%d "
+		     "ring=%d prev_full=%d async=%d mirror=%d verified=%d",
+		     f->detect_small ? 1 : 0, f->gpu_mask_chain ? 1 : 0,
+		     f->gpu_ring_ok ? 1 : 0, f->thumb_prev_ok ? 1 : 0,
+		     f->stage_async ? 1 : 0, f->mirror ? 1 : 0,
+		     f->verified ? 1 : 0);
+	}
+	if (want_thumb && beauty_thumb_build(f, in_tex, cx, cy)) {
+		got = true;
+		f->thumb_frame = true;
+		f->an_thumb++;
+		/* S4b1（2.7.1）：缩略图帧必须在 **process 之前**进显存环 ——
+		 * 这是 2.7.0 那次 20 min 长跑里 tskip 的真正成因，不是抖动。
+		 *
+		 * 引擎给宿主的取帧帧号默认是**当前帧**（beauty_core.cpp：
+		 * `srcTagThisFrame = curTag`），只有「掩码刚到」的那一帧才改成
+		 * heldTag_（上一帧）。而掩码晚到（worker 没跟上）的帧上
+		 * srcTag 就等于 curTag，同时 S4a 的放宽让 maskGeomOnly 顶过新鲜度
+		 * 检查、gpu_mask_ok 仍为真 —— 于是钩子在 process 内部去环里取
+		 * **当前帧**的纹理。2.7.0 把进环留在 process 之后，这一帧必然取不到，
+		 * 落进「找不到纹理 → 整帧跳过」，跳过又把 thumb_prev_ok 置假，
+		 * 下一帧再赔一次全帧回读。实测 tick=198 的窗口丢 18 帧（9%）。
+		 *
+		 * 挪到前面之后，这类帧与全帧路径**语义完全等价**：当前帧画面 +
+		 * 上一帧几何，不跳、不拖影。拷贝总数不变 —— 原来「提交了新检测才
+		 * 拷」，默认 maskEveryAsync=0 是每帧都提交，缩略图帧本来就每帧拷
+		 * 一次，这里只是把顺序提前（ring_always 那档已在上面无条件拷过）。
+		 * ⚠ frame_tag 要到下面「5b-2 切片 4」才 ++，此刻用 +1 预取本帧帧号；
+		 * 缩略图路径要求 !stage_async，所以 cpu_tag 一定等于 frame_tag。 */
+		if (f->gpu_ring_ok && !f->ring_always &&
+		    beauty_ensure_ring(f, gs_texture_get_width(in_tex),
+				       gs_texture_get_height(in_tex),
+				       gs_texture_get_color_format(in_tex)))
+			beauty_ring_put(f, f->frame_tag + 1, in_tex);
+	} else {
+		if (want_thumb && !f->thumb_fail_logged) {
+			f->thumb_fail_logged = true;
+			blog(LOG_WARNING,
+			     "[" PLUGIN_NAME "] 缩略图构建失败：本帧回退全帧回读"
+			     "（画面正确，只是没省到那 2~3 ms）");
+		}
 	/* S3：上一帧的暂存面在上一次 render 里就已提交，到这一刻那趟拷贝早已完成，
 	 * 先 map 它几乎不等待；映射成功后再把本帧提交到**另一张**面。
 	 * 顺序不能倒：gs_stagesurface_map 会排空命令队列 —— 先提交本帧的话，等到
@@ -4955,6 +5247,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		got = beauty_stage_readback(f, f->stage, cx, cy);
 		f->stage_submit = (f->stage_async && f->stage_alt) ? 0 : -1;
 	}
+	}   // end S4b：走缩略图时不碰 f->stage
 
 	/* 回读失败就直接直通，**不要**再喂一个上一帧的旧 buf_in 给引擎：
 	 * 既有画面正确性问题（引擎会照着旧帧做人脸跟踪），也白白浪费一次
@@ -4979,6 +5272,16 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	 * 环取出来的纹理与掩码错位一帧（动态画面直接变拖影）。 */
 	cpu_tag = cpu_delayed ? f->frame_tag - 1 : f->frame_tag;
 	beautyCoreSetFrameTag(cpu_tag);
+	/* S4b：把本帧的缩略图交给引擎 —— 像素来自 GPU 缩略图，几何仍是全帧。
+	 * 必须在 process() 之前设、之后立刻清：任何一帧「忘了清」都会让下一帧
+	 * 回退全帧时仍去读上一帧的缩略图，几何直接错一帧（4K 下 ≈6 px）。 */
+	if (f->thumb_frame)
+		beautyCoreSetThumbSource(f->thumb_buf, (int)f->thumb_w,
+					 (int)f->thumb_h, (int)cx, (int)cy,
+					 f->thumb_scale, f->thumb_ox,
+					 f->thumb_oy);
+	else
+		beautyCoreClearThumbSource();
 	ring_sub0 = beautyCoreMaskSubmits();
 	// 回退路径（BEAUTY_RING_ALWAYS=1）：保持 2.4.0 的老顺序，process 前无条件拷。
 	if (f->ring_always && f->gpu_ring_ok &&
@@ -5002,6 +5305,10 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		 * （画面直接跳回几秒前），帧号也会跟着错一帧。下一帧走同步路径
 		 * 重新起步，代价仅一帧。 */
 		f->stage_submit = -1;
+		/* S4b：直通期间环的 tag 被清空，恢复的第一帧必然取不到纹理。这里同时
+		 * 把「上一帧全认领」作废，让恢复后的第一帧先老实回读一次全帧、把环
+		 * 重新填满 —— 否则那一帧会因为 ring 落空而整帧跳过（白丢一帧）。 */
+		f->thumb_prev_ok = false;
 	}
 
 	/* S3：CPU 侧晚一帧时，链要画的必须是**引擎手上那一帧**的纹理，也就是环里
@@ -5046,6 +5353,32 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			return;
 		}
 		f->err_reported = false;
+		// S4b：缩略图的生命周期只到 process() 为止（异步路径已在 submitAsync
+		// 里 memcpy 进输入槽）。留着不清会让下一次回退全帧的帧读错几何。
+		beautyCoreClearThumbSource();
+		/* S4b：走了缩略图，但本帧 flags 没被全部认领 —— 有 CPU 段要跑，而
+		 * buf_in 里是上一帧的旧像素（本帧根本没回读全帧）。这时不能上传、
+		 * 也不能画 buf_out 里的半成品：整帧跳过，画面原样。下一帧
+		 * thumb_prev_ok 自动为假 → 回退全帧回读，代价只有这一帧。 */
+		if (f->thumb_frame && !f->chain_out_valid) {
+			f->an_thumbskip++;
+			if (!f->thumb_skip_logged) {
+				f->thumb_skip_logged = true;
+				blog(LOG_WARNING,
+				     "[" PLUGIN_NAME "] 缩略图帧没被全认领："
+				     "chain_claim=0x%x chain_out=%d → 本帧跳过",
+				     f->chain_claim, f->chain_out ? 1 : 0);
+			}
+			/* 必须在这里作废「上一帧全认领」：本帧一条 CPU 段都没认领成功，
+			 * 说明缩略图这条路当前不可用（典型是多脸）。不作废的话下一帧
+			 * 还会照样只回读缩略图、再跳一次 —— 画面每两帧掉一帧。 */
+			f->thumb_prev_ok = false;
+			obs_source_skip_video_filter(f->context);
+			return;
+		}
+		/* S4b：下一帧能不能只回读缩略图，取决于**本帧**是否被全部认领。
+		 * 放在这里是因为 chain_out_valid 到此已经定稿（钩子写、process 后不再变）。 */
+		f->thumb_prev_ok = f->chain_out_valid;
 		// 细节段这一帧没跑在 GPU 上（面板没开锐化 / 回退 CPU）→ 显存里的
 		// 亮度历史已经落后，下一帧必须用当前帧重置。漏了这一步，回退那一帧
 		// 之后的画面会带着几帧前的亮度做 EMA，表现为细纹理轻微「拖影」。
@@ -5188,7 +5521,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	// 于是每帧都必须留一份（按需优化在这里退化为「全部需要」）。这一趟
 	// 拷贝是排进 GPU 队列的，宿主不会等它（下一帧 map 时它早已完成），
 	// 所以它不体现在往返里；换来的是上面省掉的 map 排队等待。
-	if (!passthrough && f->gpu_ring_ok && !f->ring_always &&
+	if (!passthrough && f->gpu_ring_ok && !f->ring_always && !f->thumb_frame &&
 	    (f->stage_async || beautyCoreMaskSubmits() != ring_sub0)) {
 		if (beauty_ensure_ring(f, gs_texture_get_width(in_tex),
 				       gs_texture_get_height(in_tex),
@@ -5265,7 +5598,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     " 对齐 %llu/%llu（%.0f%%）边框 %s ab=%s"
 			     " tick=%llu/%llu dup=%d"
 			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u"
-			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u",
+			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u tsm=%u tskip=%u tdl=%.2f",
 			     cx, cy, dl, pr, up, dl + pr + up, f->prof_frames,
 			     f->prof_cover * 100.0 / n,
 			     (double)f->prof_face_frames * 100.0 / n,
@@ -5276,11 +5609,14 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     f->an_nofresh, f->an_masknull, f->an_histrst,
 			     f->an_claimdrop,
 			     f->prof_dl_wait / n, f->prof_dl_copy / n,
-			     f->an_geomonly, f->an_geomskip);
+			     f->an_geomonly, f->an_geomskip,
+			     f->an_thumb, f->an_thumbskip, f->prof_dl_thumb / n);
 			// 打印完清零，下一窗口重新统计
 			f->an_nofresh = f->an_masknull = 0;
 			f->an_histrst = f->an_claimdrop = 0;
 			f->an_geomonly = f->an_geomskip = 0;
+			f->an_thumb = f->an_thumbskip = 0;
+			f->prof_dl_thumb = 0.0;
 
 			// 分项单独一行：把它和总耗时写在同一行会让本来就长的性能行更难读，
 			// 而这两行是配套看的（差值应该很小，否则说明埋点位置错位）。

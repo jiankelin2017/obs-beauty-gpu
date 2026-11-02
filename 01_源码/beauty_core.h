@@ -596,6 +596,32 @@ void beautyCoreSetFrameTag(unsigned long long tag);
 // 否则该帧没有任何掩码可用 —— 引擎不做这种假设，只在条件满足时置 1。
 void beautyCoreSetMaskGeomOnly(bool on);
 
+// ---- 2.7.0（S4b）：检测输入换成 GPU 预缩放的缩略图 -------------------------
+//
+// 为什么：检测真正需要的只是「整帧等比压到 640×640」这一张缩略图，而拿到它的
+// 现行办法是把**整帧**回读到 CPU（4K 33 MB ≈ 2.5~3 ms）再用 letterboxRgb 缩一遍。
+// 宿主在 GPU 上做同样的缩放只需排一趟很小的 draw，回读 1.6 MB —— 这一进一出
+// 就是 S4b 的全部收益。
+//
+// 契约（三个参数族必须自洽，否则几何会系统性偏移）：
+//   · p / tw / th   缩略图像素（RGBA8，stride = tw*4）。生命周期只需覆盖本次
+//                   process()：同步路径当场用完；异步路径内部立刻 memcpy 进输入槽
+//                   （所以宿主下一帧覆盖这块内存是安全的）。
+//   · fullW / fullH 几何坐标系 = 全帧尺寸。掩码几何、五官椭圆、羽化全在这个系里。
+//   · scale / ox / oy  宿主做 letterbox 时真正用的那三个数，必须与
+//                   FaceDetector 内部的 letterboxRgb 同一套算法
+//                   （scale=min(S/w,S/h)、ox=(S-nw)/2、oy=(S-nh)/2），
+//                   因为引擎反算 full=(t-ox)/scale 是它的逆。
+//
+// 传 nullptr 或任一非正参数 = 关闭，行为回到「用全帧 src」，与 2.6.0 逐字节相同。
+// ⚠ 每帧都要重设：渲染线程在帧末必须调 beautyCoreClearThumbSource()，否则回退
+// 全帧路径的帧仍会去读上一帧的缩略图。
+// ⚠ 缩略图模式强制走 geomOnly（没有全帧像素可画 CPU 掩码）：多脸 / shape 带 bit2
+// 时 buildMaskInto 直接返回 false，宿主必须整帧跳过并回退全帧 —— 不能当「全皮肤」。
+void beautyCoreSetThumbSource(const unsigned char* p, int tw, int th,
+                              int fullW, int fullH, float scale, int ox, int oy);
+void beautyCoreClearThumbSource();
+
 // 段区间钩子探针：hits/calls 语义同上（calls 只在磨皮段真的到位时涨），
 // segCounts 是五段的累计认领帧数，索引与 BEAUTY_SEG_* 的位序一致
 // （0 磨皮 / 1 色调 / 2 五官 / 3 细节 / 4 美形）。用于日志确认「到底谁在跑 GPU」。

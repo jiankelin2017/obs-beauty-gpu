@@ -247,7 +247,22 @@ def main():
             f_cv = (dcv <= 1.0) if cv_cmp else True
             gskip = r.get("gskip") or 0
             f_gs = (gskip == 0)
-            verdict = ("PASS" if (f_tr and f_pr and f_hd and f_cv and f_gs)
+            # 2.7.0（S4b）：走了缩略图、但本帧 flags 没被全认领 → 整帧跳过（画面原样）。
+            # ⚠ 一帧跳过会被记**两次** —— 钩子（环里取不到纹理，obs-beauty.cpp:3826）
+            #   记一次，宿主（process 后 chain_out_valid=0，:5353）又记一次。
+            #   所以 tskip=2 只代表 1 帧。而跳过帧不进 prof_frames，窗口要靠多渲染
+            #   几帧才凑够 180 —— 2.7.0 里「tick>180」与「tskip>0」因此是同义的
+            #   （实测 tskip = 2×(tick−180)，最大一窗 tick=198 → 丢 18 帧 / 9%）。
+            # 2.7.1（S4b1）把缩略图帧进环提前到 process 之前，绝大多数这类帧退化成
+            #   「与全帧路径同一行为」（tsm 少一两帧，不跳）。**但没有归零**：
+            #   4K 20 min / 200 窗口实测 43 窗仍有 tskip=2（每窗 1 帧，合计
+            #   50/36000 = 0.14%）。真因是检测滞后到 3 帧时 3 槽环不够深
+            #   （tag=4947 而 frame_tag=4950，mod 3 同槽被挤掉），已决定接受。
+            # 阈值 3（≈1.5 帧 / 180 帧窗口）保留为抖动哨兵：每窗 1 帧算正常，
+            #   一窗跳到 2 帧以上说明环/认领又出问题了。
+            tskip = r.get("tskip") or 0
+            f_ts = (tskip <= 3)
+            verdict = ("PASS" if (f_tr and f_pr and f_hd and f_cv and f_gs and f_ts)
                        else "FAIL")
             if verdict == "FAIL":
                 ok = False
@@ -262,6 +277,8 @@ def main():
                 tags += "（掩码占比偏 %.2f pp）" % dcv
             if not f_gs:
                 tags += "（gskip %d 帧整帧跳过）" % gskip
+            if not f_ts:
+                tags += "（tskip %d 次 ≈ %d 帧整帧跳过）" % (tskip, tskip // 2)
             print("  %-9s %9s %9s %8s %9s %8s %8s  %s%s" % (
                 r["res"], fmt(r["tr"]), fmt(btr), fmt(dtr),
                 fmt(r["pr"]), fmt(dpr), fmt(etol), verdict, tags))
