@@ -99,9 +99,11 @@ OBS美颜GPU版/
 ├─ 04_文档/             # 当前在用文档 4 份（计划书、测量规程、5b-2 设计、五官设计）
 ├─ 05_验证/             # 日志解析、着色器编译门禁（7 支）、4K 缩放比推算、工程验收
 │                        # verify_s1_correct.py（S1 像素对拍）、soak_s2.py（S2 长跑/切换/热重载）
-│                       # 性能门禁 gate.py；正确性验收 obsctl.py + make_static_collection.py
+│                       # 性能门禁 gate.py；配对 A/B 取收益证据 ab_pair.py
+│                       # 正确性验收 obsctl.py + make_static_collection.py
 │                       # + verify_s1_correct.py（obs-websocket 取真实输出帧、逐像素对拍、
 │                       # 开关抖动、4K 目视；产物在 out/，基线 dll 在 baseline/）
+│                       # S3b 拖影素材 make_motion_assets.py（逐帧匀速移脸的 mp4 + 位置真值）
 ├─ 06_离线验证/          # 不启动 OBS 的 CPU 引擎回归台（core_probe.dll + 4 条黄金基准 + yunet 模型）
 ├─ 07_安装包/            # 独立安装包（Setup.exe + build_setup.ps1 + 待打包的 DLL/着色器副本）
 ├─ README.md            # 项目入口（本文件）
