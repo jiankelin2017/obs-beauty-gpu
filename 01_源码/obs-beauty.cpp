@@ -45,7 +45,9 @@
 #define PLUGIN_VERSION BEAUTY_BUILD_STR
 // 5b-2 切片 4：显存帧环槽数（见 beauty_ensure_ring 的注释）。
 // 放在文件顶部是因为析构函数里也要按它遍历，而析构在环的实现之前。
-#define BEAUTY_RING_SLOTS 2
+// S3（2.5.0）：2 → 3。异步回读让 CPU 侧整体晚一帧，引擎的 heldTag_ 可能落后
+// 两帧；两槽时那一格刚被「本帧」覆盖，环取不到 → 白回退成整帧上传。
+#define BEAUTY_RING_SLOTS 3
 
 // source id。**永远不要改** —— 场景文件里存的就是这个字符串。
 // 3.1.21 起不再注册「旧 id 别名」，留两个 id 只会让滤镜列表出现两个条目；
@@ -176,6 +178,8 @@ struct beauty_filter {
 	bool prof_on;
 	int prof_frames;
 	double prof_dl;    // 累计下载耗时 ms
+	double prof_dl_wait;  // 其中：排队等 map 返回（2.4.2 起的取证拆项）
+	double prof_dl_copy;  // 其中：memcpy 整帧（省不掉的那部分）
 	double prof_proc;  // 累计引擎耗时 ms
 	double prof_up;    // 累计上传+绘制耗时 ms
 	// 3.1.47：引擎内部分项（掩码/磨皮/色调/五官/细节/美形），窗口累加。
@@ -427,6 +431,17 @@ struct beauty_filter {
 	unsigned long long frame_tag;  // 宿主帧号（单调自增）
 	gs_color_format ring_fmt;
 	uint32_t ring_w, ring_h;
+	// S3（Q3）：暂存面双缓冲回读。上一帧的暂存面在上一次 render 里就提交了，
+	// 到本帧 map 时那趟拷贝早已完成 —— 先读它（几乎不等 GPU），再把本帧提交到
+	// 另一张面。代价是 CPU 这一侧整体晚一帧：引擎在第 n 帧拿到的是第 n−1 帧的
+	// 像素，所以送给引擎的帧号是 frame_tag−1，画的也必须是同一帧（取自帧环），
+	// 否则「掩码对应 n−1、画面是 n」会直接变成拖影。
+	// 只在 gpu_ring_ok 时开：没有环就拿不到 n−1 的纹理，只能退回整帧上传，
+	// 那比同步路径更慢。回退开关 BEAUTY_ASYNC_STAGE=0。
+	bool stage_async;           // BEAUTY_ASYNC_STAGE=1 且 gpu_ring_ok
+	gs_stagesurf_t *stage_alt;  // ping-pong 的另一半
+	int stage_submit;           // 上一次提交到哪张：0=f->stage 1=stage_alt -1=无
+	bool async_logged;          // 首次生效打一行日志
 	int  mask_wait;            // 已跳过多少帧（等脸 / 等多脸消失）
 };
 
@@ -620,6 +635,13 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		// CPU 上传那一帧（慢几毫秒），不会画错。
 		const char *ra = getenv("BEAUTY_RING_ALWAYS");
 		f->ring_always = (ra && ra[0] == '1');
+		// S3（Q3）：暂存面双缓冲回读。默认**关**（opt-in），等验收通过再翻默认。
+		// 只认 '1' 开启：拼错开关留在同步路径上（已验证的安全侧）。
+		// 绑定 gpu_ring_ok：异步回读把 CPU 侧整体推迟一帧，链要画的是**上一帧**，
+		// 那一帧的纹理只能从环里取；没有环就无法保证「掩码与画面同源」。
+		const char *as = getenv("BEAUTY_ASYNC_STAGE");
+		f->stage_async = (as && as[0] == '1') && f->gpu_ring_ok;
+		f->stage_submit = -1;
 	}
 	// 4d：五官椭圆对拍（纯诊断，一次性，默认关）
 	{
@@ -809,6 +831,8 @@ static void beauty_filter_destroy(void *data)
 		gs_texture_destroy(f->out_tex);
 	if (f->stage)
 		gs_stagesurface_destroy(f->stage);
+	if (f->stage_alt)
+		gs_stagesurface_destroy(f->stage_alt);
 	if (f->tr)
 		gs_texrender_destroy(f->tr);
 	free(f->buf_in);
@@ -4583,6 +4607,39 @@ struct beauty_projection_guard {
 	beauty_projection_guard &operator=(const beauty_projection_guard &) = delete;
 };
 
+// ---------------------------------------------------------------------------
+// S3（Q3）：单张暂存面的「map → memcpy → unmap」
+// ---------------------------------------------------------------------------
+// 抽出来是因为双缓冲回读要在**两张面**上轮流跑同一段逻辑（上一次提交的那张、
+// 本帧新提交的那张）。顺带保住 2.4.2 起的两段计时：等待段（排队等 GPU 把
+// 那趟拷贝做完）与拷贝段（memcpy 整帧，省不掉）。
+// 失败返回 false —— 调用方必须当作「本帧没有新画面」处理，绝不能拿旧 buf_in 顶替。
+static bool beauty_stage_readback(struct beauty_filter *f, gs_stagesurf_t *st,
+				  uint32_t cx, uint32_t cy)
+{
+	if (!st)
+		return false;
+	uint8_t *ptr = NULL;
+	uint32_t linesize = 0;
+	const double t_map = f->prof_on ? beauty_now_ms() : 0.0;
+	if (!gs_stagesurface_map(st, &ptr, &linesize) || !ptr)
+		return false;
+	if (f->prof_on)
+		f->prof_dl_wait += beauty_now_ms() - t_map;
+	const double t_cp = f->prof_on ? beauty_now_ms() : 0.0;
+	const size_t row = (size_t)cx * 4;
+	if (linesize == row) {
+		memcpy(f->buf_in, ptr, row * cy);
+	} else {
+		for (uint32_t y = 0; y < cy; y++)
+			memcpy(f->buf_in + (size_t)y * row, ptr + (size_t)y * linesize, row);
+	}
+	if (f->prof_on)
+		f->prof_dl_copy += beauty_now_ms() - t_cp;
+	gs_stagesurface_unmap(st);
+	return true;
+}
+
 static void beauty_filter_render(void *data, gs_effect_t *effect)
 {
 	struct beauty_filter *f = (struct beauty_filter *)data;
@@ -4688,10 +4745,19 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			gs_stagesurface_destroy(f->stage);
 			f->stage = NULL;
 		}
+		if (f->stage_alt) {
+			gs_stagesurface_destroy(f->stage_alt);
+			f->stage_alt = NULL;
+		}
+		// S3：只有开着异步回读才建第二张面（4K 33 MB），并让 ping-pong 从
+		// 「没有上一帧」的干净状态开始；尺寸一变，旧面里的内容一定不能再用。
+		f->stage_submit = -1;
 		if (f->tr)
 			gs_texrender_destroy(f->tr);
 		f->tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 		f->stage = gs_stagesurface_create(cx, cy, GS_RGBA);
+		if (f->stage_async)
+			f->stage_alt = gs_stagesurface_create(cx, cy, GS_RGBA);
 		if (f->out_tex) {
 			gs_texture_destroy(f->out_tex);
 			f->out_tex = NULL;
@@ -4819,22 +4885,33 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	const bool passthrough = allow_allzero_skip && skip_sdk && f->verified && !f->mirror;
 
 	// 2) download to CPU  —— 直通时整段跳过
+	// S3（Q3）：cpu_delayed = 本帧真的走了 ping-pong（CPU 侧因此晚一帧）。
+	bool cpu_delayed = false;
 	if (!passthrough) {
 	bool got = false;
 	const double t_dl = f->prof_on ? beauty_now_ms() : 0.0;
-	gs_stage_texture(f->stage, in_tex);
-	uint8_t *ptr = NULL;
-	uint32_t linesize = 0;
-	if (gs_stagesurface_map(f->stage, &ptr, &linesize) && ptr) {
-		const size_t row = (size_t)cx * 4;
-		if (linesize == row) {
-			memcpy(f->buf_in, ptr, row * cy);
+	/* S3：上一帧的暂存面在上一次 render 里就已提交，到这一刻那趟拷贝早已完成，
+	 * 先 map 它几乎不等待；映射成功后再把本帧提交到**另一张**面。
+	 * 顺序不能倒：gs_stagesurface_map 会排空命令队列 —— 先提交本帧的话，等到
+	 * 的就是自己刚排进去的那趟拷贝（4K ≈2.5 ms），等于白做。 */
+	gs_stagesurf_t *prev = NULL, *next = NULL;
+	if (f->stage_async && f->stage_alt && f->stage_submit >= 0) {
+		prev = f->stage_submit ? f->stage_alt : f->stage;
+		next = f->stage_submit ? f->stage : f->stage_alt;
+	}
+	if (prev && next) {
+		got = beauty_stage_readback(f, prev, cx, cy);
+		if (got) {
+			gs_stage_texture(next, in_tex);
+			f->stage_submit = (next == f->stage_alt) ? 1 : 0;
+			cpu_delayed = true;
 		} else {
-			for (uint32_t y = 0; y < cy; y++)
-				memcpy(f->buf_in + (size_t)y * row, ptr + (size_t)y * linesize, row);
+			f->stage_submit = -1;   // 读失败：下一帧退回同步路径
 		}
-		gs_stagesurface_unmap(f->stage);
-		got = true;
+	} else {
+		gs_stage_texture(f->stage, in_tex);
+		got = beauty_stage_readback(f, f->stage, cx, cy);
+		f->stage_submit = (f->stage_async && f->stage_alt) ? 0 : -1;
 	}
 
 	/* 回读失败就直接直通，**不要**再喂一个上一帧的旧 buf_in 给引擎：
@@ -4850,11 +4927,16 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 
 	// 5b-2 切片 4：帧号 + 把本帧原样拷进显存环。
 	// 顺序要紧：帧号必须在 process 之前设好（引擎要把它和送检测的那一帧绑定）。
-	// S2b：拷贝时机改成「默认 process 之后、且仅提交帧」——见下面 5019 附近的块。
+	// S2b：拷贝时机改成「默认 process 之后、且仅提交帧」——见 5050 附近的块。
 	uint64_t ring_sub0 = 0;   // 本帧开始前的检测提交次数（判「本帧是否被送去检测」）
+	unsigned long long cpu_tag = 0;   // 送给引擎的帧号（异步时 = frame_tag − 1）
 	if (!passthrough) {
 	f->frame_tag++;
-	beautyCoreSetFrameTag(f->frame_tag);
+	/* S3：异步回读时引擎手上是**上一帧**的像素，帧号必须跟着它走 ——
+	 * 否则引擎会把「n−1 的掩码」盖在「n 的帧」上，heldTag_ 也指向错误的帧，
+	 * 环取出来的纹理与掩码错位一帧（动态画面直接变拖影）。 */
+	cpu_tag = cpu_delayed ? f->frame_tag - 1 : f->frame_tag;
+	beautyCoreSetFrameTag(cpu_tag);
 	ring_sub0 = beautyCoreMaskSubmits();
 	// 回退路径（BEAUTY_RING_ALWAYS=1）：保持 2.4.0 的老顺序，process 前无条件拷。
 	if (f->ring_always && f->gpu_ring_ok &&
@@ -4871,6 +4953,26 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		 * 这条一直存在的安全路径；环在随后几帧内自动重新填满。零成本。 */
 		for (int i = 0; i < BEAUTY_RING_SLOTS; i++)
 			f->ring_tag[i] = 0;
+	}
+	if (passthrough) {
+		/* S3：直通帧没有提交任何暂存面拷贝，ping-pong 的状态必须作废 ——
+		 * 否则恢复非直通的第一帧会把「直通前那一帧」当成上一帧交给引擎
+		 * （画面直接跳回几秒前），帧号也会跟着错一帧。下一帧走同步路径
+		 * 重新起步，代价仅一帧。 */
+		f->stage_submit = -1;
+	}
+
+	/* S3：CPU 侧晚一帧时，链要画的必须是**引擎手上那一帧**的纹理，也就是环里
+	 * tag=cpu_tag 的那张。取不到就把 hook_cur_in 置空，让 beauty_hook_prepare
+	 * 走「从 buf_in 上传」的老路 —— 慢几毫秒，但内容一定对（宁可慢，不可错帧）。 */
+	if (cpu_delayed) {
+		f->hook_cur_in = beauty_ring_get(f, cpu_tag);
+		if (!f->async_logged) {
+			f->async_logged = true;
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 暂存面双缓冲回读生效：CPU 侧整体晚一帧"
+			     "（BEAUTY_ASYNC_STAGE=0 回退同步路径）");
+		}
 	}
 
 	// 3) 引擎处理（自研核）。
@@ -4956,25 +5058,25 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	// BEAUTY_GPU_TONE=1 且引擎宣称 supportsGpu() 时才进来，且只跑一次。
 	// 放在这里的原因：buf_in（原图）还在、引擎本帧的掩码刚到货、而上传回
 	// out_tex 之前 —— 三个条件同时满足的唯一位置。
-	if (f->gpu_tone_diag && !f->gpu_tone_reported)
+	if (f->gpu_tone_diag && !f->gpu_tone_reported && !cpu_delayed)
 		beauty_gpu_tone_selfcheck(f, in_tex, cx, cy);
 	// ==== Phase 3 gated 自检：GPU 磨皮对拍（同样不改 buf_out / out_tex）======
 	// 位置与色调自检完全相同，理由也相同：buf_in 未被动过、本帧掩码已到货、
 	// 结果还没上传回 out_tex。磨皮对拍还多一个条件 —— 引擎本帧必须真的走了
 	// band 路径（beautyCoreBandDiag 返回 true），否则没有可比的对象。
-	if (f->gpu_smooth_diag && !f->gpu_smooth_reported)
+	if (f->gpu_smooth_diag && !f->gpu_smooth_reported && !cpu_delayed)
 		beauty_gpu_smooth_selfcheck(f, in_tex, cx, cy);
 	// ==== T1 gated 自检：GPU 细节对拍（同样不改 buf_out / out_tex）==========
 	// 位置同上：buf_in 未动、本帧掩码已到货、结果还没上传回 out_tex。
 	// 额外条件：本帧链钩子必须认领过 DETAIL（f->diag_detail_ok），否则没有 dp。
-	if (f->gpu_detail_diag && !f->gpu_detail_reported)
+	if (f->gpu_detail_diag && !f->gpu_detail_reported && !cpu_delayed)
 		beauty_gpu_detail_selfcheck(f, in_tex, cx, cy);
 	// ==== 5c gated 自检：GPU 美形对拍（同样不改 buf_out / out_tex）==========
 	// 位置同上。额外条件：本帧链钩子必须认领过 WARP（f->diag_warp_ok），
 	// 否则手上没有引擎算好的几何 —— 宿主自己推不出来（关键点只在引擎里）。
 	// 它用的是自己的一对 scratch 纹理，不碰生产链的 warp_a/warp_b：
 	// 5b-1 直绘时 chain_out_tex 可能就是 warp_a，覆盖它等于改画面。
-	if (f->gpu_warp_diag && !f->gpu_warp_reported)
+	if (f->gpu_warp_diag && !f->gpu_warp_reported && !cpu_delayed)
 		beauty_gpu_warp_selfcheck(f, in_tex, cx, cy);
 	// =======================================================================
 
@@ -5039,13 +5141,18 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	// 环里那份从来没被读过 —— 2.4.0 之前是每帧白拷一次。
 	// 必须放在 process 之后：提交动作发生在 process 内部，之前无从判断。
 	// 判空落空时的代价只是「从 CPU 上传那一帧」（4K ≈3 ms），画面不受影响。
+	//
+	// S3 例外：异步回读时链要画的是**上一帧**，那张纹理只能来自环 ——
+	// 于是每帧都必须留一份（按需优化在这里退化为「全部需要」）。这一趟
+	// 拷贝是排进 GPU 队列的，宿主不会等它（下一帧 map 时它早已完成），
+	// 所以它不体现在往返里；换来的是上面省掉的 map 排队等待。
 	if (!passthrough && f->gpu_ring_ok && !f->ring_always &&
-	    beautyCoreMaskSubmits() != ring_sub0) {
+	    (f->stage_async || beautyCoreMaskSubmits() != ring_sub0)) {
 		if (beauty_ensure_ring(f, gs_texture_get_width(in_tex),
 				       gs_texture_get_height(in_tex),
 				       gs_texture_get_color_format(in_tex)))
 			beauty_ring_put(f, f->frame_tag, in_tex);
-		if (!f->ring_skip_logged) {
+		if (!f->ring_skip_logged && !f->stage_async) {
 			f->ring_skip_logged = true;
 			blog(LOG_INFO,
 			     "[" PLUGIN_NAME "] 帧环拷贝改按需：仅检测提交帧留环，"
@@ -5115,7 +5222,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     " = %.2f ms/帧（%d 帧平均）掩码 %.2f%% 有脸 %.0f%%"
 			     " 对齐 %llu/%llu（%.0f%%）边框 %s ab=%s"
 			     " tick=%llu/%llu dup=%d"
-			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u",
+			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u"
+			     " dlw=%.2f dlm=%.2f",
 			     cx, cy, dl, pr, up, dl + pr + up, f->prof_frames,
 			     f->prof_cover * 100.0 / n,
 			     (double)f->prof_face_frames * 100.0 / n,
@@ -5124,7 +5232,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     abtxt, (unsigned long long)f->tick_calls,
 			     (unsigned long long)f->tick_ticks, f->tick_max,
 			     f->an_nofresh, f->an_masknull, f->an_histrst,
-			     f->an_claimdrop);
+			     f->an_claimdrop,
+			     f->prof_dl_wait / n, f->prof_dl_copy / n);
 			// 打印完清零，下一窗口重新统计
 			f->an_nofresh = f->an_masknull = 0;
 			f->an_histrst = f->an_claimdrop = 0;
@@ -5238,6 +5347,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 
 			f->prof_frames = 0;
 			f->prof_dl = 0.0;
+			f->prof_dl_wait = 0.0;
+			f->prof_dl_copy = 0.0;
 			f->prof_proc = 0.0;
 			f->prof_up = 0.0;
 			f->prof_cover = 0.0;
