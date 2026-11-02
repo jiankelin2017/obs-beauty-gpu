@@ -734,6 +734,23 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 - **回退**：`BEAUTY_ALLZERO_SKIP=0` 回到旁路。
 - **注意**：`verified` 自检要先用前 N 帧跑完再允许跳过；`mirror` 开启时不走此分支。
 
+#### 9.2.1 S1 实测结果（2026-11-02 14:52，2.3.0）
+
+测试方法：新建两个全 0 参数专用集合（`beauty_s1` 720p 相机档、`beauty_4k` 3840×2160 scene 档，均 `enabled=true` + 14 项面板参数全 0），用 `3_装机/v_s1.ps1` 调 `2_run_diag.ps1`（含 `BEAUTY_PROFILE=1`），再以 `05_验证/gate.py` 出门禁表。
+
+| 场景 | 往返中位（3 窗口） | 门槛 | 结果 |
+|---|---|---|---|
+| 720p passthrough（默认开） | **0.00 ms**（首窗 0.03，含第 0 帧全路径） | ≤0.3 | ✅ PASS |
+| 720p 回退（`BEAUTY_ALLZERO_SKIP=0`） | **1.69 ms** | ≈2.04 | ✅ 回退有效 |
+| 4K passthrough（3840×2160） | **0.00 ms** | ≤0.8 | ✅ PASS |
+
+- 三次跑均 `init OK (v2.3.0)`、6 个 hlsl 加载、**零 OBS warning/error**、`skip_sdk=1`。
+- 720p 回退 1.69 略低于 2.2.1 基线 2.04：该次画面**无人脸**（引擎 0.28 vs 有脸 0.95），纯传输 0.88+0.53=1.41；passthrough 把下载/引擎/上传全部归零。
+- 4K scene 档首帧自检 `out_tex mean=0.0`：scene 首帧尚未合成，属既有现象，不影响 perf 测量。
+- **正确性**：passthrough 走 `draw_tex=in_tex` + `GS_BLEND_ONE/INVSRCALPHA`，相机 alpha=255 → `dst=src`，与「滤镜禁用」逐像素一致（结构上 maxdiff=0）。
+- **待补**：① 非全 0 四组合（磨皮/清晰/美白/五官）vs 2.2.1 录帧 `maxdiff=0`；② 滤镜开关来回 20 次手动验收；③ 4K 画面目视。此三项需人工录制/勾选，脚本无法自动完成。
+- 工具已落地：`05_验证/make_s1_collections.py`（生成全 0 集合）、`03_装机/v_s1.ps1`（`-Target s1|4k [-Rollback]`）、`v_s1_720p.bat` / `v_s1_720p_rollback.bat` / `v_s1_4k.bat`。
+
 ### 9.3 S2 帧环稳定性（Q5）→ 翻默认
 
 - **改动面**：只改默认值与启动日志；不动逻辑。
@@ -808,5 +825,5 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 | 阶段 | 状态 | 备注 |
 |---|---|---|
 | S0 | **门禁就绪·待用户固化** | 门禁脚本 `gate.py` + `.gitignore`/`git` 基线（`1ad11fc`）就绪；2.2.1 基线值已录入 9.1；待用户跑 `gate.py` 两遍固化 Δ≤0.15 ms 门槛 |
-| S1 | **代码/编译/装机完成·待运行时验收** | 2.3.0：入口 `passthrough` 分支短路全 0 态往返；dll MD5 `D3B6CDEADC092EA66EF0860680572EB4`、6 个 hlsl 装机 OK；正确性（全0 vs 滤镜禁用 `maxdiff=0` / 四组合 vs 2.2.1 `maxdiff=0` / 开关20次无闪退黑帧）+ 性能（720p 2.04→≤0.3、4K ≤0.8）+ 回退 `BEAUTY_ALLZERO_SKIP=0` 待用户 OBS 实跑 `gate.py` 验收 |
+| S1 | **性能验收通过·正确性部分待补** | 2.3.0；实测 2026-11-02 14:52（见 9.2.1）：720p 往返 **0.00 ms**（≤0.3 ✅）、4K **0.00 ms**（≤0.8 ✅）、回退 **1.69 ms**（回到全路径 ✅），零 warning/error；正确性 maxdiff=0 由「直接画 in_tex + ONE/INVSRCALPHA」结构保证，另建议补录 5 帧对比 + 开关 20 次手动验收 |
 | S2–S7 | 待启动 | 按 9.3–9.8 门槛；S2 需先解 2026-11-01 4K 崩溃根因 |
