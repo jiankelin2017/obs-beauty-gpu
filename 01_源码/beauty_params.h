@@ -521,7 +521,7 @@
 //          防止以后又"顺手补一刀"。
 //        · 不改任何数值/算法，只改 GL 状态卫生：GPU 链路与 CPU 链路现在对
 //          OBS 的投影影响都为零。
-#define BEAUTY_BUILD_STR "2.3.0"
+#define BEAUTY_BUILD_STR "2.4.0"
 
 // 面板参数顺序（滤镜属性页滑块的顺序）
 enum {

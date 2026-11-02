@@ -589,14 +589,24 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 				    beautyEngine().supportsGpu();
 	}
 	// 5b-2 切片 4：显存帧环（跳过对齐换帧的整帧上传）。**默认开**，
-	// `BEAUTY_GPU_FRAME_RING=0` 退回「从 CPU 上传那一帧」（4K ≈3 ms）。
-	// 代价是每帧一次全帧 VRAM 拷贝（4K 33 MB，实测已包含在 4.12 ms 的引擎里）。
+	// `BEAUTY_GPU_FRAME_RING=0` 退回「从 CPU 上传那一帧」（4K ≈2.9 ms）。
+	// 代价是每帧一次全帧 VRAM 拷贝（4K 33 MB，实测已含在引擎时间里）。
 	{
-		// 2026-11-01 08:10 的 4K 崩溃会话里出现了帧环的尺寸不一致错误，
-		// 在拿到稳定复现结论之前**默认关**（opt-in：BEAUTY_GPU_FRAME_RING=1）。
+		// 3.1.73 曾因 2026-11-01 08:10 的 4K 崩溃把它改回 opt-in。2.4.0（S2）
+		// 翻回默认开，依据是根因两侧都已封堵 + 实测：
+		//   · beauty_ring_put() 每次拷贝前逐张核对尺寸+格式，不符直接跳过
+		//     （那条 `device_copy_texture ... same dimensions` 再也发不出来）
+		//   · 触发驱动崩溃的 23-draw 磨皮生产路径（BEAUTY_GPU_SMOOTH_PROD）
+		//     已在 3.1.76-p2 退役，崩溃入口不可达
+		//   · 2026-11-02 实跑：4K 连续 30 分钟 54180 帧零异常、画布 720p↔
+		//     1080p↔4K 切换 9 次不崩、热重载 3 轮正常（见 PROGRESS 9.3）
+		// 判据用「不设或首字符非 0 即开」，与 BEAUTY_GPU_MASK 等开关一致。
+		//
+		// 另外绑定 gpu_mask_chain：环只在「掩码也是 GPU 现画的」时才会被取用
+		// （见 beauty_hook 里的 gpu_mask_ok）。掩码走 CPU 时没人读环，就不该
+		// 白付每帧 33 MB 的拷贝。
 		const char *gr = getenv("BEAUTY_GPU_FRAME_RING");
-		f->gpu_ring_ok = (gr && gr[0] == '1') &&
-				 beautyEngine().supportsGpu();
+		f->gpu_ring_ok = (!gr || gr[0] != '0') && f->gpu_mask_chain;
 	}
 	// 4d：五官椭圆对拍（纯诊断，一次性，默认关）
 	{
@@ -4836,6 +4846,15 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			       gs_texture_get_height(in_tex),
 			       gs_texture_get_color_format(in_tex)))
 		beauty_ring_put(f, f->frame_tag, in_tex);
+	} else if (f->gpu_ring_ok) {
+		/* S2：直通期间不写环，但槽位里还留着**直通前那几帧**，且 tag 仍然
+		 * 匹配。参数一旦从全 0 拉起来，引擎要的是更早那一帧（heldTag_），而
+		 * frame_tag 在直通期间是冻结的 —— 旧帧会被当成那一帧取走，掩码区
+		 * 闪一帧陈旧画面（真实摄像头下可见）。
+		 * 把 tag 全清掉，让 beauty_ring_get() 必然落空，回退到「上传当前帧」
+		 * 这条一直存在的安全路径；环在随后几帧内自动重新填满。零成本。 */
+		for (int i = 0; i < BEAUTY_RING_SLOTS; i++)
+			f->ring_tag[i] = 0;
 	}
 
 	// 3) 引擎处理（自研核）。

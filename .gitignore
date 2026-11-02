@@ -38,4 +38,4 @@ ehthumbs.db
 # 验收用基线 dll（体积大，且可由 1ad11fc 重新编译得到）
 05_验证/baseline/*.dll
 05_验证/out/
-05_验证/assets/*.png
+05_验证/assets/

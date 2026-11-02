@@ -227,6 +227,10 @@ def main():
     print("场景集合目录: %s" % scenes_dir())
     build("beauty_static", "face_720p.png", (1280, 720))
     build("beauty_static_4k", "face_4k.png", (3840, 2160))
+    # S2 帧环长跑专用：单脸 4K（帧环只在 mg.count==1 时启用，多脸素材等于空跑）
+    build("beauty_soak4k", "face_4k_single.png", (3840, 2160))
+    # 720p 单脸：测 720p 的帧环收益（beauty_static 是多脸，帧环不启用）
+    build("beauty_soak720", "face_720p_single.png", (1280, 720))
     print("完成。")
     return 0
 
