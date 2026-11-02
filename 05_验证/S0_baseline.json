@@ -1,28 +1,32 @@
 {
   "1280x720": {
-    "n": 3,
-    "tot": 1.56,
-    "tr": 0.91,
-    "dl": 0.91,
+    "n": 5,
+    "tot": 0.99,
+    "tr": 0.63,
+    "dl": 0.63,
     "up": 0.0,
-    "pr": 0.59,
-    "cover": 12.87,
+    "pr": 0.36,
+    "cover": 0.0,
     "align": 100.0,
+    "gonly": 0,
+    "gskip": 0,
     "gate": "A+C",
     "tol_transfer": 0.15,
-    "tol_engine_pct": 5.0
+    "tol_engine_pct": null
   },
   "3840x2160": {
-    "n": 3,
-    "tot": 10.24,
-    "tr": 5.25,
-    "dl": 5.25,
+    "n": 5,
+    "tot": 2.8,
+    "tr": 1.29,
+    "dl": 1.29,
     "up": 0.0,
-    "pr": 4.99,
-    "cover": 12.74,
-    "align": 94.0,
+    "pr": 1.4,
+    "cover": 0.0,
+    "align": 100.0,
+    "gonly": 0,
+    "gskip": 0,
     "gate": "A+C",
     "tol_transfer": 0.15,
-    "tol_engine_pct": 5.0
+    "tol_engine_pct": null
   }
 }
