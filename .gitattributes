@@ -1,0 +1,2 @@
+# 统一行尾，消除 Windows 下 LF→CRLF 的提交噪声
+* text=auto eol=crlf

@@ -1,0 +1,3 @@
+   no OBS running, skip  else (echo    OBS killed, wait 2s 
+   OBS killed 
+  [ERR] obs64.exe NOT found 

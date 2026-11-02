@@ -1,0 +1,36 @@
+# ===== OBS 美颜 GPU 版 —— 基线 git 忽略规则 =====
+# 本仓库只跟踪「源码 + 着色器 + 验证脚本 + 文档」，不跟踪构建产物与运行时产物。
+
+# 构建产物（由 02_构建/build_gpu.ps1 生成）
+02_构建/*.dll
+02_构建/*.exe
+02_构建/*.lib
+02_构建/*.exp
+02_构建/build/
+02_构建/out/
+02_构建/obj/
+
+# 装机备份 & 启动器调试产物（03_装机/7_install_gpu.ps1 会写 backup/，bat 会写调试 txt）
+03_装机/backup/
+03_装机/*.txt
+
+# 安装包二进制
+07_安装包/*.exe
+07_安装包/*.dll
+
+# 离线验证运行时依赖（onnxruntime / core_probe 等第三方程序，体积大，非源码）
+06_离线验证/*.dll
+06_离线验证/*.lib
+06_离线验证/*.exp
+
+# Python 字节码缓存
+__pycache__/
+
+# WorkBuddy 项目数据（切勿提交）
+.workbuddy/
+
+# 临时 / 系统
+*.tmp
+Thumbs.db
+ehthumbs.db
+.DS_Store

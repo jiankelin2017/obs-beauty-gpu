@@ -1,0 +1,10 @@
+#include <winver.h>
+1 RCDATA "obs-beauty.dll"
+101 RCDATA "obs-beauty.dll"
+201 RCDATA "shaders\\detail.hlsl"
+202 RCDATA "shaders\\mask.hlsl"
+203 RCDATA "shaders\\region.hlsl"
+204 RCDATA "shaders\\smooth.hlsl"
+205 RCDATA "shaders\\tone.hlsl"
+206 RCDATA "shaders\\warp.hlsl"
+1 24 "setup.manifest"

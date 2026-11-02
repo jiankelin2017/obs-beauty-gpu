@@ -1,0 +1,64 @@
+{
+  "_note": "离线回归台的黄金基准清单。由 `python offline_regress.py check` 消费；--update 会重新采集（仅在确认 CPU 输出变化是有意的时候才用）。",
+  "engine": "core 1.6.0",
+  "frame": {
+    "path": "goldens/frame_1280x720.raw",
+    "w": 1280,
+    "h": 720,
+    "md5": "556ECFD46EEC215696D26217DA5EF94D",
+    "source": "OBS美颜源码/05_验证/_probe_run/face_1280x720.raw（已拷贝到本目录，台子自包含）",
+    "note": "含一张可检出的人脸：实测 faces=1 / 掩码 7.42% / roi 12.60%，所以掩码分支是被覆盖到的"
+  },
+  "cases": [
+    {
+      "name": "blur100",
+      "desc": "只开磨皮 100 档（与 OBS 计时那几次同参）",
+      "args": {
+        "blur": 100
+      },
+      "golden": "goldens/g_blur100.raw",
+      "md5": "E25CD0AFABBCF8B25DDDC24A6CB8C151"
+    },
+    {
+      "name": "mixed",
+      "desc": "代表性负载：磨皮 60 + 美白 40 + 红润 20 + 清晰 30 + 美形三项 10",
+      "args": {
+        "blur": 60,
+        "whiten": 40,
+        "red": 20,
+        "clarity": 30,
+        "thin": 10,
+        "bigeye": 10,
+        "chin": 10
+      },
+      "golden": "goldens/g_mixed.raw",
+      "md5": "E56B7361635AE3D875EB54E758A182D8"
+    },
+    {
+      "name": "sharp",
+      "desc": "细节回填两条路都开：磨皮 50 + 脸内锐化 60 + 全局锐化 30（覆盖 detailRefill 的 fwF/fwG/mwF/mwG 四档权重）",
+      "args": {
+        "blur": 50,
+        "sharpen": 60,
+        "gsharpen": 30
+      },
+      "golden": "goldens/g_sharp.raw",
+      "md5": "5D446CA7CEF75509EF9D368CB3D09ECB",
+      "note": "3.1.52 首次采集：此前 manifest 里两个用例都没有锐化，detailRefill 的等价性一直没有基准可对。这条一开，以后改细节段（含 GPU 化）就有的比了。"
+    },
+    {
+      "name": "region",
+      "desc": "五官五项全开（各 30）+ 磨皮 100 —— 覆盖椭圆/法令纹/祛斑三族（2026-11-01 补）",
+      "args": {
+        "blur": 100,
+        "threed": 30,
+        "eyebright": 30,
+        "pouch": 30,
+        "nasolabial": 30,
+        "delspot": 30
+      },
+      "golden": "goldens/g_region.raw",
+      "md5": "D5D493DA863403A75D052AD5B421A05D"
+    }
+  ]
+}
