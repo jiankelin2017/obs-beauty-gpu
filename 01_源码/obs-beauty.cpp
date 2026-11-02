@@ -1817,6 +1817,34 @@ static void smooth_box_pass(gs_effect_t *fx, gs_texrender_t *rt, gs_texture_t *s
 
 // 完整磨皮：in_tex + mask/protect + 参数 → sm_out 的纹理。
 //
+// 诊断（默认关）：BEAUTY_SMOOTH_PASSES=1..6 强制磨皮的盒式趟数。
+//
+// 只为一个决策服务：量出「趟数 → 耗时」的斜率，判断 S5 的收益上限落在
+// **提交/RT 切换成本**还是 **GPU 带宽**上（PROGRESS 9.6 / 9.6.1）。
+// ⚠ 不是产品开关：趟数小 = 平滑不足，画面会变。只在测时用，别写进默认配置。
+// 覆盖点选在宿主而不是引擎，是为了让 GPU 与「CPU 对拍基准」用的是同一个值
+// （两边都从 BeautyBandDiag 取 passes），否则自检会自己和自己打架。
+static int beauty_smooth_passes_force()
+{
+	static int v = -1;
+	if (v < 0) {
+		v = 0;
+		const char *e = getenv("BEAUTY_SMOOTH_PASSES");
+		if (e && e[0]) {
+			const int n = atoi(e);
+			if (n >= 1 && n <= 6) {
+				v = n;
+				// 用 INFO 而不是 WARNING：`gate.py` 把 `[obs-beauty].*warning`
+				// 计进 warn 列，探针跑会被误判成「不干净」。这条只是记录生效值。
+				blog(LOG_INFO,
+				     "[" PLUGIN_NAME "] 磨皮趟数被 BEAUTY_SMOOTH_PASSES 强制为 %d"
+				     "（诊断用，非产品配置）", n);
+			}
+		}
+	}
+	return v;
+}
+
 // 缓冲编排（半分辨率，共 4 张 RGBA32F）：
 //   D = 下采样源，全程只读，Amp 之后才释放
 //   A = B1 结果        B = 临时 / amp 结果        C = B2 结果
@@ -3951,6 +3979,11 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 
 	const double t_draw0 = beauty_now_ms();
 	BeautyBandDiag cp = job.band;
+	// 诊断覆盖（默认关）：把趟数锁死，量「趟数 → 耗时」斜率用。见
+	// beauty_smooth_passes_force() 上方的说明。放在这里而不是引擎里的原因：
+	// GPU draw 与 CPU 对拍基准都从这里取 cp，覆盖一次两边一致。
+	if (const int fp = beauty_smooth_passes_force())
+		cp.passes = fp;
 	gs_texture_t *cur = beauty_gpu_smooth(f, in, cx, cy, &cp);
 	const double t_draw1 = beauty_now_ms();
 	if (!cur)
