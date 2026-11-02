@@ -404,6 +404,11 @@ struct beauty_filter {
 	uint32_t an_masknull;  // job.mask == NULL → 全皮肤磨皮（整帧被磨）
 	uint32_t an_histrst;   // 细节历史被重置（EMA 断帧 → 纹理跳一下）
 	uint32_t an_claimdrop;// 认领位不满（本帧走了 CPU/回退）
+	// S4a（2.6.0）：只出几何的帧，GPU 掩码建图失败 → 本帧整帧跳过处理。
+	// 正常应恒为 0；一旦涨就说明掩码 RT/shader 出问题了（那时画面是原样，不是花屏）。
+	uint32_t an_geomskip;
+	// S4a：本窗口内「只出几何、由 GPU 画掩码」的帧数。应 ≈ 窗口帧数（对比 gskip）。
+	uint32_t an_geomonly;
 	// 4d：五官椭圆族的 GPU 对拍（R1-lite，BEAUTY_REGION_CMP=1）
 	bool region_cmp;                 // 开关
 	bool region_reported;
@@ -643,6 +648,11 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		f->stage_async = (as && as[0] == '1') && f->gpu_ring_ok;
 		f->stage_submit = -1;
 	}
+	// S4a（2.6.0）：告诉引擎「有 GPU 掩码链」—— 单脸时它就可以只算几何、
+	// 不画那张 4K 全帧 CPU 掩码（实测 `seg 掩码` 2.27~2.82 ms 的大头）。
+	// 必须在本处调用：gpu_mask_chain 要到 acquireSlot 之后才确定。
+	// 回退 BEAUTY_MASK_GEOM_ONLY=0（在引擎的 setter 里判，不受调用顺序影响）。
+	beautyCoreSetMaskGeomOnly(f->gpu_mask_chain);
 	// 4d：五官椭圆对拍（纯诊断，一次性，默认关）
 	{
 		const char *rc = getenv("BEAUTY_REGION_CMP");
@@ -3749,7 +3759,17 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	//   · 单脸（切片 1 的边界）、且不含 maskShape bit2（脖子逐行扫描未实现）
 	// 任一不满足 → 整帧回到今天的路径（CPU 掩码 + 上传）。**只会变慢，不会变错。**
 	const BeautyMaskDiag &mg = job.maskGeom;
-	const bool gpu_mask_ok = f->gpu_mask_chain && job.mask && mg.fresh &&
+	// S4a（2.6.0）：`job.maskGeomOnly` 表示本帧引擎只给了几何、mask 缓冲里没有内容。
+	// 两处判据因此放宽，但都保持与老路径**语义等价**：
+	//   · 「有掩码可用」由 `job.mask || geomOnly` 表示 —— 几何也算一种掩码来源；
+	//   · 新鲜度由 `mg.fresh || geomOnly` 表示 —— 老路径在 fresh=0 时上传的是
+	//     「上一轮的 CPU 掩码」，这里用「上一轮的几何 + 当前帧纹理」重画，滞后一模一样。
+	// 条件不满足（多脸 / shape bit2 / GPU 关）时引擎照常画了 CPU 掩码，geomOnly=0，
+	// 走的还是原来的上传路径 —— 所以这条放宽不存在「两边都没有掩码」的状态。
+	const bool geom_only = f->gpu_mask_chain && job.maskGeomOnly;
+	const bool gpu_mask_ok = f->gpu_mask_chain &&
+				 (job.mask || job.maskGeomOnly) &&
+				 (mg.fresh || job.maskGeomOnly) &&
 				 mg.count == 1 && !(mg.shape & 4);
 
 	gs_texture_t *ring = NULL;
@@ -3825,12 +3845,34 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 		beauty_gpu_mask_selfcheck(f, in, job);
 
 	if (gpu_mask_ok) {
-		if (!beauty_gpu_mask_into(f, in, cx, cy, mg))
+		if (!beauty_gpu_mask_into(f, in, cx, cy, mg)) {
+			// S4a（2.6.0）：本帧引擎只给了几何，**没有 CPU 掩码可以退**。
+			// 整帧跳过处理（原样输出）—— 宁可这一帧不美颜，也绝不能
+			// 按「无掩码 = 全皮肤」把整张画面磨掉。计数进 an_geomskip。
+			if (geom_only) {
+				f->an_geomskip++;
+				obs_source_skip_video_filter(f->context);
+			}
 			return 0;   // 画不出来就整帧交回 CPU（画面正确，只是慢一帧）
+		}
 		f->mask_skin_use = gs_texrender_get_texture(f->mask_rt_a);
 		f->mask_eye_use = gs_texrender_get_texture(f->mask_rt_b);
-		if (!f->mask_skin_use || !f->mask_eye_use)
+		if (geom_only)
+			f->an_geomonly++;   // S4a：本帧用的是「几何 + GPU 重画」
+		if (!f->mask_skin_use || !f->mask_eye_use) {
+			if (geom_only) {
+				f->an_geomskip++;
+				obs_source_skip_video_filter(f->context);
+			}
 			return 0;
+		}
+	} else if (geom_only) {
+		/* 防御分支：按上面的判据，geom_only 为真时 gpu_mask_ok 必然为真，
+		 * 这里理论上不可达（除非将来改了判据）。留着的理由与上一处相同：
+		 * 真走到这儿时，`job.mask == NULL` 会被当成全皮肤，必须拦住。 */
+		f->an_geomskip++;
+		obs_source_skip_video_filter(f->context);
+		return 0;
 	}
 
 	// ==== 4d：五官椭圆族的对拍（一次性，纯诊断）=========================
@@ -5223,7 +5265,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     " 对齐 %llu/%llu（%.0f%%）边框 %s ab=%s"
 			     " tick=%llu/%llu dup=%d"
 			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u"
-			     " dlw=%.2f dlm=%.2f",
+			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u",
 			     cx, cy, dl, pr, up, dl + pr + up, f->prof_frames,
 			     f->prof_cover * 100.0 / n,
 			     (double)f->prof_face_frames * 100.0 / n,
@@ -5233,10 +5275,12 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     (unsigned long long)f->tick_ticks, f->tick_max,
 			     f->an_nofresh, f->an_masknull, f->an_histrst,
 			     f->an_claimdrop,
-			     f->prof_dl_wait / n, f->prof_dl_copy / n);
+			     f->prof_dl_wait / n, f->prof_dl_copy / n,
+			     f->an_geomonly, f->an_geomskip);
 			// 打印完清零，下一窗口重新统计
 			f->an_nofresh = f->an_masknull = 0;
 			f->an_histrst = f->an_claimdrop = 0;
+			f->an_geomonly = f->an_geomskip = 0;
 
 			// 分项单独一行：把它和总耗时写在同一行会让本来就长的性能行更难读，
 			// 而这两行是配套看的（差值应该很小，否则说明埋点位置错位）。

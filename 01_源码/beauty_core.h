@@ -508,6 +508,11 @@ struct BeautyMaskDiag {
     // 0 = 掩码是旧的、只是还在复用 —— 那时 GPU 掩码（按当前帧算）与 CPU 掩码
     //     （按更早的帧算）本来就不该相等，任何逐像素比较都没有意义。
     int   fresh;
+    // 2.6.0（S4a）：本帧**只出了几何、没画 CPU 掩码**（掩码缓冲里没有本帧内容）。
+    // 1 = 宿主必须用 GPU 掩码链（beauty_gpu_mask_into）来出图；CPU 上传路径不可用。
+    // 引擎只在「宿主声明支持」且「单脸、shape 不含 bit2」时才置 1 —— 条件不满足
+    // 就照常画全帧掩码并置 0，所以宿主看到 0 时永远可以退回上传。
+    int   geomOnly;
     float cb, cr, ru, rv;         // 肤色椭圆（C20 自适应结果）
     BeautyMaskFace faces[BEAUTY_WARP_MAX_FACES];
 };
@@ -551,6 +556,11 @@ struct BeautyChainJob {
     int w;
     int h;
     const unsigned char* mask;     // w*h，0..255；nullptr = 无掩码（= 全皮肤）
+    // 2.6.0（S4a）：本帧 mask **没有内容**，几何在 maskGeom 里（见 BeautyMaskDiag::geomOnly）。
+    // 与 mask==nullptr 是两件完全不同的事：nullptr 表示「全皮肤」，这里表示
+    // 「掩码由 GPU 按几何重画，别读 CPU 那份」。宿主若既没有 mask 又没用 GPU 掩码，
+    // 必须整帧跳过处理，不能当全皮肤磨。
+    bool maskGeomOnly;
     const unsigned char* protect;  // w*h，0..255；nullptr = 无五官保护
     BeautyBandDiag band;           // 磨皮生效参数（含 I/e/T/gwp/protectK）
     BeautyToneDiag tone;           // 色调三项
@@ -578,6 +588,13 @@ void beautyCoreSetChainHook(BeautyChainHook fn, void* user);
 // 的帧号，宿主据此在显存帧环里取同一帧的纹理，从而跳过整帧上传。
 // 不调用时帧号恒为 0，宿主自然拿不到环命中 → 退回上传（默认行为不变）。
 void beautyCoreSetFrameTag(unsigned long long tag);
+
+// 2.6.0（S4a）：声明宿主「具备 GPU 掩码链」，允许引擎在单脸时只算几何、不画
+// 全帧 CPU 掩码（4K 下那是 2.3~2.8 ms 里的一大半，而 GPU 掩码根本不吃它）。
+// 默认 false = 老行为（每帧都画）。宿主在 init 时按 BEAUTY_GPU_MASK 调一次。
+// ⚠ 打开后必须同时满足：宿主能读 job.maskGeomOnly，且在它为 1 时确实走 GPU 掩码；
+// 否则该帧没有任何掩码可用 —— 引擎不做这种假设，只在条件满足时置 1。
+void beautyCoreSetMaskGeomOnly(bool on);
 
 // 段区间钩子探针：hits/calls 语义同上（calls 只在磨皮段真的到位时涨），
 // segCounts 是五段的累计认领帧数，索引与 BEAUTY_SEG_* 的位序一致

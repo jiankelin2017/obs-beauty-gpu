@@ -196,6 +196,8 @@ def main():
         base = {r["res"]: {"n": r["n"], "tot": r["tot"], "tr": r["tr"],
                            "dl": r["dl"], "up": r["up"], "pr": r["pr"],
                            "cover": r["cover"], "align": r["align"],
+                           "gonly": r.get("gonly") or 0,
+                           "gskip": r.get("gskip") or 0,
                            "gate": "A+C", "tol_transfer": tol_tr,
                            "tol_engine_pct": tol_pct}
                 for r in rows}
@@ -234,11 +236,19 @@ def main():
             etol = engine_tol(bpr, r["res"], tol_pct)
             f_tr = skip_tr or dtr <= tol_tr
             f_pr = dpr <= etol
-            # 健康项：有 error 即 FAIL；掩码占比偏移 > 1 个百分点视为画面条件变了
+            # 健康项：有 error 即 FAIL。
+            # 掩码占比只在「两边都真的统计过 CPU 掩码」时才有意义 —— 2.6.0（S4a）起，
+            # geomOnly 的帧不画 CPU 掩码，cover 恒为 0，这是设计不是画面变了。
+            # 那种情况改用 gskip（geomOnly 但 GPU 建图失败 → 整帧跳过）作健康项，
+            # 正常恒为 0；一旦非 0 说明掩码 RT/shader 出问题，必须拦。
             f_hd = (r["err"] == 0)
+            cv_cmp = not ((r.get("gonly") or 0) or (b.get("gonly") or 0))
             dcv = abs((r["cover"] or 0) - (b.get("cover") or 0))
-            f_cv = dcv <= 1.0
-            verdict = "PASS" if (f_tr and f_pr and f_hd and f_cv) else "FAIL"
+            f_cv = (dcv <= 1.0) if cv_cmp else True
+            gskip = r.get("gskip") or 0
+            f_gs = (gskip == 0)
+            verdict = ("PASS" if (f_tr and f_pr and f_hd and f_cv and f_gs)
+                       else "FAIL")
             if verdict == "FAIL":
                 ok = False
             tags = ""
@@ -250,6 +260,8 @@ def main():
                 tags += "（插件 error %d 条）" % r["err"]
             if not f_cv:
                 tags += "（掩码占比偏 %.2f pp）" % dcv
+            if not f_gs:
+                tags += "（gskip %d 帧整帧跳过）" % gskip
             print("  %-9s %9s %9s %8s %9s %8s %8s  %s%s" % (
                 r["res"], fmt(r["tr"]), fmt(btr), fmt(dtr),
                 fmt(r["pr"]), fmt(dpr), fmt(etol), verdict, tags))

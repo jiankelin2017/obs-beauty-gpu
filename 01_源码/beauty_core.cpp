@@ -766,6 +766,17 @@ int g_maskFeatherPx = -1;
 //   3 = 两者都用椭圆
 int g_maskShape = 0;
 
+// 2.6.0（S4a）：只出几何、不画全帧 CPU 掩码。
+//
+// 前提是宿主有 GPU 掩码链（beauty_gpu_mask_into）：那条路是**按几何参数**
+// 在 4K 全分辨率上重画的，从头到尾不读 mask_ 一个像素。于是这张 w*h 的 CPU 掩码
+// 在 GPU 路径下纯属白算 —— 4K 实测 `seg 掩码` 2.27~2.82 ms，其中逐像素画掩码
+// 是大头（检测推理 + letterbox 只占一部分）。
+//
+// 默认 false（= 3.1.x 以来一直的行为）。由宿主通过 beautyCoreSetMaskGeomOnly()
+// 打开；BEAUTY_MASK_GEOM_ONLY=0 可强制关回去做 A/B。
+bool g_maskGeomOnly = false;
+
 // 羽化斜坡查表：ramp[dist * 65 + fe] = smoothstep(dist/fe) × 256。
 //
 // 为什么查表：羽化在 worker 上逐像素跑，1080p 脸框约 40 万像素，每像素至少一次
@@ -1211,6 +1222,9 @@ public:
             // 掩码几何：BEAUTY_MASK_SHAPE=0 退回矩形（3.1.19 行为），3 = 脸+脖子都用椭圆。
             const char* msh = getenv("BEAUTY_MASK_SHAPE");
             if (msh && *msh) g_maskShape = atoi(msh);
+            // 2.6.0（S4a）的 BEAUTY_MASK_GEOM_ONLY 不在这里读：开关由宿主的
+            // beautyCoreSetMaskGeomOnly() 打开，而它可能晚于本函数（acquireSlot
+            // 会触发 init），环境变量判断放在那个 setter 里才不会被覆盖。
             initFeatherRamp();   // 羽化查表：必须早于任何一次 buildMaskInto
             // 3.1.10 掩码↔帧对齐：BEAUTY_MASK_ALIGN=0 关闭（回到 3.1.9 的
             // 「当前帧 + 旧掩码」，会拖影但零延迟，A/B 用）。
@@ -1786,12 +1800,20 @@ public:
                         job.dst = dst;
                         job.w = w;
                         job.h = h;
-                        job.mask = haveMask ? &mask_[0] : nullptr;
                         job.protect = pr3;
                         // 5b-2：当帧掩码的几何快照。没有掩码时 count 归零 ——
                         // 宿主据此知道「这张 mask 没有对应几何」，不会拿上一帧的去凑。
                         job.maskGeom = maskDiag_;
                         job.maskGeom.fresh = maskWasFresh ? 1 : 0;
+                        // 2.6.0（S4a）：只出几何的帧，mask_/protect_ 里是**上一帧的残留**。
+                        // 两个指针必须显式置空 —— 否则宿主一旦退回 CPU 上传，就会拿旧内容
+                        // 去画，表现是「掩码跳一下」。置空 + maskGeomOnly=1 让宿主二选一：
+                        // 要么 GPU 按几何重画，要么整帧跳过处理（绝不按「全皮肤」磨）。
+                        const bool geomOnly = job.maskGeom.geomOnly != 0;
+                        job.maskGeomOnly = geomOnly;
+                        job.mask = (haveMask && !geomOnly) ? &mask_[0] : nullptr;
+                        if (geomOnly)
+                            job.protect = nullptr;
                         job.srcTag = srcTagThisFrame;
                         // 4d：五官几何 —— 在**决定 claim 之前**收集（不施加），
                         // 这样即使本帧 R 被认领，宿主手里也有与 CPU 完全相同的椭圆。
@@ -2373,6 +2395,7 @@ private:
         // （2026-11-01 07:10 的 M1 差异就是这么来的）。它连同 count 一起在后面填。
         if (diagOut) {
             diagOut->count = 0;
+            diagOut->geomOnly = 0;   // 2.6.0（S4a）：默认为 0 = 本帧 mask 有内容
             diagOut->shape = g_maskShape;
             diagOut->ru = g_skinRu;
             diagOut->rv = g_skinRv;
@@ -2395,9 +2418,17 @@ private:
         // 在这里一次性交出去，而不是让那几项自己去调检测 —— 一帧只跑一次推理。
         fboxOut = faces;
 
+        // 2.6.0（S4a）：本帧只出几何、不画 CPU 掩码。
+        // 判据与宿主的 gpu_mask_ok **同构**（单脸 + shape 不含 bit2），再加上
+        // 宿主「有 GPU 掩码链」的声明。条件任一不满足就走完整路径并在 diag 里
+        // 置 0 —— 所以宿主看到 0 时永远可以退回 CPU 上传，不存在「没掩码」的帧。
+        const bool geomOnly = g_maskGeomOnly && diagOut && faces.size() == 1 &&
+                              !(g_maskShape & 4);
+        if (diagOut) diagOut->geomOnly = geomOnly ? 1 : 0;
+
         unsigned char* mask = &maskOut[0];
         unsigned char* protect = &protectOut[0];
-        memset(mask, 0, (size_t)w * h);
+        if (!geomOnly) memset(mask, 0, (size_t)w * h);
 
         // 肤色椭圆中心自适应（C20）：先按本帧画面估计一次，再画掩码。
         //
@@ -2534,6 +2565,12 @@ private:
                 mg.hasEyes = 0;   // 由下面的五官保护段回填（只有第一张脸）
                 diagOut->count++;
             }
+
+            // 2.6.0（S4a）：几何已经全部记进 diag，本帧又不需要 CPU 掩码
+            // → 直接跳掉后面三段逐像素（脸椭圆/矩形 + 脖子通道）。
+            // 这是整段里最贵的部分：4K 8.3M 像素各一次肤色判定。
+            // 放在 diag 之后是有意的：diag 填的是整数几何，与逐像素无关。
+            if (geomOnly) continue;
 
             if (g_maskShape & 1) {
                 // 椭圆距离场（3.1.20）：边界按 (x/a)²+(y/b)² = 1 收敛，四条直边消失。
@@ -2716,13 +2753,17 @@ private:
         // 是被当皮肤磨的。3.1.14 之前我们多画了一个嘴部椭圆（kps[6..9] 那四行），
         // 那是自创的保护，100 档唇区残差 +25.5 的最可能根因，已删除以对齐结构。
         // 尺寸按脸框比例给（YuNet 只给 5 个点，没有轮廓，只能这样估）。
-        memset(protect, 0, (size_t)w * h);
+        if (!geomOnly) memset(protect, 0, (size_t)w * h);
         for (size_t fi = 0; fi < faces.size(); fi++) {
             const auto& f = faces[fi];
             if (!kpsSane(f)) continue;    // 关键点飞出去就跳过这张脸的保护
             const float ex = f.w * 0.12f, ey = f.h * 0.075f;
-            paintProtectEllipse(protect, w, h, f.kps[0], f.kps[1], ex, ey);
-            paintProtectEllipse(protect, w, h, f.kps[2], f.kps[3], ex, ey);
+            // 2.6.0（S4a）：裸几何帧不画保护椭圆（GPU 用 eye0/eye1 参数自己画），
+            // 但下面的 hasEyes 回填**必须照做** —— 那正是 GPU 侧的判据。
+            if (!geomOnly) {
+                paintProtectEllipse(protect, w, h, f.kps[0], f.kps[1], ex, ey);
+                paintProtectEllipse(protect, w, h, f.kps[2], f.kps[3], ex, ey);
+            }
             // 5b-2：记下第一张脸的眼睛几何（GPU 切片 1 只支持单脸）。
             // 注意 hasEyes 的语义 = 「CPU 真的画了保护椭圆」——
             // kpsSane 不通过时 CPU 一个像素都不画，GPU 也必须什么都不画。
@@ -2761,11 +2802,12 @@ private:
         }
         char b[192];
         snprintf(b, sizeof(b),
-                 "mask=%d px (%.2f%%) faces=%d roi=%.2f%% protect=%.2f%% kps=%d",
+                 "mask=%d px (%.2f%%) faces=%d roi=%.2f%% protect=%.2f%% kps=%d%s",
                  px, 100.0 * px / (double)((size_t)w * h), facesOut,
                  100.0 * (double)boundsOut.area() / (double)((size_t)w * h),
                  100.0 * prArea / (double)((size_t)w * h),
-                 (faces.empty() || !faces[0].hasKps) ? 0 : 1);
+                 (faces.empty() || !faces[0].hasKps) ? 0 : 1,
+                 geomOnly ? " geomonly=1" : "");
         msgOut = b;
         return true;
     }
@@ -3780,6 +3822,17 @@ IBeautyEngine* createEngine() {
 // 5b-2 切片 4：宿主帧号入口。同样必须定义在匿名命名空间**外面**，否则
 // obs-beauty.cpp 链接不到（与 beautyCoreSetSmoothParams / 皮肤快照同一规则）。
 void beautyCoreSetFrameTag(unsigned long long tag) { g_frameTag = tag; }
+
+// 2.6.0（S4a）：宿主声明「有 GPU 掩码链」。打开后引擎在单脸且 shape 不含 bit2 时
+// 只算几何、跳过全帧 CPU 掩码的逐像素绘制；条件不满足仍照常画（安全兜底）。
+//
+// 环境变量在这里判、而不是放在 init 里的原因：宿主可能在 acquireSlot()（会触发
+// init）之后才拿到 supportsGpu()，那时 init 早已跑完，init 里的判断会被这次调用
+// 覆盖掉。放在这里 = 无论谁先谁后，`BEAUTY_MASK_GEOM_ONLY=0` 永远能关掉。
+void beautyCoreSetMaskGeomOnly(bool on) {
+    const char *mgo = getenv("BEAUTY_MASK_GEOM_ONLY");
+    g_maskGeomOnly = on && !(mgo && mgo[0] == '0');
+}
 
 // 皮肤判据快照（C20，只用于日志）。定义放在匿名命名空间外面 —— 否则外部
 // （obs-beauty.cpp）链接不到，与上面 beautyCoreSetSmoothParams 同一规则。

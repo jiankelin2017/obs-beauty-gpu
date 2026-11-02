@@ -64,6 +64,9 @@ AB_RE = re.compile(r"ab=(chain|1seg|out|rb)")
 # 2.4.2 / S3 取证：把「下载」拆成「排队等 map」与「memcpy」两段，追加在性能行末尾。
 # 老版本没有这对 token，缺失时这两个字段为 None，不影响其它列。
 DLSPLIT_RE = re.compile(r"dlw=([\d.]+)\s+dlm=([\d.]+)")
+# 2.6.0 / S4a：本窗口内「只出几何、掩码由 GPU 重画」的帧数（gonly）与
+# 「geomOnly 但 GPU 建图失败 → 整帧跳过」的帧数（gskip）。gskip 正常应恒为 0。
+GONLY_RE = re.compile(r"gonly=(\d+)\s+gskip=(\d+)")
 
 SEG_KEYS = ["掩码", "磨皮", "色调", "五官", "细节", "美形"]
 
@@ -112,6 +115,7 @@ def parse_file(path):
                     am = ALIGN_RE.search(line)
                     ab = AB_RE.search(line)
                     ds = DLSPLIT_RE.search(line)
+                    go = GONLY_RE.search(line)
                     perf.append({
                         "res": "%sx%s" % (w, h),
                         "w": int(w), "h": int(h),
@@ -123,6 +127,8 @@ def parse_file(path):
                         "bounds": _f(bm, 1),
                         "ab": ab.group(1) if ab else None,
                         "dlw": _f(ds, 1), "dlm": _f(ds, 2),
+                        "gonly": int(go.group(1)) if go else None,
+                        "gskip": int(go.group(2)) if go else None,
                     })
                     continue
 

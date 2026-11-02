@@ -1,16 +1,16 @@
 # OBS 美颜 GPU 版 — 进度追踪
 
 - **分支来源**：`D:\插件\OBS美颜源码`（滤镜 v3.1.39 / 引擎 core 1.4.0）
-- **当前版本**：GPU 滤镜 **2.5.0** ｜ GPU 引擎 **2.0.0**（启动日志 `engine=gpu/2.0.0`）｜ CPU `CoreEngine` **1.6.0**（兜底 + golden 基准）
+- **当前版本**：GPU 滤镜 **2.6.0** ｜ GPU 引擎 **2.0.0**（启动日志 `engine=gpu/2.0.0`）｜ CPU `CoreEngine` **1.6.0**（兜底 + golden 基准）
   - 版本号取自 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR`，与构建产物、装机 DLL 三方一致
     （MD5 `484CCF71606A1765187AF0DDB56BDC59`，2.2.0：**修复「装机环境 GPU 路径整体失效」的部署缺口 + BUG 4 预热扩展**。**缺口根因**：GPU 效果经 `obs_module_file()` 从装机 data 目录加载；对用户插件（dll 位于 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty\bin\64bit\`），该目录解析为 `<插件根>\data\`（依据 obs64.exe 内 `obs-studio/plugins/%module%` + `/bin/64bit` + `/data` 路径串 + OBS 用户插件布局），而 2.x 分支的部署**只装了 dll、从未装 shaders** → 所有不走 `BEAUTY_SHADER_DIR` 的启动（含设了 `BEAUTY_ENGINE_IMPL=gpu` 后直接双击 OBS）里六个 effect 全部加载失败并静默回落 CPU：720p 引擎从 ~1 ms 恶化到 **11.5–13.8 ms/帧**（磨皮 9.4 ms 全在 CPU）、链钩子 `S/T/R/D/W` 全 0、A/B 两臂都测的是 CPU 路径**数据无效**。solo 启动器一直设 `BEAUTY_SHADER_DIR=D:/obs_beauty_gpu/shaders`，所以开发期数据一直正常，缺口被完全掩盖。**修复**：新增 `03_装机\7_install_gpu.ps1`（dll + `data\shaders\*.hlsl` 一并装机、含备份与 MD5 校验），本次已执行；solo 的 shader 目录同步为源码最新版（此前 smooth.hlsl 为旧注释版）。**BUG 4 预热扩展**：预热块在纹理之外追加六个 effect 的加载（`gs_effect_create_from_file` 创建时即完成 HLSL 编译，首次 draw 不再有编译耗时），失败时日志明确区分 `textures=0/effects=0` 并提示 data 目录缺 shaders。2.1.1：引擎资源预热（A 方案）+ 拆 6_launch 引擎陷阱。2.1.0：修 `chain_rt` 创建顺序，色调/细节首次被链认领，720p 省约 4.3 ms/帧。2.0.2：补 `beauty_ensure_mask()` 闭环磨皮对拍。2.0.1：`strong` 等待 600→有界 60 帧 + 全帧兜底、CopyMask 区分尺寸/无掩码、`:2174` 笔误、清临时日志。2.0.0：版本重置 GPU=2.0.0 + Phase 3.5 默认开启 + prod bat 退役）。
 - **版本号方案（2026-11-02 重置）**：
-  - GPU 源码（本分支滤镜）**2.5.0** ｜ CPU 源码（OBS美颜源码）**1.0.0**（DLL 暂不部署）｜ UI（obs-beauty-ui）**1.0.0**（同步 CPU，DLL 暂不部署）。
+  - GPU 源码（本分支滤镜）**2.6.0** ｜ CPU 源码（OBS美颜源码）**1.0.0**（DLL 暂不部署）｜ UI（obs-beauty-ui）**1.0.0**（同步 CPU，DLL 暂不部署）。
   - 递增规则（三套共用）：**小更新** → 最右 +1（x.x.N）；**重要更新** → 中间 +1、最右归零（x.N.0）；**超大型更新**（架构/不兼容） → 最左 +1、后两位归零（N.0.0）。
   - 内部 `engine=` 引擎号（gpu/2.0.0、core/1.6.0）为核心引擎自身编号轴，不随上述产品版本重置。
 - **移植进度**：五段（磨皮 / 色调 / 五官 / 细节 / 美形）**全部 GPU 化完成**，每段均有 720p + 4K 逐像素对拍证据。
   传输优化 5b-1（链尾不回读）与 5b-2（掩码 + 显存帧环）**全部落地**。
-- **最后更新**：2026-11-02 20:45（**2.5.0（S3）暂存面双缓冲回读（opt-in，默认关）**：先给 2.4.2 加了两段计时取证 —— 「下载」= 排队等 map + memcpy（720p 0.46+0.28、4K 1.98+2.52），确认 S3 的收益上限就是那 0.46/1.98；随后用 ping-pong 暂存面消掉排队等待、CPU 侧整体晚一帧（`beautyCoreSetFrameTag(n−1)` + 链改画 `ring[cpu_tag]`，环槽 2→3），**口径 C 交替配对 A/B：720p 1.66→0.95（−43%）、4K 8.71→6.75（−22%），六条差值全部同号**；`BEAUTY_ASYNC_STAGE=1` 六配置 **maxdiff=0**。代价：输出整体晚一帧（≈33 ms）且每帧多一次全帧拷贝，另 4K 一个窗口 nofresh 14/180（对齐 92%）记为观察项。**门禁口径按用户拍板定为 A+C**（`gate.py` 拆项 + `ab_pair.py` 配对），见 9.1.2 / 9.4.1）｜ 2026-11-02 20:10（**2.4.1（S2b）帧环拷贝改按需 + S0 两遍固化实测**：帧环只在「本帧被送去检测」时才拷一份，720p 交替 A/B 往返 **2.00 → 1.50 ms（−0.50，−25%）**，4K 无收益（8.61 vs 8.81，在噪声内）；正确性 `2.4.1 vs 2.3.0` 六配置 **maxdiff=0**；回退 `BEAUTY_RING_ALWAYS=1` 实测有效。**S0 两遍固化结论：未达标**（720p Δ0.55、4K Δ0.85/0.99），根因是往返里「CPU 等 GPU 排队」项本身有 ±0.5~1 ms 会话间抖动，0.15 ms 判据只适用于 2.2.1 那种低 GPU 负载时代 —— 详见 9.1.1，判据修正需拍板）｜ 2026-11-02 16:40（**2.4.0（S2）帧环翻默认，三项稳定性门槛全 PASS**：4K 连续 30 分钟 **54180 帧**零 D3D11/驱动异常、往返 **8.74 ms**（门槛 ≤9.0）、画布 720p↔1080p↔4K 来回 **9 次**切换不崩、热重载 3 轮正常、冷启动 7 次正常；同负载 A/B 环收益 **720p 2.17→1.29 ms（−41%）、4K 11.39→8.28 ms（−27%）**；顺带修掉 S1 遗留的「直通期间帧环陈旧」问题，并把环绑定到 `gpu_mask_chain`（掩码走 CPU 时不再白付 33 MB/帧拷贝）。详见 9.3.1）｜ 2026-11-02 10:41（**2.2.0 已复跑验证通过（10:39 日志，装机环境首次真 GPU 全链路）：`init OK (v2.2.0, engine=gpu/2.0.0, region=on)`、6 个 hlsl 全部从 `C:\ProgramData\obs-studio\plugins\obs-beauty\data\shaders\` 加载、`引擎资源已预热 1280x720`、自检 `out_tex mean=159.8`/`detail +0.0%` 无假阳性、frame#2 起 faces=1、插件侧零 warning/error；首帧 135 ms（含 HLSL 编译 ~107 ms）发生在场景加载期不可见，预热后帧间隔 3/34/29 ms 正常。**2.2.0 修复「装机环境 GPU 路径整体失效」的部署缺口 + BUG 4 预热扩展，已装机 MD5 `484CCF71606A1765187AF0DDB56BDC59`**）。**缺口根因**：GPU 效果经 `obs_module_file()` 从 `<插件根>\data\` 加载（obs64.exe 内 `obs-studio/plugins/%module%`+`/bin/64bit`+`/data` 路径串 + OBS 用户插件布局为证），而 2.x 分支部署只装 dll、**从未装 shaders** → 所有不走 `BEAUTY_SHADER_DIR` 的启动（含 10:01 设了用户级 `BEAUTY_ENGINE_IMPL=gpu` 之后直接双击 OBS）里六个 effect 全部加载失败并**静默回落 CPU**：720p 引擎从 ~1 ms 恶化到 **11.5–13.8 ms/帧**（磨皮 9.4 ms 全在 CPU）、链钩子 `S/T/R/D/W` 全 0、**A/B 两臂都测 CPU 路径、数据无效**。**用户 09:50 / 10:05 / 10:10 三次 A/B 全部 `chain=0/180` 即此因，不是 2.1.1 回归**（09:50 用的是 2.1.0，同样为 0；solo 启动器一直设 `BEAUTY_SHADER_DIR=D:/obs_beauty_gpu/shaders`，开发期数据正常，缺口被完全掩盖）。**修复**：新增 `03_装机\7_install_gpu.ps1`（dll + `data\shaders\*.hlsl` 一并装机、备份 + MD5 校验 + obs64 占用检查），已执行；solo shader 目录同步源码最新版（此前 smooth.hlsl 为旧注释版）。**BUG 4 预热扩展**：预热块在纹理六件套之外追加六个 effect 加载（`gs_effect_create_from_file` 创建时即完成 HLSL 编译 → 首次 draw 零编译耗时）；失败日志区分 `textures=0/effects=0` 并直指 data 目录缺 shaders。此前 10:01 方案 A：用户级 `BEAUTY_ENGINE_IMPL=gpu` 已写入 `HKCU\Environment`（双击 OBS 即 GPU 引擎；撤销 `setx BEAUTY_ENGINE_IMPL ""`）；2.1.1 BUG 4 预热 + 6_launch 引擎陷阱；2.1.0/2.0.2 实测全通过（引擎 0.78–0.98 ms、对拍判定=通过 faces=1）。**BUG 3（采集抽风）+ 「加美颜就被拉伸」（2026-11-02 10:5x 定位）**：用户报告「本来视频正常分辨率，增加美颜效果就被拉伸」。**结论：滤镜不可能造成拉伸**（三条证据：① libobs obs-source.c `get_base_width` 源码核实——滤镜不实现 get_width/get_height 时链逻辑尺寸经 filter_target 递归到底部源，加减滤镜不改变源向场景报告的尺寸，本插件未实现这两个回调；② 本滤镜 cx/cy 恒取 `obs_source_get_base_width/height(target)`，全部输出/中间纹理带尺寸校验即时重建，绘制恒 1:1；③ 用户日志 `render#0 target=视频采集设备 1280x720`——滤镜按源尺寸渲染，若在拉伸该行会是画布尺寸 1080x1920）。**真根因是场景项框与画布几何**：画布 1080x1920（9:16 竖）+ 相机 1280x720（16:9 横），项目框必须保持 16:9（如 1080x608 居中）才不变形；项目框=画布尺寸即拉伸，与滤镜开关无关。常见误归因：OBS 添加源默认拉伸填满画布，或画布横→竖切换时 OBS 按非均匀比例缩放已有场景项。**待用户 30 秒定测**（原「2 分钟验证」方案已按本轮判据收紧）：① **同一 OBS 预览内 A/B**——美颜开 vs 点滤镜对话框眼睛图标关，看脸部宽高比是否随参数变化（是=实锤处理伪影；否=滤镜几何零变化，转向场景项或观感误判）；② 右键相机源→变换→编辑变换读尺寸（预期 16:9 如 1080×608；若 1080×1920 即场景项实锤）；③ 设置→视频读画布（预期 1080×1920）。**2026-11-02 11:09–11:35 二次彻底复查（用户补充关键判据「美颜=0 不拉伸、>0 必拉伸」后重查全路径，结论升级为「滤镜在任何参数下都不可能改变画面几何」）**：① **API 审计**——对父源零写入（全文无 `obs_source_set_width/height`、无增删滤镜）；滤镜注册结构无 `get_width/get_height` 回调（obs-beauty.cpp:5347-5358 仅 type/output_flags/video_render）；② **全纹理审计**——所有定尺纹理（out_tex/skin_tex/mask_tex/ring/hook_src_tex 及各 RT）均按当帧 `cx×cy` 创建且带尺寸校验即时重建，所有 texrender begin 时定尺，每次 draw 都是 cx×cy 全屏 quad；③ **libobs 源码实证**（obs-source.c `obs_source_process_filter_begin_with_color_space`）：每帧 `cx = obs_source_get_width(target)` 现建滤镜目标，无陈旧缓存；无 get_width/get_height 的滤镜经 `get_base_width` → `filter_target` 递归到底部源的异步当前宽——加减滤镜不改源向场景报告的尺寸；④ **逻辑推导**——滤镜摘除/禁用/参数 0/参数>0 四种状态下 OBS 映射几何恒等（参数 0 时滤镜仍完整渲染：`skip_sdk` 直拷 buf_out→上传 out_tex→1:1 画），与参数>0 唯一差别只是画 out_tex 还是 chain_out_tex——同一源尺寸图映射到同一场景项框，比例不可能随参数变化。**截图取证（Python 像素分析，scipy 不可用已用手写 BFS 替代）**：OBS 预览红边框竖线 x=137-138 贯穿 y=22-415（整个可见预览高度）、横线 y=411-412 至 x=521 → 场景项上/右边不可见、预览处于放大/滚动态，场景项真实尺寸无法从截图测量；右窗口（相机原生视图）内容 bbox 451×767 ≈ 9:16 竖屏裁切放大版（人像放大约 1.6×），**不是 1:1 全帧参照**——用户「前后对比」本身不对等。**剩余分支**：(a) 场景项宽高比≠16:9（会同样影响参数 0，与用户观察矛盾）；(b) **处理伪影**（最可能，与「效果>0 才出现」完全自洽）——GPU 掩码脸型椭圆（mask.hlsl）、五官椭圆族归一化坐标转绝对像素（`fc.fx + e.cx*fc.fw`）、半分辨率磨皮采样（`(cx+1)/2`）三者任一尺度不对 → smoothing/美白/红润抹错区域，观感即「拉伸」。若确认 (b)，按「掩码尺度 → 五官椭圆尺度 → 半分辨率采样」顺序挖。BUG 3「抽风瞬间正常比例」最高嫌疑仍为 dshow 瞬时重配致源尺寸瞬变→场景项瞬变。**待办**：① 用户在会话中实测反复开关美颜，验证 BUG 4「概率性卡首帧」消失（代码确认 `f->warm` 仅尺寸变化时置回 false（obs-beauty.cpp:4642），同一滤镜实例同尺寸重复开关不重复付费；残留场景：往源上新加滤镜的首帧仍会付 ~135 ms）；② A/B 必须用 `5_run_ab.bat` 重跑（09:50 / 10:05 / 10:10 三次两臂均 CPU 路径数据无效）；③ T10 4K 五官/帧环崩溃待复现取证；④ 已知遗留：UI dirty 风暴（`识别选项已下发` 每 33ms 刷屏，引擎侧 early-return 无功能影响，修 UI 需重建部署 obs-beauty-ui.dll，涉及两版共用 UI，待用户决定）。CPU 源码 1.0.0 / UI 1.0.0 仅改源码、DLL 暂不部署；三套版本号方案：小更新→右+1 / 重要→中+1 / 超大型→左+1）
+- **最后更新**：2026-11-02 21:20（**2.6.0（S4a）GPU 掩码路径跳过 CPU 全帧掩码**：引擎在「单脸 + shape 无 bit2 + 宿主声明有 GPU 掩码链」时只算几何、不画那张 4K 全帧 CPU 掩码，宿主按 `geomOnly` 走 GPU 重画，取不到就整帧跳过（绝不按「无掩码=全皮肤」磨）。**正确性：geomOff vs geomOn 六配置 maxdiff=0、对 2.3.0 也是 0** —— 逐像素证明那张掩码是死代码；**性能：配对 A/B 测不到收益**（Δ引擎符号混乱），因为 `buildMaskInto` 的大头是 `letterboxRgb` 与推理、不是 `paintSkin`，开工前的估算错了。定位改为 **S4b 的前置构件**，默认开。顺带修了 `gate.py` 健康项（geomOnly 下掩码占比恒 0）与 `ab_pair` 公平性告警口径）｜ 2026-11-02 20:45（**2.5.0（S3）暂存面双缓冲回读（opt-in，默认关）**：先给 2.4.2 加了两段计时取证 —— 「下载」= 排队等 map + memcpy（720p 0.46+0.28、4K 1.98+2.52），确认 S3 的收益上限就是那 0.46/1.98；随后用 ping-pong 暂存面消掉排队等待、CPU 侧整体晚一帧（`beautyCoreSetFrameTag(n−1)` + 链改画 `ring[cpu_tag]`，环槽 2→3），**口径 C 交替配对 A/B：720p 1.66→0.95（−43%）、4K 8.71→6.75（−22%），六条差值全部同号**；`BEAUTY_ASYNC_STAGE=1` 六配置 **maxdiff=0**。代价：输出整体晚一帧（≈33 ms）且每帧多一次全帧拷贝，另 4K 一个窗口 nofresh 14/180（对齐 92%）记为观察项。**门禁口径按用户拍板定为 A+C**（`gate.py` 拆项 + `ab_pair.py` 配对），见 9.1.2 / 9.4.1）｜ 2026-11-02 20:10（**2.4.1（S2b）帧环拷贝改按需 + S0 两遍固化实测**：帧环只在「本帧被送去检测」时才拷一份，720p 交替 A/B 往返 **2.00 → 1.50 ms（−0.50，−25%）**，4K 无收益（8.61 vs 8.81，在噪声内）；正确性 `2.4.1 vs 2.3.0` 六配置 **maxdiff=0**；回退 `BEAUTY_RING_ALWAYS=1` 实测有效。**S0 两遍固化结论：未达标**（720p Δ0.55、4K Δ0.85/0.99），根因是往返里「CPU 等 GPU 排队」项本身有 ±0.5~1 ms 会话间抖动，0.15 ms 判据只适用于 2.2.1 那种低 GPU 负载时代 —— 详见 9.1.1，判据修正需拍板）｜ 2026-11-02 16:40（**2.4.0（S2）帧环翻默认，三项稳定性门槛全 PASS**：4K 连续 30 分钟 **54180 帧**零 D3D11/驱动异常、往返 **8.74 ms**（门槛 ≤9.0）、画布 720p↔1080p↔4K 来回 **9 次**切换不崩、热重载 3 轮正常、冷启动 7 次正常；同负载 A/B 环收益 **720p 2.17→1.29 ms（−41%）、4K 11.39→8.28 ms（−27%）**；顺带修掉 S1 遗留的「直通期间帧环陈旧」问题，并把环绑定到 `gpu_mask_chain`（掩码走 CPU 时不再白付 33 MB/帧拷贝）。详见 9.3.1）｜ 2026-11-02 10:41（**2.2.0 已复跑验证通过（10:39 日志，装机环境首次真 GPU 全链路）：`init OK (v2.2.0, engine=gpu/2.0.0, region=on)`、6 个 hlsl 全部从 `C:\ProgramData\obs-studio\plugins\obs-beauty\data\shaders\` 加载、`引擎资源已预热 1280x720`、自检 `out_tex mean=159.8`/`detail +0.0%` 无假阳性、frame#2 起 faces=1、插件侧零 warning/error；首帧 135 ms（含 HLSL 编译 ~107 ms）发生在场景加载期不可见，预热后帧间隔 3/34/29 ms 正常。**2.2.0 修复「装机环境 GPU 路径整体失效」的部署缺口 + BUG 4 预热扩展，已装机 MD5 `484CCF71606A1765187AF0DDB56BDC59`**）。**缺口根因**：GPU 效果经 `obs_module_file()` 从 `<插件根>\data\` 加载（obs64.exe 内 `obs-studio/plugins/%module%`+`/bin/64bit`+`/data` 路径串 + OBS 用户插件布局为证），而 2.x 分支部署只装 dll、**从未装 shaders** → 所有不走 `BEAUTY_SHADER_DIR` 的启动（含 10:01 设了用户级 `BEAUTY_ENGINE_IMPL=gpu` 之后直接双击 OBS）里六个 effect 全部加载失败并**静默回落 CPU**：720p 引擎从 ~1 ms 恶化到 **11.5–13.8 ms/帧**（磨皮 9.4 ms 全在 CPU）、链钩子 `S/T/R/D/W` 全 0、**A/B 两臂都测 CPU 路径、数据无效**。**用户 09:50 / 10:05 / 10:10 三次 A/B 全部 `chain=0/180` 即此因，不是 2.1.1 回归**（09:50 用的是 2.1.0，同样为 0；solo 启动器一直设 `BEAUTY_SHADER_DIR=D:/obs_beauty_gpu/shaders`，开发期数据正常，缺口被完全掩盖）。**修复**：新增 `03_装机\7_install_gpu.ps1`（dll + `data\shaders\*.hlsl` 一并装机、备份 + MD5 校验 + obs64 占用检查），已执行；solo shader 目录同步源码最新版（此前 smooth.hlsl 为旧注释版）。**BUG 4 预热扩展**：预热块在纹理六件套之外追加六个 effect 加载（`gs_effect_create_from_file` 创建时即完成 HLSL 编译 → 首次 draw 零编译耗时）；失败日志区分 `textures=0/effects=0` 并直指 data 目录缺 shaders。此前 10:01 方案 A：用户级 `BEAUTY_ENGINE_IMPL=gpu` 已写入 `HKCU\Environment`（双击 OBS 即 GPU 引擎；撤销 `setx BEAUTY_ENGINE_IMPL ""`）；2.1.1 BUG 4 预热 + 6_launch 引擎陷阱；2.1.0/2.0.2 实测全通过（引擎 0.78–0.98 ms、对拍判定=通过 faces=1）。**BUG 3（采集抽风）+ 「加美颜就被拉伸」（2026-11-02 10:5x 定位）**：用户报告「本来视频正常分辨率，增加美颜效果就被拉伸」。**结论：滤镜不可能造成拉伸**（三条证据：① libobs obs-source.c `get_base_width` 源码核实——滤镜不实现 get_width/get_height 时链逻辑尺寸经 filter_target 递归到底部源，加减滤镜不改变源向场景报告的尺寸，本插件未实现这两个回调；② 本滤镜 cx/cy 恒取 `obs_source_get_base_width/height(target)`，全部输出/中间纹理带尺寸校验即时重建，绘制恒 1:1；③ 用户日志 `render#0 target=视频采集设备 1280x720`——滤镜按源尺寸渲染，若在拉伸该行会是画布尺寸 1080x1920）。**真根因是场景项框与画布几何**：画布 1080x1920（9:16 竖）+ 相机 1280x720（16:9 横），项目框必须保持 16:9（如 1080x608 居中）才不变形；项目框=画布尺寸即拉伸，与滤镜开关无关。常见误归因：OBS 添加源默认拉伸填满画布，或画布横→竖切换时 OBS 按非均匀比例缩放已有场景项。**待用户 30 秒定测**（原「2 分钟验证」方案已按本轮判据收紧）：① **同一 OBS 预览内 A/B**——美颜开 vs 点滤镜对话框眼睛图标关，看脸部宽高比是否随参数变化（是=实锤处理伪影；否=滤镜几何零变化，转向场景项或观感误判）；② 右键相机源→变换→编辑变换读尺寸（预期 16:9 如 1080×608；若 1080×1920 即场景项实锤）；③ 设置→视频读画布（预期 1080×1920）。**2026-11-02 11:09–11:35 二次彻底复查（用户补充关键判据「美颜=0 不拉伸、>0 必拉伸」后重查全路径，结论升级为「滤镜在任何参数下都不可能改变画面几何」）**：① **API 审计**——对父源零写入（全文无 `obs_source_set_width/height`、无增删滤镜）；滤镜注册结构无 `get_width/get_height` 回调（obs-beauty.cpp:5347-5358 仅 type/output_flags/video_render）；② **全纹理审计**——所有定尺纹理（out_tex/skin_tex/mask_tex/ring/hook_src_tex 及各 RT）均按当帧 `cx×cy` 创建且带尺寸校验即时重建，所有 texrender begin 时定尺，每次 draw 都是 cx×cy 全屏 quad；③ **libobs 源码实证**（obs-source.c `obs_source_process_filter_begin_with_color_space`）：每帧 `cx = obs_source_get_width(target)` 现建滤镜目标，无陈旧缓存；无 get_width/get_height 的滤镜经 `get_base_width` → `filter_target` 递归到底部源的异步当前宽——加减滤镜不改源向场景报告的尺寸；④ **逻辑推导**——滤镜摘除/禁用/参数 0/参数>0 四种状态下 OBS 映射几何恒等（参数 0 时滤镜仍完整渲染：`skip_sdk` 直拷 buf_out→上传 out_tex→1:1 画），与参数>0 唯一差别只是画 out_tex 还是 chain_out_tex——同一源尺寸图映射到同一场景项框，比例不可能随参数变化。**截图取证（Python 像素分析，scipy 不可用已用手写 BFS 替代）**：OBS 预览红边框竖线 x=137-138 贯穿 y=22-415（整个可见预览高度）、横线 y=411-412 至 x=521 → 场景项上/右边不可见、预览处于放大/滚动态，场景项真实尺寸无法从截图测量；右窗口（相机原生视图）内容 bbox 451×767 ≈ 9:16 竖屏裁切放大版（人像放大约 1.6×），**不是 1:1 全帧参照**——用户「前后对比」本身不对等。**剩余分支**：(a) 场景项宽高比≠16:9（会同样影响参数 0，与用户观察矛盾）；(b) **处理伪影**（最可能，与「效果>0 才出现」完全自洽）——GPU 掩码脸型椭圆（mask.hlsl）、五官椭圆族归一化坐标转绝对像素（`fc.fx + e.cx*fc.fw`）、半分辨率磨皮采样（`(cx+1)/2`）三者任一尺度不对 → smoothing/美白/红润抹错区域，观感即「拉伸」。若确认 (b)，按「掩码尺度 → 五官椭圆尺度 → 半分辨率采样」顺序挖。BUG 3「抽风瞬间正常比例」最高嫌疑仍为 dshow 瞬时重配致源尺寸瞬变→场景项瞬变。**待办**：① 用户在会话中实测反复开关美颜，验证 BUG 4「概率性卡首帧」消失（代码确认 `f->warm` 仅尺寸变化时置回 false（obs-beauty.cpp:4642），同一滤镜实例同尺寸重复开关不重复付费；残留场景：往源上新加滤镜的首帧仍会付 ~135 ms）；② A/B 必须用 `5_run_ab.bat` 重跑（09:50 / 10:05 / 10:10 三次两臂均 CPU 路径数据无效）；③ T10 4K 五官/帧环崩溃待复现取证；④ 已知遗留：UI dirty 风暴（`识别选项已下发` 每 33ms 刷屏，引擎侧 early-return 无功能影响，修 UI 需重建部署 obs-beauty-ui.dll，涉及两版共用 UI，待用户决定）。CPU 源码 1.0.0 / UI 1.0.0 仅改源码、DLL 暂不部署；三套版本号方案：小更新→右+1 / 重要→中+1 / 超大型→左+1）
 
 - **2.2.1（2026-11-02 13:2x 用户报「磨皮 = 0 画面正常、磨皮 > 0 画面一定被放大」）—— BUG 5，已定位/修复/装机**：
   - **现象**：同一场景同一机位，面板 `磨皮 0 / 清晰 30`（图1）画面正常；把 `磨皮` 拉到 `1`（图2）整幅画面被放大、人像右移下移并被裁掉一截。用户补充「磨皮 = 0 不放大、> 0 必放大」，与开关强相关。
@@ -339,6 +339,7 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 | **2.4.1** | **S2b：帧环拷贝改按需（S2 附带项收尾）** | 环里那一份**只有对齐换帧时才会被读**，而对齐要的永远是「送去检测的那一帧」（`heldFrame_` 的 tag 来自 `submitAsync` 时的 `g_frameTag`）；其余帧链直接采样 `in_tex`（`beauty_hook_prepare`：`src==buf_in` → `hook_cur_in`），环里那份从头到尾没人读。于是把 `beauty_ring_put()` 从「每帧无条件、process 之前」改成「**仅提交帧、process 之后**」，由 `beautyCoreMaskSubmits()` 计数差判定本帧是否提交。**实测（9.3.2）**：720p 交替 A/B 往返 **2.00 → 1.50 ms（−0.50 / −25%）**、4K **8.61 → 8.81（无收益，噪声内）**；`prep` 仍 0.00（环照常命中）、对齐 100%、`2.4.1 vs 2.3.0` 六配置 **maxdiff=0**。回退 `BEAUTY_RING_ALWAYS=1`（实测有效） |
 | **2.3.0** | **S1 性能优化：全 0 参数直通短路（Q1）** | `beauty_filter_render()` 入口新增 `passthrough` 分支：`allow_allzero_skip && skip_sdk && f->verified && !f->mirror` 时整段跳过 GPU→CPU→GPU 往返（下载/回读/计时、帧环 put、memcpy、上传全跳过），`draw_tex` 直接画 `in_tex`（等价于滤镜禁用）。回退开关 `BEAUTY_ALLZERO_SKIP=0`。**代码/编译/装机完成（dll MD5 `D3B6CDEADC092EA66EF0860680572EB4`）；正确性/性能门槛待用户运行时验收。** |
 | **2.5.0** | **S3：暂存面双缓冲回读（Q3，opt-in）** | 每帧先 map **上一次提交**的暂存面（那一趟拷贝在上一帧就已排进队列，此刻已就绪），成功后再把本帧提交到另一张 —— 顺序不能倒，因为 `gs_stagesurface_map` 会排空命令队列，先提交就会等到自己刚排进去的拷贝。CPU 侧因此整体晚一帧：`beautyCoreSetFrameTag(frame_tag−1)`，链也改画同一帧（`hook_cur_in = ring[cpu_tag]`，取不到就退回上传）；帧环槽 2→3；直通时 `stage_submit=-1` 作废 ping-pong。**实测（9.4.1）**：交替配对 A/B 720p **1.66→0.95（−43%）**、4K **8.71→6.75（−22%）**，六条差值全部同号；六配置 **maxdiff=0**。代价：输出晚一帧 + 每帧一次全帧拷贝（S2b 的按需拷贝在此退化为「全都要」）。回退 `BEAUTY_ASYNC_STAGE=0` |
+| **2.6.0** | **S4a：GPU 掩码路径跳过 CPU 全帧掩码（S4b 的前置）** | `beauty_gpu_mask_into()` 只用几何重画掩码、从不读 `mask_`，于是让引擎在「单脸 + shape 无 bit2 + 宿主声明有 GPU 掩码链」时只算几何：跳过 `memset(mask)`、三段逐像素、`memset(protect)`、两个保护椭圆，但 diag 的整数几何与 `hasEyes` 照填。宿主判据放宽为 `(job.mask \|\| geomOnly)` / `(mg.fresh \|\| geomOnly)`，GPU 建图失败则**整帧 skip**（绝不按「无掩码=全皮肤」磨）。**实测（9.5.1）**：六配置 `maxdiff=0`（geomOff vs geomOn，且对 2.3.0 也是 0），`gonly=178~180 gskip=0`；**配对 A/B 无收益** —— 大头是 `letterboxRgb` 不是 `paintSkin`。回退 `BEAUTY_MASK_GEOM_ONLY=0` |
 
 > ⚠ **一个诚实的偏差记录**：4K 走帧环时 M1 出现 **24 px 的 1 灰阶差异（0.0003%，判定仍通过）**。
 > 怀疑是 `gs_copy_texture` 的格式/舍入路径，未深究：影响面 0.0003% 的掩码像素、≤1 灰阶，
@@ -1200,6 +1201,63 @@ REPEATABILITY(A): ALL PASS
 - **回退**：`BEAUTY_DETECT_SMALL=0`（回全帧下载）。
 - **注意**：这是**唯一动到引擎接口**的阶段，必须同时跑 `06_离线验证/offline_regress.py check`（CPU golden `maxdiff=0`）。
 
+#### 9.5.1 S4a 实测：GPU 掩码路径跳过 CPU 全帧掩码（2026-11-02 21:00–21:20，2.6.0）
+
+**动机**：`beauty_gpu_mask_into(f, in_tex, cx, cy, md)` 只用几何参数（矩形/椭圆/眼睛/肤色椭圆）
+在 `in_tex` 上重画掩码，从头到尾不读 `mask_` 一个像素。那 `buildMaskInto` 每帧画的
+4K 全帧 CPU 掩码（`seg 掩码` 2.27~2.82 ms）在 GPU 路径下就是白算。
+
+**实现**（判据放在引擎里，不是宿主预判）
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `beauty_core.h` | `BeautyMaskDiag::geomOnly`、`BeautyChainJob::maskGeomOnly`、新 API `beautyCoreSetMaskGeomOnly()` |
+| 2 | `buildMaskInto` | detect 成功后判 `g_maskGeomOnly && diagOut && 单脸 && !(shape&4)`；成立则跳过 `memset(mask)`、三段逐像素、`memset(protect)`、两个保护椭圆，**但 diag 的整数几何与 `hasEyes` 照填** |
+| 3 | `process` | geomOnly 帧把 `job.mask`/`job.protect` **显式置空** + `maskGeomOnly=1` —— `mask_` 里是上一帧残留，绝不能当本帧用 |
+| 4 | `obs-beauty.cpp` | `gpu_mask_ok` 的两处判据放宽成 `(job.mask \|\| geomOnly)` 与 `(mg.fresh \|\| geomOnly)`；GPU 建图失败时**整帧 `skip_video_filter`**（绝不按「无掩码=全皮肤」磨），计数 `gskip` |
+| 5 | 回退 | `BEAUTY_MASK_GEOM_ONLY=0`（在 setter 里判，不受 init 顺序影响） |
+
+**为什么判据要放在引擎里**：`count`/`shape` 是检测之后才知道的，宿主无法预判。引擎在
+条件不满足时照常画全帧掩码并置 `geomOnly=0`，宿主看到 0 就退回上传 —— 所以不存在
+「两边都没有掩码」的帧。
+
+**正确性：六配置逐像素 `maxdiff=0`**
+
+`BEAUTY_MASK_GEOM_ONLY=0` 与默认（geomOnly 开）各采一遍，逐张比：
+
+| 配置 | geomOff vs geomOn | 2.3.0 vs 2.6.0 |
+|---|---|---|
+| off / blur / clarity / whiten / shape | **全部 0** | **全部 0** |
+
+这是本阶段**唯一达成目标的证据**：它证明 CPU 那张全帧掩码在 GPU 路径下确实是死代码
+（不是「看起来没用」，是逐像素证明的）。性能行同时显示 `gonly=178~180 gskip=0`。
+
+**性能：没有收益（诚实记录）**
+
+交替配对 A/B（`geomoff=BEAUTY_MASK_GEOM_ONLY=0` vs `geomon=...=1`，3 轮）：
+
+| 分辨率 | Δ搬运（各轮） | Δ引擎（各轮） | 判定 |
+|---|---|---|---|
+| 720p | +0.15 / +1.48 / +0.09 | +0.00 / −0.06 / +0.00 | 噪声，无收益 |
+| 4K | −0.04 / +0.03 / −0.46 | −0.53 / +0.12 / +0.03 | 噪声，无收益 |
+
+4K 的 `seg 掩码` 在 geomOff/geomOn 两臂几乎不变（2.60~2.82 vs 2.76~2.98）。
+
+**为什么没收益（推翻了开工前的估算）**：`buildMaskInto` 里最贵的是
+**`letterboxRgb` 把整帧双线性缩到 640×360**（读 8.3M 像素 = 33 MB，cache 不友好）加
+YuNet 推理；`paintSkin` 只覆盖脸框内约 16% 的像素、且是整数运算，量级远小于前者。
+开工前我按「逐像素画掩码是大头」估算 1.5~2 ms，**估错了**。
+
+**结论与处置**：S4a **不作为独立收益项**，保留为 **S4b 的前置构件**（缩略图模式下
+根本没有全帧像素可画 `mask_`，geomOnly 是必须的），默认开。收益全部记在 S4b。
+
+**两个被 S4a 打破的验收指标（已修）**
+
+1. `掩码` 覆盖率在 geomOnly 帧恒为 0（不画就没统计）→ `gate.py` 健康项改为：
+   两边 `gonly` 均为 0 时才比覆盖率，否则改判 `gskip==0`；
+2. `ab_pair.py` 的公平性检查（两臂掩码占比差 ≤1 pp）在 S4a 的 A/B 里必然报警
+   （一臂恒 0）→ 看 S4a 的配对表时**忽略该警告**，S4b 起两臂都带 gonly 时才恢复有效。
+
 ### 9.6 S5 通道打包（Q7+Q6 合并）
 
 - **改动面**：`smooth.hlsl` + `beauty_gpu_smooth()`；C/B1/B2 打包进一张 RGBA16F 的 `.r/.g/.b`。
@@ -1254,4 +1312,5 @@ REPEATABILITY(A): ALL PASS
 | S2 | **验收通过（稳定性 + 性能）** | 2.4.0，见 9.3.1。帧环翻默认（`BEAUTY_GPU_FRAME_RING` 不设即开 + 绑定 `gpu_mask_chain`），并修掉 S1 遗留的「直通期间环陈旧」。**4K 30 min / 54180 帧零异常、往返 8.74 ms（≤9.0 ✅）、切换 9 次不崩、热重载 3 轮正常、冷启动 7 次正常**；A/B 收益 720p **2.17→1.29 ms（−41%）**、4K **11.39→8.28 ms（−27%）**。回退 `BEAUTY_GPU_FRAME_RING=0`。**注意：帧环只在单脸时启用**，多脸场景收益为 0（Q4 另立项） |
 | S2b | **已完成（2.4.1）** | 帧环拷贝改按需：720p 交替 A/B **2.00→1.50 ms（−25%）**、4K 噪声内无收益；`2.4.1 vs 2.3.0` 六配置 maxdiff=0；回退 `BEAUTY_RING_ALWAYS=1` 实测有效。见 9.3.2 |
 | S3 | **已完成·默认仍关（opt-in，2.5.0）** | 暂存面双缓冲回读：配对 A/B 720p **1.66→0.95（−43%）**、4K **8.71→6.75（−22%）**，六条差值同号；六配置 **maxdiff=0**。代价：输出整体晚一帧 + 每帧一次全帧拷贝。**待 S3b**：拖影专项（需带帧号烧录的 mp4 媒体源，websocket 做不到帧级运动）+ 4K 长跑，两项齐了再决定翻默认。见 9.4.1 |
+| S4a | **已完成（2.6.0），无独立收益** | GPU 掩码路径跳过 CPU 全帧掩码：六配置 `maxdiff=0`（逐像素证明那张掩码是死代码）+ `gonly=180 gskip=0`；配对 A/B **测不到收益**（噪声内）。定位改为 S4b 的前置构件，默认开。见 9.5.1 |
 | S4–S7 | 待启动 | 按 9.5–9.8 门槛；S4 依赖 S2 已翻默认（✅ 已满足）。S4 是 4K 的大头（8.x → ≤4.5），建议 S3b 与 S4 并行推进 |
