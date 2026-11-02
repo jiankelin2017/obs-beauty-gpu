@@ -76,8 +76,25 @@ foreach ($d in (Get-ChildItem $srcRoot -Directory -ErrorAction SilentlyContinue)
     $sd2 = Join-Path $d.FullName "shaders"
     if ((Test-Path $sd2) -and ($sd2 -ne $shaderSrc)) { $shaderCopies += $sd2 }
 }
-$soloSd = "D:\obs_beauty_gpu\shaders"
-if (Test-Path $soloSd) { $shaderCopies += $soloSd }
+# Solo dev copy: BEAUTY_SOLO_SHADER_DIR takes precedence; the hardcoded path is
+# only the default.  The env var must win when both exist - otherwise a machine
+# that happens to have D:\obs_beauty_gpu would ignore the override completely and
+# the switch would be dead.  An env var pointing at a missing dir is skipped with
+# a note rather than treated as fatal (it is a dev dir, not a deploy target), but
+# the note always names the path actually used, so a typo shows up in the log
+# instead of silently disabling the drift check.
+$soloSd = $env:BEAUTY_SOLO_SHADER_DIR
+if ([string]::IsNullOrWhiteSpace($soloSd)) {
+    $soloSd = "D:\obs_beauty_gpu\shaders"
+    Write-Output "solo dir : default $soloSd"
+} else {
+    Write-Output "solo dir : BEAUTY_SOLO_SHADER_DIR=$soloSd"
+}
+if (Test-Path $soloSd) {
+    $shaderCopies += $soloSd
+} else {
+    Write-Output "solo dir : skipped (not found: $soloSd)"
+}
 $drift = @()
 foreach ($sd in $shaderCopies) {
     if ((Get-ShaderSig $sd) -ne $authSig) { $drift += $sd }
@@ -113,10 +130,19 @@ $d2 = Get-FileHash $dllDst -Algorithm MD5
 Write-Output "dll      : $dllDst"
 Write-Output "dll md5  : $($d2.Hash)  (build $($d1.Hash))  match=$($d1.Hash -eq $d2.Hash)"
 Write-Output "shaders  : $dataDir"
+$badShaders = @()
 foreach ($f in $hlsl) {
     $p = Join-Path $dataDir $f.Name
     $ok = (Test-Path $p) -and $((Get-FileHash $p -Algorithm MD5).Hash -eq (Get-FileHash $f.FullName -Algorithm MD5).Hash)
+    if (-not $ok) { $badShaders += $f.Name }
     Write-Output ("  {0,-12} {1}" -f $f.Name, $(if ($ok) { "OK" } else { "MISMATCH" }))
 }
 if ($d1.Hash -ne $d2.Hash) { throw "dll md5 mismatch after copy" }
+# A per-file MISMATCH used to be printed and then ignored - the install still
+# said "INSTALL OK" and OBS silently fell back to CPU for that segment.  Every
+# printed line is now also a hard failure, reported after the whole list so the
+# log still shows the status of all six files.
+if ($badShaders.Count -gt 0) {
+    throw ("shader md5 mismatch after copy: " + ($badShaders -join ", "))
+}
 Write-Output "INSTALL OK"

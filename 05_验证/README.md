@@ -1,0 +1,40 @@
+# 05_验证 —— 门禁与采集脚本
+
+> 本目录的脚本用于**离线对拍**与**装机后验收**。依赖见同目录 `requirements.txt`。
+
+## 一、三条命令起环境
+
+```bat
+py -3 -m pip install -r 05_验证\requirements.txt
+py -3 -c "import websocket, PIL, numpy; print('deps ok')"
+py -3 05_验证\verify_smooth_compiles.py
+```
+
+第一条装依赖，第二条自检（能打印 `deps ok: <版本>` 即为成功），第三条是不需要 OBS 的着色器编译对拍，跑通即说明环境可用。
+
+`py -3` 指 Python 3.9+ 的启动器形式（Windows 官方安装包自带）。若机器上只有 `python` 没有 `py`，把命令里的 `py -3` 换成 `python`，其余不变。
+
+`websocket-client` 是 `obsctl.py` 访问 obs-websocket v5 的客户端；只有需要**起停 OBS、改滤镜、截图**的脚本才会用到它。纯离线对拍（`verify_*_compiles.py`）不需要它，也不需要 OBS。
+
+> 这些脚本不是 argparse 写法，**没有 `--help`**。`gate.py --help` 只会把 `--help` 当选项滤掉、然后去扫日志；`probe_one.py --help` 会把它当浮点数并报错。参数说明看本文，或者直接看脚本头部。
+>
+> `gate.py` 无参运行时自动选用最近一份 OBS 日志：`py -3 05_验证\gate.py`；要指定日志就直接把路径传在后面。加 `--skip-transfer` 切到「A+C 合成口径」。
+
+## 二、按用途分三类
+
+| 用途 | 脚本 | 要不要 OBS |
+|---|---|---|
+| 离线对拍（着色器编译 / 像素对齐） | `verify_tone_compiles.py`、`verify_smooth_compiles.py`、`verify_detail_compiles.py`、`verify_warp_compiles.py`、`verify_mask_compiles.py`、`verify_region_compiles.py` | 否 |
+| 门禁判定与配对 A/B | `gate.py`、`ab_pair.py` | 门禁读日志：否；采集：是 |
+| 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
+
+## 三、两条容易踩的坑
+
+1. **收益只认配对**：`gate.py --skip-transfer` 判的是健康项与引擎项，跨会话的搬运项不可比；单次绝对值只能看趋势，收益结论必须来自 `ab_pair.py` 的同会话交替 A/B。
+2. **采集前先确认数据有效**：日志里 `engine=gpu` 且 `S/T/R/D/W` 非 0，否则那一轮测的是 CPU 路径，数字不能用。
+
+## 四、素材与输出
+
+- `assets/`：静态人脸图（`face_720p.png`、`face_4k.png` 及 `*_single` 单脸版）与逐帧匀速移脸素材（`motion_720p.mp4` / `motion_4k.mp4` 及同名 `json`）。
+- `out/`：每次验收一个子目录（如 `v271s4k`、`v271f720`、`v270f4k`），内含截图与 `_meta.json`；`_obs_screenshots/` 放整屏截图。
+- **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。建议长跑一结束就把日志复制到 `out/logs/`（该目录当前不存在，首次使用先 `mkdir 05_验证\out\logs`），再启动下一个 OBS 实例。
