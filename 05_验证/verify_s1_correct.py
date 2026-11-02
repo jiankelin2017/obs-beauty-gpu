@@ -101,7 +101,8 @@ def dll_version(path):
     except Exception:
         return "?"
     cands = []
-    for v in (b"2.0.0", b"2.1.0", b"2.1.1", b"2.2.0", b"2.2.1", b"2.3.0", b"2.3.1"):
+    for v in (b"2.0.0", b"2.1.0", b"2.1.1", b"2.2.0", b"2.2.1", b"2.3.0", b"2.3.1",
+              b"2.4.0", b"2.4.1", b"2.5.0", b"2.5.1", b"2.6.0"):
         if v in blob:
             cands.append(v.decode())
     # 引擎版本固定是 2.0.0，滤镜版本取最大的那个

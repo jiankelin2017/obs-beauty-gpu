@@ -414,6 +414,14 @@ struct beauty_filter {
 	// 有了环就不必再从 CPU 上传（4K 那次上传 ≈3 ms）。
 	// 只在 GPU 掩码模式下用（掩码与帧必须同源），其它情况一律走上传。
 	bool gpu_ring_ok;              // BEAUTY_GPU_FRAME_RING 且 supportsGpu()
+	// S2b：环拷贝按需。环里那一份只有「对齐换帧」时才会被读，而对齐换帧要的
+	// 永远是**送去检测的那一帧**（heldFrame_ 的 tag 来自 submitAsync 时的
+	// g_frameTag）。其余帧链直接采样 in_tex（beauty_hook_prepare 里
+	// src==buf_in 就复用 hook_cur_in），环里那份从头到尾没人读。
+	// 所以默认只在「本帧真的提交了检测」时才拷；`BEAUTY_RING_ALWAYS=1` 回到
+	// 每帧无条件拷贝（2.4.0 / S2 的老行为，回退用）。
+	bool ring_always;              // BEAUTY_RING_ALWAYS=1（回退老行为）
+	bool ring_skip_logged;         // 首次跳过时打一行日志，证明分支真的走到了
 	gs_texture_t *ring_tex[3];
 	unsigned long long ring_tag[3];
 	unsigned long long frame_tag;  // 宿主帧号（单调自增）
@@ -607,6 +615,11 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		// 白付每帧 33 MB 的拷贝。
 		const char *gr = getenv("BEAUTY_GPU_FRAME_RING");
 		f->gpu_ring_ok = (!gr || gr[0] != '0') && f->gpu_mask_chain;
+		// S2b：环拷贝按需（见 struct 里 ring_always 的注释）。同样只认 '1' 作
+		// 回退，拼错开关留在**新的安全侧**——按需拷贝只是少拷，最坏退化成从
+		// CPU 上传那一帧（慢几毫秒），不会画错。
+		const char *ra = getenv("BEAUTY_RING_ALWAYS");
+		f->ring_always = (ra && ra[0] == '1');
 	}
 	// 4d：五官椭圆对拍（纯诊断，一次性，默认关）
 	{
@@ -4836,12 +4849,15 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	}  // end if (!passthrough)：下载/回读/计时整段跳过
 
 	// 5b-2 切片 4：帧号 + 把本帧原样拷进显存环。
-	// 顺序要紧：帧号必须在 process 之前设好（引擎要把它和送检测的那一帧绑定），
-	// 拷贝也必须在本帧画完之前完成 —— 同一命令流内有序，钩子采样时一定已到位。
+	// 顺序要紧：帧号必须在 process 之前设好（引擎要把它和送检测的那一帧绑定）。
+	// S2b：拷贝时机改成「默认 process 之后、且仅提交帧」——见下面 5019 附近的块。
+	uint64_t ring_sub0 = 0;   // 本帧开始前的检测提交次数（判「本帧是否被送去检测」）
 	if (!passthrough) {
 	f->frame_tag++;
 	beautyCoreSetFrameTag(f->frame_tag);
-	if (f->gpu_ring_ok &&
+	ring_sub0 = beautyCoreMaskSubmits();
+	// 回退路径（BEAUTY_RING_ALWAYS=1）：保持 2.4.0 的老顺序，process 前无条件拷。
+	if (f->ring_always && f->gpu_ring_ok &&
 	    beauty_ensure_ring(f, gs_texture_get_width(in_tex),
 			       gs_texture_get_height(in_tex),
 			       gs_texture_get_color_format(in_tex)))
@@ -5015,6 +5031,26 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			frame_mirror(f->buf_out, cx, cy);
 
 		gs_texture_set_image(f->out_tex, f->buf_out, cx * 4, false);
+	}
+	// ==== S2b：帧环拷贝按需（4K 每帧省一次 33 MB 的 gs_copy_texture）========
+	// 只有「本帧被送去检测」才需要把这一帧留在环里：对齐换帧要的 heldFrame_
+	// 必然来自 submitAsync 的那一帧（beauty_core.cpp 里用当时的 g_frameTag 盖戳），
+	// 其余帧链直接采样 in_tex（beauty_hook_prepare：src==buf_in → hook_cur_in），
+	// 环里那份从来没被读过 —— 2.4.0 之前是每帧白拷一次。
+	// 必须放在 process 之后：提交动作发生在 process 内部，之前无从判断。
+	// 判空落空时的代价只是「从 CPU 上传那一帧」（4K ≈3 ms），画面不受影响。
+	if (!passthrough && f->gpu_ring_ok && !f->ring_always &&
+	    beautyCoreMaskSubmits() != ring_sub0) {
+		if (beauty_ensure_ring(f, gs_texture_get_width(in_tex),
+				       gs_texture_get_height(in_tex),
+				       gs_texture_get_color_format(in_tex)))
+			beauty_ring_put(f, f->frame_tag, in_tex);
+		if (!f->ring_skip_logged) {
+			f->ring_skip_logged = true;
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 帧环拷贝改按需：仅检测提交帧留环，"
+			     "其余帧跳过整帧拷贝（BEAUTY_RING_ALWAYS=1 回退老行为）");
+		}
 	}
 	f->hook_cur_in = NULL;   // 仅供本帧 process 期间的磨皮回调复用
 
