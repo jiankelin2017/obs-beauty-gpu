@@ -749,7 +749,46 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 - 4K scene 档首帧自检 `out_tex mean=0.0`：scene 首帧尚未合成，属既有现象，不影响 perf 测量。
 - **正确性**：passthrough 走 `draw_tex=in_tex` + `GS_BLEND_ONE/INVSRCALPHA`，相机 alpha=255 → `dst=src`，与「滤镜禁用」逐像素一致（结构上 maxdiff=0）。
 - **待补**：① 非全 0 四组合（磨皮/清晰/美白/五官）vs 2.2.1 录帧 `maxdiff=0`；② 滤镜开关来回 20 次手动验收；③ 4K 画面目视。此三项需人工录制/勾选，脚本无法自动完成。
+  → **已于 15:35 全部自动化补齐，见 9.2.2。**
 - 工具已落地：`05_验证/make_s1_collections.py`（生成全 0 集合）、`03_装机/v_s1.ps1`（`-Target s1|4k [-Rollback]`）、`v_s1_720p.bat` / `v_s1_720p_rollback.bat` / `v_s1_4k.bat`。
+
+#### 9.2.2 S1 正确性验收实测（2026-11-02 15:35，2.3.0）
+
+9.2.1 里挂着的三项「需人工」验收，改用 **obs-websocket（OBS 自带，端口 4455）+ 静态图输入** 全自动跑完，不再需要人点录制。
+
+**方法**
+
+- 静态输入集合：`beauty_static`（画布 1280×720，`image_source` 喂固定 PNG `05_验证/assets/face_720p.png`）+ `beauty_static_4k`（3840×2160，`face_4k.png`）。摄像头是实时画面，两次运行输入不同，像素差无法归因，必须换成静态图。
+- 取帧走 **OBS 自带「截图输出」热键**（`OBSBasic.Screenshot` → 程序真实输出帧），不是 `GetSourceScreenshot`。
+- 参数/开关通过 websocket 改：`SetSourceFilterSettings` / `SetSourceFilterEnabled`。
+- 6 种配置：全 0、滤镜禁用、磨皮 80、清晰 80、美白 60+红润 50、五官 60（瘦脸/大眼/下巴/立体各 0.6/0.5）。
+- **严格基线**：从 `1ad11fc`（S1 之前的「2.2.1 + BUG5 修复」）单独 `git worktree` 编译出 dll 对拍，而不是用 backup 里来源不明的 2.2.1。
+
+**结果**
+
+| 对照 | 结果 |
+|---|---|
+| S1 之前源码(2.2.1) vs 2.3.0，6 种配置 | **全部 maxdiff=0**（逐像素一致） |
+| 2.3.0 同版本连跑两次 | 全部 0（采集可复现，作为方法自检） |
+| 默认 vs 回退 `BEAUTY_ALLZERO_SKIP=0` | 全部 0 |
+| 全 0 直通 vs 滤镜禁用 | maxdiff=0（三次独立运行均成立） |
+| 效果自检（相对「滤镜禁用」） | 磨皮 **15.8%** / 清晰 **16.9%** / 美白 **17.0%** / 五官 **2.96%** — 四组合均真实生效 |
+| 4K 3840×2160 | 直通 vs 禁用 maxdiff=0；美颜组合 maxdiff=15、16.98% 生效；日志 `3840x2160 faces=4` 无 device-lost |
+| 开关来回 20 次（40 帧真实输出） | 40 帧全部 `mean=116.83`，无黑帧、OBS 存活、日志零 error |
+
+**结论：S1 对画面零影响（maxdiff=0），收益只在性能。** 
+
+**踩过的坑（都会让结果变成假阳性，后续 S2–S7 复用这套工具时务必照做）**
+
+1. **`GetSourceScreenshot` 是按需渲染，对磨皮系统性失真**：那一次渲染里掩码不新鲜（perf 行 `anom=nofresh` 计数等于截图次数），磨皮被跳过 → 实测 blur 80/100、双边/高斯/弱三档全为 `maxdiff=0`，而清晰/美白/五官都有效果。必须用 `OBSBasic.Screenshot` 热键取真实输出帧。
+2. **画布在 profile 的 `basic.ini [Video] BaseCX/BaseCY`，集合里的 `resolution` 不生效**。画布与素材尺寸不一致时 OBS 会把源的 `pos` 改写（0 → 280），两轮采集构图不同 → 「滤镜禁用」基准图差 44% 像素。采集时先把画布同步成素材尺寸。
+3. **滤镜「处理中」时绘制会忽略源的位移**，直通/禁用时按位移走 → 同一次运行里 `allzero/off` 左侧有黑边、后面四张铺满，跨配置对拍直接失效（maxdiff 255）。采集时要 `SetSceneItemTransform` 把源强制归一到 `pos(0,0)/scale=1`。
+4. **生成器从已有集合借 `scene` 骨架会连带继承场景上的滤镜**（`beauty_4k` 把美颜滤镜挪到了场景上）→ 场景+源两个滤镜串联处理，基准整体漂移（同版本两次 diff 到 16~26，本该 0）。生成时必须 `scene["filters"] = []`。
+5. **OBS 退出会回写 `basic.ini`**：画布改动要在进程真正退出后再还原，否则被写回。本次就出现过还原后又被写回 4K，需手工改回 1920×1080。
+6. **`shutil.move` 跨盘会退化成复制+删除**，本机 safe-delete 把删除转去回收站，4K 大图直接报 `Some operations were aborted` → 同盘用 `os.replace`。
+7. **backup 里的 2.2.1 dll 与 `1ad11fc` 源码编译结果不等价**（同参数下输出差 maxdiff 16~26），不能当基线；严格对拍必须从提交重新编译。
+
+**工具**：`05_验证/obsctl.py`（obs-websocket v5 客户端）、`make_static_collection.py`（静态集合生成）、`verify_s1_correct.py`（`capture / compare / toggle / visual4k / swaplib`）、`make_assets.py`（素材复现：`python make_assets.py <照片路径>`）。产物在 `05_验证/out/`（已 gitignore）；素材 PNG 不入库（隐私+体积），由 `make_assets.py` 从本机照片按固定裁剪框重生。基线 dll 留在 `05_验证/baseline/obs-beauty_2.2.1_pres1.dll`（同样 gitignore，可由 `1ad11fc` 重新编译）。
 
 ### 9.3 S2 帧环稳定性（Q5）→ 翻默认
 
@@ -825,5 +864,5 @@ GPU 上跑完（4K 磨皮 23 趟 draw ≈ 10 ms）才能 `map`，CPU 一直在�
 | 阶段 | 状态 | 备注 |
 |---|---|---|
 | S0 | **门禁就绪·待用户固化** | 门禁脚本 `gate.py` + `.gitignore`/`git` 基线（`1ad11fc`）就绪；2.2.1 基线值已录入 9.1；待用户跑 `gate.py` 两遍固化 Δ≤0.15 ms 门槛 |
-| S1 | **性能验收通过·正确性部分待补** | 2.3.0；实测 2026-11-02 14:52（见 9.2.1）：720p 往返 **0.00 ms**（≤0.3 ✅）、4K **0.00 ms**（≤0.8 ✅）、回退 **1.69 ms**（回到全路径 ✅），零 warning/error；正确性 maxdiff=0 由「直接画 in_tex + ONE/INVSRCALPHA」结构保证，另建议补录 5 帧对比 + 开关 20 次手动验收 |
+| S1 | **验收通过（性能 + 正确性）** | 2.3.0。性能（9.2.1，14:52）：720p 往返 **0.00 ms**（≤0.3 ✅）、4K **0.00 ms**（≤0.8 ✅）、回退 **1.69 ms** ✅，零 warning/error。正确性（9.2.2，15:35，全自动）：**S1 之前源码(2.2.1) vs 2.3.0 六种配置全部 maxdiff=0**；直通 vs 滤镜禁用 0；4K 直通 0 / 美颜组合 16.98% 生效；开关 20 次 40 帧无黑帧无闪退。结论：只改性能，画面零影响 |
 | S2–S7 | 待启动 | 按 9.3–9.8 门槛；S2 需先解 2026-11-01 4K 崩溃根因 |

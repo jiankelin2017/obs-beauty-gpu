@@ -34,3 +34,8 @@ __pycache__/
 Thumbs.db
 ehthumbs.db
 .DS_Store
+
+# 验收用基线 dll（体积大，且可由 1ad11fc 重新编译得到）
+05_验证/baseline/*.dll
+05_验证/out/
+05_验证/assets/*.png
