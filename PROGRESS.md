@@ -2709,3 +2709,35 @@ geomOnly 路径的 `maxdiff=8 / 0.447%`（P0-7 已结但样本少）、4K 长跑
 **差异是否随强度变化**，是区分「结构性缺陷」与「数值噪声」最便宜的一刀。
 一个不随 k 变化的底座，几乎总是代码里的两条路径对同一件事的理解不同。
 这轮四次实验约 3 分钟，代价远低于把它写成「已知差异」永久留着。
+
+## 9.27 输入旋转（方案 B，2.10.0，2026-11-03 23:4x）
+
+**立项**：用户此前圈定三件未立项事项（输入旋转 / GPU 五官段祛斑覆盖缺口 / T7 dup），
+先选「插件支持输入旋转」。完整方案见 `04_文档/方案B_输入旋转开发计划.md`。
+
+**根因回顾**：真人竖屏摄像头（采集卡横屏 1920×1080，脸横躺）用户只在场景项上设
+`rot=-90` 显示转正，但滤镜拿到的源纹理仍是未旋转的 —— 检测/五官/美形几何整段错位
+（§9.21 当时用「插子场景 CamRot」绕开）。`GpuEngine::setDetectOptions` 的 rotate 参数
+在 1434 行一直被丢弃。
+
+**做法（只动检测几何，不动渲染/输出尺寸）**：
+- `beauty_params.h`：`BeautySettings` 加 `int input_rot`（默认 0）。
+- `obs-beauty.cpp`：面板加「输入方向 0/90/180/270」下拉（仿 `smooth_mode`）；
+  `beauty_thumb_build` 按 `input_rot` 把检测缩略图画成**旋转后 letterbox**（GPU 矩阵
+  `gs_matrix_rotate3d(GS_AXIS_Z, rad)` 绕 letterbox 矩形中心），`scale/ox/oy` 针对旋转后尺寸；
+  `g_thumbFullW/H` **仍传源尺寸**（mask/protect 必须在源坐标系构建、渲染采样源纹理）。
+- `beauty_core.cpp`：`process` 把 `s.input_rot` 存进成员 `inputRot_`；`buildMaskInto` 的
+  mapped 段在 unscale（缩略图→旋转后全帧）之后，新增 `invRotateFace()` 把 FaceBox/kps
+  反变换回源坐标系（绕中心转 `-θ`，90/270 时框宽高互换）。`gs_thumbFullW/H` 当源尺寸、
+  旋转后尺寸由 `gw/gh` 交换推出。
+
+**关键设计确认**：旋转只发生在「检测缩略图采样」与「检测出口几何反变换」两处；输出仍是
+源朝向，用户保留场景项旋转负责显示 —— 与 §9.21 的子场景绕开思路一致，但把旋转吸收进滤镜。
+
+**风险点**：`gs_matrix_rotate3d / GS_AXIS_Z / gs_matrix_translate3f` 为标准 libobs 图形 API，
+本机无头文件无法编译验证，需用户 Windows 端重编。若编译报符号名，按 libobs graphics.h 校正。
+旋转方向（顺时针/逆时针）90 与 270 互为反向，用户按自己摄像头选其一即可。
+
+**状态**：核心代码已实现，版本升 2.10.0（`BEAUTY_BUILD_STR`）；待编译 + 真机验收
+（§9.27 验收见方案 B §6：OpenCV 独立复算 IoU/关键点 ≤1 px、`input_rot=0` 与 2.9.1 逐字节一致）。
+尚未 commit（等编译/验收通过后再提）。

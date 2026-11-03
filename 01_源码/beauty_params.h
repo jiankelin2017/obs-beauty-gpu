@@ -536,7 +536,7 @@
 //          静止段 dper 应等于 8，人一动就掉回 1 —— 这是自适应生效的唯一直接证据
 //          （检测在 worker 上，渲染线程的毫秒数看不出来）。
 //        · 实测（720p 静止，45 s/档）：0.476 核 → 0.143 核（周期 4）/ 0.100（周期 8）。
-#define BEAUTY_BUILD_STR "2.9.1"
+#define BEAUTY_BUILD_STR "2.10.0"
 
 // 面板参数顺序（滤镜属性页滑块的顺序）
 enum {
@@ -571,6 +571,10 @@ struct BeautySettings {
     double panel[P_COUNT];   // 面板刻度 0..100
     int blur_type;           // 1=双边滤波（实测最强，推荐）0=高斯 2=弱磨皮
     int skin_detect;         // 0/1 只磨皮肤区域（默认 1：不要把背景一起磨糊）
+    // 2.10.0（方案 B）：输入旋转。0/90/180/270 表示宿主在检测缩略图上把输入
+    // 旋转多少度后再送检测；引擎在 buildMaskInto 出口把 FaceBox/kps 反变换回
+    // 源坐标系。默认 0（不旋转，行为完全不变）。渲染与输出尺寸不受影响。
+    int input_rot;           // 0/90/180/270
     // 3.0.17：磨皮模式（纯 CPU 侧，不是参考实现参数）。
     //   0 人像磨皮 = 3.0.16 行为，逐位不变
     //   1 清晰磨皮 = 平坦皮肤少回填、边缘轮廓多回填（推荐）
@@ -578,7 +582,7 @@ struct BeautySettings {
     //   3 朦胧磨皮 = 整体压低细频
     int smooth_mode;
 
-    BeautySettings() : blur_type(1), skin_detect(1), smooth_mode(0) {
+    BeautySettings() : blur_type(1), skin_detect(1), smooth_mode(0), input_rot(0) {
         // 首次拖到来源上的默认值：只开「磨皮 20」，其余十三项 0。
         // 与 OFX 版 v1.51 的默认一致（旧 OBS 默认 磨皮70/美白15/红润30 已按
         // 产品要求下调 —— 强默认值会让用户第一眼就觉得"假"）。

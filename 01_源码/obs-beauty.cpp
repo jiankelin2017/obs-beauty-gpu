@@ -237,6 +237,7 @@ struct beauty_filter {
 	int smooth_mode;  // 3.0.17 磨皮模式 0人像 1清晰 2精细 3朦胧（纯 CPU 侧）
 	int landmark_q;   // fuFaceProcessorSetFaceLandmarkQuality (面板: 识别模式)
 	int max_faces;    // fuSetMaxFaces (面板: 人物个数)
+	int input_rot;     // 2.10.0 方案 B：输入方向 0/90/180/270（检测缩略图旋转）
 	double v[BEAUTY_NPARAM]; // panel units, 0..100
 	int slot;              // 引擎槽位（每个滤镜实例独占一份上下文）
 	bool dirty;            // 进程级检测选项待下发（渲染线程 flush）
@@ -500,6 +501,7 @@ static void beauty_filter_settings(struct beauty_filter *f, BeautySettings &s)
 	s.blur_type = f->blur_type;
 	s.skin_detect = f->skin_detect ? 1 : 0;
 	s.smooth_mode = f->smooth_mode;
+	s.input_rot = f->input_rot;
 }
 
 // Phase 3.5：GPU 磨皮生产路径的回调（实现在 beauty_gpu_smooth_selfcheck 之后）。
@@ -523,6 +525,7 @@ static void beauty_filter_read(struct beauty_filter *f, obs_data_t *s)
 	f->smooth_mode = (int)obs_data_get_int(s, "smooth_mode");
 	f->landmark_q = (int)obs_data_get_int(s, "landmark_q");
 	f->max_faces = (int)obs_data_get_int(s, "max_faces");
+	f->input_rot = (int)obs_data_get_int(s, "input_rot");
 	for (int i = 0; i < BEAUTY_NPARAM; i++)
 		f->v[i] = obs_data_get_double(s, g_params[i].key);
 }
@@ -926,6 +929,7 @@ static void beauty_filter_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "mirror", false);
 	obs_data_set_default_int(settings, "blur_type", 1);
 	obs_data_set_default_int(settings, "smooth_mode", 0);
+	obs_data_set_default_int(settings, "input_rot", 0);
 	// 2.0 起默认开：BGRA 修正 + 语义掩码之后，"只磨皮肤"才是预期行为，
 	// 1.x 默认关是因为当时人脸检测基本失效，开着只会全局磨糊。
 	obs_data_set_default_bool(settings, "skin_detect", true);
@@ -1022,6 +1026,16 @@ static obs_properties_t *beauty_filter_properties(void *data)
 	obs_property_list_add_int(sm, "清晰磨皮", 1);
 	obs_property_list_add_int(sm, "精细磨皮", 2);
 	obs_property_list_add_int(sm, "朦胧磨皮", 3);
+
+	// 2.10.0 方案 B：输入方向。把摄像头/来源的旋转吸收进滤镜，使检测几何、五官、
+	// 美形、保护椭圆对齐到正确人脸位置；用户保留场景项旋转负责显示方向。
+	obs_property_t *ir = obs_properties_add_list(
+		ppts, "input_rot", "输入方向",
+		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(ir, "原样 (0°)", 0);
+	obs_property_list_add_int(ir, "顺时针 90°", 90);
+	obs_property_list_add_int(ir, "180°", 180);
+	obs_property_list_add_int(ir, "顺时针 270°", 270);
 
 	// ---- 组 1：美颜（3.1.29 合并磨皮与肤色；3.1.30 改名为「美颜」）----
 	// 为什么合并：这两类是**天天要调的主参数**，分成两页反而每次都要切。
@@ -5071,9 +5085,16 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 	if (!beauty_ensure_thumb(f, S, fmt))
 		return fail("ensure resources");
 
-	const float scale = fminf((float)S / (float)cx, (float)S / (float)cy);
-	const int nw = (int)((float)cx * scale + 0.5f);
-	const int nh = (int)((float)cy * scale + 0.5f);
+	// 2.10.0 方案 B：输入旋转。检测缩略图按 input_rot 旋转后 letterbox 进 S×S，
+	// 使检测在「旋转后的人脸」上跑；引擎在 buildMaskInto 出口把 FaceBox/kps 反
+	// 变换回源坐标系。渲染/输出尺寸不变，用户对显示方向的场景项旋转照旧。
+	const int rot = ((f->input_rot % 360) + 360) % 360;
+	const bool swap = (rot == 90 || rot == 270);
+	const uint32_t Wr = swap ? cy : cx;   // 旋转后全帧宽
+	const uint32_t Hr = swap ? cx : cy;   // 旋转后全帧高
+	const float scale = fminf((float)S / (float)Wr, (float)S / (float)Hr);
+	const int nw = (int)((float)Wr * scale + 0.5f);
+	const int nh = (int)((float)Hr * scale + 0.5f);
 	if (nw <= 0 || nh <= 0 || nw > (int)S || nh > (int)S)
 		return fail("bad letterbox rect");
 	const int ox = ((int)S - nw) / 2;
@@ -5098,9 +5119,23 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 	// 与 smooth_draw 同一形态：手动跑一个 technique，不用 gs_effect_loop
 	// （外层可能已有 active technique，loop 会直接退出）。
 	const size_t passes = gs_technique_begin(tech);
+	const float sw = (float)cx * scale;   // 源按字母缩放后的宽
+	const float sh = (float)cy * scale;   // 源按字母缩放后的高
+	const float rad = (float)rot * (3.141592653589793f / 180.0f);
 	for (size_t i = 0; i < passes; i++) {
 		gs_technique_begin_pass(tech, i);
-		gs_draw_sprite(src, 0, (uint32_t)nw, (uint32_t)nh);
+		if (rot == 0) {
+			gs_draw_sprite(src, 0, (uint32_t)nw, (uint32_t)nh);
+		} else {
+			// 绕 letterbox 矩形中心旋转源（旋转后铺满 nw×nh），本段 letterbox
+			// 计算用的就是旋转后尺寸 (Wr,Hr)，与上面 nw/nh 一致。
+			gs_matrix_push();
+			gs_matrix_translate3f((float)nw * 0.5f, (float)nh * 0.5f, 0.0f);
+			gs_matrix_rotate3d(GS_AXIS_Z, rad);
+			gs_matrix_translate3f(-sw * 0.5f, -sh * 0.5f, 0.0f);
+			gs_draw_sprite(src, 0, (uint32_t)(sw + 0.5f), (uint32_t)(sh + 0.5f));
+			gs_matrix_pop();
+		}
 		gs_technique_end_pass(tech);
 	}
 	gs_technique_end(tech);

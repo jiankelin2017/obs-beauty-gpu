@@ -1456,6 +1456,10 @@ public:
         // 没磨皮」，否则 GPU 自检会拿上一帧的 I/e/T 去对拍这一帧的图。
         bandValid_ = false;
 
+        // 2.10.0 方案 B：把本帧输入旋转存进成员，供 updateMask/buildMaskInto 的
+        // 检测几何反变换使用（渲染与输出尺寸不变，只动几何）。
+        inputRot_ = ((s.input_rot % 360) + 360) % 360;
+
         double blur = s.panel[P_BLUR];
         if (blur < 0) blur = 0;
         if (blur > 100) blur = 100;
@@ -2583,6 +2587,42 @@ private:
     //     （框、羽化、脖子、眼睛）都在全帧坐标里算 —— 与老路径逐字相同。
     // 这条路上**没有全帧像素**，所以 maskOut/protectOut 不会被写（强制 geomOnly），
     // 宿主必须用 GPU 掩码链出图。
+    // 2.10.0 方案 B：检测在「旋转后全帧」坐标系里的点，反变换回「源坐标系」。
+    // 与宿主 beauty_thumb_build 的旋转严格互逆：宿主把源绕 letterbox 矩形中心旋转
+    // +θ 画进缩略图，检测看到的就是旋转后的人脸；这里再转回 -θ。
+    static void invRotatePoint(float px, float py, int rot, int Wr, int Hr,
+                               int Ws, int Hs, float& ox, float& oy) {
+        const float crx = (Wr - 1) * 0.5f, cry = (Hr - 1) * 0.5f;
+        const float csx = (Ws - 1) * 0.5f, csy = (Hs - 1) * 0.5f;
+        const float dx = px - crx, dy = py - cry;
+        float rx = dx, ry = dy;
+        switch (rot) {
+        case 90:  rx =  dy; ry = -dx; break;   // R(-90)
+        case 270: rx = -dy; ry =  dx; break;   // R(+90) = R(-270)
+        case 180: rx = -dx; ry = -dy; break;   // R(-180)
+        default: break;                          // R(0)
+        }
+        ox = rx + csx;
+        oy = ry + csy;
+    }
+    // 对整个 FaceBox（中心 + 关键点）做反变换；90/270 时框的宽高互换。
+    static void invRotateFace(beautycore::FaceBox& f, int rot, int Wr, int Hr,
+                              int Ws, int Hs) {
+        if (rot == 0) return;
+        const float cx0 = f.x + f.w * 0.5f, cy0 = f.y + f.h * 0.5f;
+        float ncx = 0.0f, ncy = 0.0f;
+        invRotatePoint(cx0, cy0, rot, Wr, Hr, Ws, Hs, ncx, ncy);
+        if (rot == 90 || rot == 270) { const float t = f.w; f.w = f.h; f.h = t; }
+        f.x = ncx - f.w * 0.5f;
+        f.y = ncy - f.h * 0.5f;
+        for (int k = 0; k < 10; k += 2) {
+            float nx = 0.0f, ny = 0.0f;
+            invRotatePoint(f.kps[k], f.kps[k + 1], rot, Wr, Hr, Ws, Hs, nx, ny);
+            f.kps[k] = nx;
+            f.kps[k + 1] = ny;
+        }
+    }
+
     bool buildMaskInto(const unsigned char* src, int w, int h,
                        std::vector<unsigned char>& maskOut,
                        std::vector<unsigned char>& protectOut,
@@ -2688,6 +2728,15 @@ private:
                     f.kps[k] = (f.kps[k] - (float)mapOx) / mapScale;
                     f.kps[k + 1] = (f.kps[k + 1] - (float)mapOy) / mapScale;
                 }
+            }
+            // 2.10.0 方案 B：上面的 unscale 把缩略图坐标映射到「旋转后全帧」；
+            // 再把检测几何反变换回源坐标系（源尺寸 = gw/gh，旋转后尺寸 = 交换后的 gw/gh）。
+            if (inputRot_ != 0) {
+                const bool swap = (inputRot_ == 90 || inputRot_ == 270);
+                const int Wr = swap ? gh : gw;
+                const int Hr = swap ? gw : gh;
+                for (size_t i = 0; i < faces.size(); i++)
+                    invRotateFace(faces[i], inputRot_, Wr, Hr, gw, gh);
             }
             fboxOut = faces;   // 交给宿主/五官段的那一份也要是全帧坐标
         }
@@ -3533,6 +3582,7 @@ private:
     bool maskValid_ = false;
     int  detMaxFaces_ = 8;   // 面板「人物个数」（1..8）
     int  detHighQ_ = 0;      // 面板「识别模式」：0 标准 / 1 高精度（conf 0.6 / 0.45）
+    int  inputRot_ = 0;      // 2.10.0 方案 B：输入旋转 0/90/180/270（检测几何反变换用）
     // 3.1.21：本次「启用以来」是否成功产出过掩码。只看第一次 —— 用它区分
     // 「刚开开关、检测还没回来」（这几帧透传）和「人不在画面里」（全帧兜底）。
     bool everHadMask_ = false;

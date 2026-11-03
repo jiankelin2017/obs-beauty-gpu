@@ -32,6 +32,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
 | 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md`，帧类型对比见 `out/logs/P0-9_geomonly_gate_20261103.md` | 是 |
 | GPU 祛斑边界差离线复算 | **`analyze_spot_edge.py`（2.9.1）**：P0-10 用。从 `BEAUTY_M1_DUMP_DIR` 落盘的原图 + 掩码离线复算 CPU（截断窗口）与 GPU（clamp 重复）两种盒均值实现，验证「差异不随 k 变化、贴在 ROI 底边 2 像素带」这一结构性特征。复算结果（177 px / maxdiff 4 / 平均偏差 2.23 / bbox 一致）与插件内实测逐项对上。属诊断工具，**不进装机** | 否 |
+| 输入旋转验收 | **方案 B（2.10.0）**：设 `input_rot` 后检测几何须对齐旋转后的人脸。验收用「横屏里横躺的正脸素材 + `input_rot=90`」跑检测，比对 OpenCV 独立复算的 IoU/关键点误差（≤1 px），并肉眼确认 mask/五官落点；`input_rot=0` 必须与 2.9.1 逐字节一致。详见 `04_文档/方案B_输入旋转开发计划.md` §6 | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
