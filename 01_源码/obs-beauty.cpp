@@ -447,7 +447,13 @@ struct beauty_filter {
 	double prof_dl_thumb;      // 缩略图「缩放 + 回读」耗时（窗口累加）
 	// 4d：五官椭圆族的 GPU 对拍（R1-lite，BEAUTY_REGION_CMP=1）
 	bool region_cmp;                 // 开关
-	bool region_reported;
+	bool region_reported;            // 样本已取满（不再进对拍）
+	int region_cmp_n;                // 要取几个样本（BEAUTY_REGION_CMP_N，默认 1）
+	int region_cmp_done;             // 已取样本数
+	bool region_skip_logged;         // 「掩码全 0 跳过」只报一次（防每帧刷屏）
+	int region_cmp_delay;            // 再等多少个「可对拍帧」才取样（预热用）
+	double region_mask_pct;          // 最近一次对拍的掩码覆盖率（%）
+	double region_mask_avg;          // 最近一次对拍的掩码均值（0..255）
 	gs_effect_t *region_fx;          // region.hlsl（懒加载）
 	bool region_tried;
 	gs_texture_t *region_param;      // 64×1 RGBA32F 椭圆参数表（每椭圆 3 texel）
@@ -703,6 +709,17 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 	{
 		const char *rc = getenv("BEAUTY_REGION_CMP");
 		f->region_cmp = (rc && rc[0] == '1' && beautyEngine().supportsGpu());
+		// 2.8.3：默认只取 1 个样本（一次对拍 = 3 次全帧回读，4K 会掉一帧）。
+		// 想要统计量就设 BEAUTY_REGION_CMP_N=5 —— 连续 5 帧各取一次。
+		const char *rn = getenv("BEAUTY_REGION_CMP_N");
+		const int n = rn ? atoi(rn) : 1;
+		f->region_cmp_n = (n < 1) ? 1 : (n > 20 ? 20 : n);
+		f->region_cmp_done = 0;
+		// 预热：OBS 刚起来那几帧掩码/几何还没稳定，取样太早量到的是启动态。
+		// 单位是「可对拍帧」（单脸 + 掩码非零的帧），30fps 下 120 帧 ≈ 4 s。
+		const char *rd = getenv("BEAUTY_REGION_CMP_DELAY");
+		const int dly = rd ? atoi(rd) : 0;
+		f->region_cmp_delay = (dly < 0) ? 0 : (dly > 900 ? 900 : dly);
 	}
 	// 4d：GPU 五官进生产链。默认开，`BEAUTY_GPU_REGION=0` 退回 CPU 五官。
 	{
@@ -3287,6 +3304,34 @@ static bool beauty_readback_rgba(struct beauty_filter *f, gs_texture_t *tex,
 	return true;
 }
 
+// 把一张掩码纹理（mask.hlsl 的输出，权重写在 R 通道）读回成 1 字节/像素。
+// 2.8.3（P0-7）：geomOnly 帧没有 CPU 掩码，五官对拍要拿 **GPU 刚画好的那份**
+// 当 CPU 基准的掩码 —— 只有这样才是「同一份掩码 + 两种算法」。采样口径与之
+// 一致：region.hlsl 的 skinMask 是 Point 采样、坐标在像素中心，所以读回来的
+// R 通道就是 shader 眼里的那个值（UNORM8 → /255，与 CPU 的 mrow[x]/255 同）。
+// 复用掩码对拍的 stage：只在诊断路径调用，不与生产抢 f->stage。
+static bool beauty_mask_readback8(struct beauty_filter *f, gs_texture_t *tex,
+				  uint8_t *dst, uint32_t cx, uint32_t cy)
+{
+	if (!tex || !f->mask_stage || !dst)
+		return false;
+	if (gs_texture_get_width(tex) != cx || gs_texture_get_height(tex) != cy)
+		return false;
+	gs_stage_texture(f->mask_stage, tex);
+	uint8_t *ptr = NULL;
+	uint32_t linesize = 0;
+	if (!gs_stagesurface_map(f->mask_stage, &ptr, &linesize) || !ptr)
+		return false;
+	for (uint32_t y = 0; y < cy; y++) {
+		const uint8_t *row = ptr + (size_t)y * linesize;
+		uint8_t *d = dst + (size_t)y * cx;
+		for (uint32_t x = 0; x < cx; x++)
+			d[x] = row[(size_t)x * 4];
+	}
+	gs_stagesurface_unmap(f->mask_stage);
+	return true;
+}
+
 // M1 一次性对拍：GPU 掩码 vs 引擎当帧的 mask/protect。
 static void beauty_gpu_mask_selfcheck(struct beauty_filter *f,
 				      gs_texture_t *in_tex,
@@ -3765,7 +3810,10 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 					const BeautyChainJob &job)
 {
 	const BeautyRegionGeom &rg = job.regionGeom;
-	if (!in_tex || !job.mask || job.w <= 0 || job.h <= 0)
+	// 2.8.3（P0-7）：这里原来写的是 `!job.mask` 就返回，而 S7 静止降频之后
+	// 绝大多数帧是 geomOnly（`job.mask` 为空，掩码由 GPU 按几何重画）—— 对拍
+	// 几乎从不触发，真机上三次采集只碰巧中了一次。判据改成「有没有掩码可用」。
+	if (!in_tex || job.w <= 0 || job.h <= 0)
 		return;
 	if (rg.faceCount != 1)
 		return;
@@ -3776,9 +3824,63 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 
 	const uint32_t cx = (uint32_t)job.w;
 	const uint32_t cy = (uint32_t)job.h;
+	const size_t npix = (size_t)cx * (size_t)cy;
+
 	gs_effect_t *fx = beauty_load_region_effect(f);
+	// 顺带把 mask_stage 的尺寸钉到本帧（掩码读回复用它）。
 	if (!fx || !beauty_ensure_region_rt(f, cx, cy))
 		return;
+
+	/* ---- 掩码来源 -------------------------------------------------------
+	 * · 引擎给了 CPU 掩码（非 geomOnly 帧）→ 直接用，与旧行为等价。
+	 * · geomOnly 帧 → 把 GPU 本帧刚画好的生产掩码读回，当 CPU 基准的掩码。
+	 *   这才是 P0-7 要的判据：**同一份掩码 + 两种算法**。旧写法拿的是
+	 *   `job.mask`（引擎的上一次残留，`beauty_core.cpp:2634/2816`），两路
+	 *   本来就不是同一份掩码 —— 那时量到的差异含「掩码不同」这一项。 */
+	const uint8_t *mask = job.mask;
+	std::vector<uint8_t> mask_gpu;
+	const char *mask_src = "CPU";
+	if (!mask) {
+		if (!f->mask_skin_use)
+			return;
+		mask_gpu.resize(npix);
+		if (!beauty_mask_readback8(f, f->mask_skin_use, mask_gpu.data(), cx,
+					   cy))
+			return;
+		mask = mask_gpu.data();
+		mask_src = "GPU";
+	}
+
+	/* 掩码不能是空的：空掩码下两条算法都不碰任何像素，maxdiff 恒为 0 ——
+	 * 这是最典型的假通过（§9.18 的 `--nospot` 实验就是这么废掉的：前后截图像素
+	 * 完全相同，还以为找对了方向）。所以先量覆盖率，覆盖率 0 直接不算样本。 */
+	{
+		uint64_t msum = 0, mnz = 0;
+		for (size_t i = 0; i < npix; i++) {
+			msum += mask[i];
+			if (mask[i])
+				mnz++;
+		}
+		if (mnz == 0) {
+			if (!f->region_skip_logged) {
+				f->region_skip_logged = true;
+				blog(LOG_WARNING,
+				     "[" PLUGIN_NAME "] 五官对拍等待中：本帧"
+				     "掩码来源=%s 但全为 0（没脸/脸太偏），跳过",
+				     mask_src);
+			}
+			return;
+		}
+		f->region_skip_logged = false;
+		f->region_mask_pct = npix ? 100.0 * (double)mnz / (double)npix : 0.0;
+		f->region_mask_avg = npix ? (double)msum / (double)npix : 0.0;
+	}
+
+	// 预热帧不算样本（见 region_cmp_delay 的初始化处）。
+	if (f->region_cmp_delay > 0) {
+		f->region_cmp_delay--;
+		return;
+	}
 
 	// 与生产走**同一个**函数：对拍验的就是真的那一份。
 	gs_texture_t *cur = beauty_region_chain(f, in_tex, cx, cy, job);
@@ -3786,7 +3888,6 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 		return;
 
 	// ---- CPU 基准：同一帧、同一掩码、同一几何、同一顺序 ------------------
-	const size_t npix = (size_t)cx * (size_t)cy;
 	const size_t bytes = npix * 4;
 	uint8_t *src = (uint8_t *)malloc(bytes);
 	uint8_t *cpu = (uint8_t *)malloc(bytes);
@@ -3814,11 +3915,11 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 	};
 	std::vector<beautycore::Ellipse> e1, e2, e3;
 	to_els(fc.elsBeg, fc.elsCount, e1);
-	beautycore::applyEllipses(cpu, (int)cx, (int)cy, job.mask, fc.fx, fc.fy,
+	beautycore::applyEllipses(cpu, (int)cx, (int)cy, mask, fc.fx, fc.fy,
 				  fc.fw, fc.fh, e1.data(), fc.elsCount, 1);
 	if (fc.nasoCount > 0 && rg.nasoMaxLift > 0.0f) {
 		to_els(fc.nasoBeg, fc.nasoCount, e2);
-		beautycore::applyFoldRemoval(cpu, (int)cx, (int)cy, job.mask, fc.fx,
+		beautycore::applyFoldRemoval(cpu, (int)cx, (int)cy, mask, fc.fx,
 					     fc.fy, fc.fw, fc.fh, e2.data(),
 					     fc.nasoCount, fc.nasoSlope,
 					     rg.nasoMaxLift, rg.nasoLrRadius,
@@ -3826,7 +3927,7 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 	}
 	if (fc.tailCount > 0) {
 		to_els(fc.tailBeg, fc.tailCount, e3);
-		beautycore::applyEllipses(cpu, (int)cx, (int)cy, job.mask, fc.fx,
+		beautycore::applyEllipses(cpu, (int)cx, (int)cy, mask, fc.fx,
 					  fc.fy, fc.fw, fc.fh, e3.data(),
 					  fc.tailCount, 1);
 	}
@@ -3835,7 +3936,7 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 		roi.x0 = rg.roiX0; roi.y0 = rg.roiY0;
 		roi.x1 = rg.roiX1; roi.y1 = rg.roiY1;
 		std::vector<float> scratch;
-		beautycore::applySpotFix(cpu, (int)cx, (int)cy, job.mask, roi,
+		beautycore::applySpotFix(cpu, (int)cx, (int)cy, mask, roi,
 					 rg.spotK, rg.spotRadius, rg.spotThrLo,
 					 rg.spotThrHi, 1, scratch);
 	}
@@ -3871,20 +3972,39 @@ static void beauty_gpu_region_selfcheck(struct beauty_filter *f,
 			}
 		}
 	}
+	const bool pass = (maxd <= 1);
+	// 失败时落盘：离线还要看「差异落在椭圆的什么位置、掩码在那儿是多少」。
+	// 只有显式给了 BEAUTY_M1_DUMP_DIR 才写（4K 一次 100 MB 量级）。
+	// ⚠ 放在 free 之前：src 要在这里被重新读回来当源图 dump。
+	const char *dumpdir = getenv("BEAUTY_M1_DUMP_DIR");
+	if (!pass && dumpdir && dumpdir[0]) {
+		if (beauty_readback_rgba(f, in_tex, src, cx, cy))
+			beauty_mask_dump(dumpdir, "region_src_rgba", src, cx * 4,
+					 cy);
+		beauty_mask_dump(dumpdir, "region_mask", mask, cx, cy);
+		blog(LOG_INFO,
+		     "[" PLUGIN_NAME "] 五官对拍失败，已落盘 src/mask（%ux%u，"
+		     "掩码来源=%s）",
+		     cx, cy, mask_src);
+	}
 	free(src); free(cpu); free(gpu);
 
-	const bool pass = (maxd <= 1);
+	f->region_cmp_done++;
 	blog(pass ? LOG_INFO : LOG_WARNING,
-	     "[" PLUGIN_NAME "] 五官整段对拍 %ux%u：maxdiff=%d 差异像素=%llu(%.4f%%) "
-	     "bbox=(%d,%d)-(%d,%d) 平均偏差=%.6f | faces=1 ellipses=%d+%d+%d "
-	     "spot=%d 判定=%s（region.hlsl 只跑诊断，画面仍是 CPU 结果）",
-	     cx, cy, maxd, (unsigned long long)diffpx,
+	     "[" PLUGIN_NAME "] 五官整段对拍 %ux%u（样本 %d/%d）："
+	     "maxdiff=%d 差异像素=%llu(%.4f%%) bbox=(%d,%d)-(%d,%d) "
+	     "平均偏差=%.6f | 掩码来源=%s 覆盖率=%.1f%% 均值=%.1f | "
+	     "faces=1 ellipses=%d+%d+%d spot=%d 判定=%s",
+	     cx, cy, f->region_cmp_done, f->region_cmp_n, maxd,
+	     (unsigned long long)diffpx,
 	     npix ? 100.0 * (double)diffpx / (double)npix : 0.0, bx0, by0, bx1,
-	     by1, diffpx ? (double)sum / (double)diffpx : 0.0, fc.elsCount,
-	     fc.nasoCount, fc.tailCount, rg.spotOn,
+	     by1, diffpx ? (double)sum / (double)diffpx : 0.0, mask_src,
+	     f->region_mask_pct, f->region_mask_avg, fc.elsCount, fc.nasoCount,
+	     fc.tailCount, rg.spotOn,
 	     pass ? "通过（≤1 灰阶）" : "失败");
 
-	f->region_reported = true;
+	if (f->region_cmp_done >= f->region_cmp_n)
+		f->region_reported = true;
 }
 
 // 段区间钩子本体。返回认领的段（必须构成执行顺序上的前缀）。

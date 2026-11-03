@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""2.8.1 五官链「geomOnly 帧也能跑」的正确性对拍。
+"""⚠ 已被证伪，只留作记录：判五官正确性请用 verify_region_samemask.py。
+
+为什么废：本脚本比的是**两次独立启动** OBS 的程序截图，而 geomOnly 帧里 CPU 用的
+是上一次非 geomOnly 帧的残留掩码、GPU 用的是本帧几何重画的掩码 —— 两份掩码本来
+就不是同一张。实测：四路子项单独开差异一模一样（maxdiff 全 8、bbox 全同），关掉
+geomOnly 差异反而变大（23 / 8.9%）。2.8.3 的同帧同掩码自检给出 maxdiff ≤1。
+见 05_验证/out/logs/P0-7_samemask_20261103.md。
+
+---- 以下为原始说明（历史）----
+
+2.8.1 五官链「geomOnly 帧也能跑」的正确性对拍。
 
 背景：`beauty_region_chain()` 原来要求 `job.mask` 非空，而 S7 静止降频后绝大多数
 帧是 geomOnly（`job.mask` 为空、掩码由 GPU 按几何重画）。结果是五官链每帧在第一行

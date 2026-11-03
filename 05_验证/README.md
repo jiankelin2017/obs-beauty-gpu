@@ -29,7 +29,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
-| 五官正确性对拍 | `verify_region_geomonly.py`（五官 GPU vs CPU 逐像素比，`--zero` 作对照组、`--only eye\|pouch\|naso\|spot` 拆子项、`--nospot` 只关祛斑） | 是（但 **geomOnly 路径不可作判据**，见坑位 9） |
+| 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -105,8 +105,18 @@ py -3 05_验证\verify_smooth_compiles.py
    CPU 侧的 `mask_` 是上一次非 geomOnly 帧的残留，GPU 侧用的是本帧几何重画的掩码，
    两者本来就不是同一份。证据：四个子项单独开，`maxdiff` 全是 8、bbox 完全相同、
    ≥8 的像素固定在同两点；关掉 geomOnly（`BEAUTY_MASK_GEOM_ONLY=0`）差异反而变大。
-   要判五官算法，用插件自带的自检（`BEAUTY_REGION_CMP=1`），它在同一帧、同一份掩码上比，
-   但只在非 geomOnly 帧触发（默认配置下很难碰到）。详见 `out/logs/P0-7_region_20261103.md`。
+   要判五官算法，用 `verify_region_samemask.py`（同一个自检，2.8.3 起支持 geomOnly 帧）：
+   它读回 GPU 本帧的生产掩码当 CPU 基准，比的是「同一份掩码 + 两种算法」。
+   720p / 4K 各 5 样本 maxdiff 全 ≤1。详见 `out/logs/P0-7_samemask_20261103.md`。
+11. **参数要在起 OBS 之前写进集合 JSON，不能等起来再下发**。自检是「第一个满足条件的帧就
+   取样」，而 OBS 从启动到 WebSocket 可用要 2~4 s —— 等 `apply_load` 到达，样本早取完了。
+   症状是「参数明明改了，日志里却是旧值」：`--only spot` 把另外三项置 0，日志仍是
+   `ellipses=6+2+2`。`verify_region_samemask.py` 已改为「改集合 → 起 OBS → 跑完原样写回」。
+12. **`--zero`（五官全零）拿不到样本，不是工具坏**：`beauty_core.cpp:3619` 在五项全 0 时
+   直接返回，几何快照 `faceCount=0`，自检按设计不跑。
+13. **`spot=0` 意味着祛斑这一族根本没进链**，不是"效果不明显"。默认配置下 geomOnly 帧
+   的 `bounds_` 恒为空，`geoOut->spotOn` 与 CPU 的 `applySpotFix` 同一条件都不成立
+   （P0-8，`PROGRESS §9.20.3`）。要看祛斑真跑，得加 `BEAUTY_MASK_GEOM_ONLY=0`。
 
 ## 四、素材与输出
 
