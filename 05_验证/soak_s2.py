@@ -50,13 +50,19 @@ CANVAS_4K = (3840, 2160)
 #   默认        → 磨皮/色调/细节/美形（S/T/D/W 都能认领）——用于判 S2 性能门槛
 #   --region-params → 再加五官参数（D/W 回落 CPU，真实用户场景，慢）
 #   --with-region   → 再开 BEAUTY_GPU_REGION=1（T10 那条合并崩溃场景）
+# ⚠ 单位是**面板刻度 0..100**，不是 0..1。
+# `beauty_params.h` 的 g_params 写得很清楚：「面板刻度统一 0..100，max_val 是
+# 面板 100 对应的内部量程（value = panel / 100 * max_val）」。引擎侧一律按
+# `panel / 100` 归一到 0..1，所以这里传 0.5 等于「滑到 0.5%」——效果只剩 1%，
+# 画面几乎不动，取整后全被抹平。2026-11-03 之前这四个键就是 0..1 尺度，
+# 导致 P0-7 的全部对拍都跑在 1% 强度上（详见 PROGRESS §9.19）。
 LOAD = {
     "blur_level": 60, "clarity": 40, "color_level": 40, "red_level": 30,
     "sharpen": 30, "thin_face": 0.6, "big_eye": 0.6, "chin": 0.4,
 }
 LOAD_REGION = {
-    "eye_bright": 0.5, "remove_pouch_strength": 0.5,
-    "remove_nasolabial_folds_strength": 0.5, "delspot_level": 0.4,
+    "eye_bright": 50, "remove_pouch_strength": 50,
+    "remove_nasolabial_folds_strength": 50, "delspot_level": 40,
 }
 
 # 一旦命中就说明又回到那条崩溃链上了，长跑结论直接判 FAIL。

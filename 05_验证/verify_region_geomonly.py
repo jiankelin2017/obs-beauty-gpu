@@ -64,18 +64,38 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "out", "logs"))
     ap.add_argument("--nospot", action="store_true",
                     help="五官里只把祛斑(delspot)置 0，其余照常")
+    ap.add_argument("--only", choices=["eye", "pouch", "naso", "spot"],
+                    help="只开一路五官子项（其余三项置 0），用来把差异定位到具体子项")
     ap.add_argument("--zero", action="store_true",
                     help="五官参数全零（用来分离「链本身的 GPU/CPU 差」与「五官段的差」）")
     args = ap.parse_args()
 
+    # 面板刻度是 0..100（beauty_params.h 的 g_params 注释），不是 0..1。
+    # 传 0.5 等于滑到 0.5%，效果只剩 1%，取整后全被抹平 —— 见 PROGRESS §9.19。
+    ONLY = {
+        "eye":   {"eye_bright": 50, "remove_pouch_strength": 0,
+                  "remove_nasolabial_folds_strength": 0, "delspot_level": 0},
+        "pouch": {"eye_bright": 0, "remove_pouch_strength": 50,
+                  "remove_nasolabial_folds_strength": 0, "delspot_level": 0},
+        "naso":  {"eye_bright": 0, "remove_pouch_strength": 0,
+                  "remove_nasolabial_folds_strength": 50, "delspot_level": 0},
+        "spot":  {"eye_bright": 0, "remove_pouch_strength": 0,
+                  "remove_nasolabial_folds_strength": 0, "delspot_level": 40},
+    }
+    suffix = "_only_%s" % args.only if args.only else ""
+    if args.only and args.zero:
+        print("!! --only 与 --zero 互斥（一个要开一路，一个要全关）")
+        return 2
+
     w, h = [int(x) for x in args.canvas.lower().split("x")]
     os.makedirs(args.out, exist_ok=True)
     tag = "%s_%dx%d" % (time.strftime("%Y%m%d_%H%M%S"), w, h)
-    pa = os.path.join(args.out, "region%s%s_gpu_%s.png" % ("_zero" if args.zero else "", "_nospot" if args.nospot else "", tag))
-    pb = os.path.join(args.out, "region%s%s_cpu_%s.png" % ("_zero" if args.zero else "", "_nospot" if args.nospot else "", tag))
+    pa = os.path.join(args.out, "region%s%s%s_gpu_%s.png" % ("_zero" if args.zero else "", "_nospot" if args.nospot else "", suffix, tag))
+    pb = os.path.join(args.out, "region%s%s%s_cpu_%s.png" % ("_zero" if args.zero else "", "_nospot" if args.nospot else "", suffix, tag))
 
     print("=== A：五官走 GPU（2.8.1 新路径）===")
-    ov = {"delspot_level": 0.0} if args.nospot else None
+    ov = ONLY[args.only] if args.only else (
+        {"delspot_level": 0.0} if args.nospot else None)
     shoot((w, h), args.collection, True, pa, args.zero, ov)
     print("=== B：五官走 CPU（老路径）===")
     shoot((w, h), args.collection, False, pb, args.zero, ov)

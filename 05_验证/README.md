@@ -29,7 +29,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
-| 五官正确性对拍 | `verify_region_geomonly.py`（五官 GPU vs CPU 逐像素比，`--zero` 作对照组、`--nospot` 试图只关祛斑） | 是 |
+| 五官正确性对拍 | `verify_region_geomonly.py`（五官 GPU vs CPU 逐像素比，`--zero` 作对照组、`--only eye\|pouch\|naso\|spot` 拆子项、`--nospot` 只关祛斑） | 是（但 **geomOnly 路径不可作判据**，见坑位 9） |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -96,6 +96,17 @@ py -3 05_验证\verify_smooth_compiles.py
    `有脸 0%`、`往返 0.00`，而脚本照样打印「存活」。**判别办法：看 `self-check` 那行的
    `blur=` 是不是你设的值**；不是就说明参数没下去，那一轮数据无效（`cam_probe.py` 已把这条做成读回断言）。
    另外刚连上 OBS 常回 `207 not ready`，必须重试 —— `soak_s2.apply_load` 重试 15 次就是这个原因。
+9. **面板参数的单位是 0..100，不是 0..1**。`beauty_params.h` 的 `g_params` 注释写明
+   「面板刻度统一 0..100，value = panel / 100 × max_val」，引擎侧一律 `panel / 100`。
+   传 `eye_bright: 0.5` 等于把滑块拖到 0.5%，效果只剩 1%，取整后全被抹平。
+   2026-11-03 之前 `soak_s2.LOAD_REGION` 就是 0..1 尺度，P0-7 的全部对拍都跑在 1% 强度上
+   （见 `PROGRESS §9.19`）。`LOAD` 里 `thin_face / big_eye / chin` 仍是 0..1 的笔误，未修。
+10. **五官段的截图对拍不能当判据**。它比的是两次独立启动 OBS 的画面；geomOnly 帧里
+   CPU 侧的 `mask_` 是上一次非 geomOnly 帧的残留，GPU 侧用的是本帧几何重画的掩码，
+   两者本来就不是同一份。证据：四个子项单独开，`maxdiff` 全是 8、bbox 完全相同、
+   ≥8 的像素固定在同两点；关掉 geomOnly（`BEAUTY_MASK_GEOM_ONLY=0`）差异反而变大。
+   要判五官算法，用插件自带的自检（`BEAUTY_REGION_CMP=1`），它在同一帧、同一份掩码上比，
+   但只在非 geomOnly 帧触发（默认配置下很难碰到）。详见 `out/logs/P0-7_region_20261103.md`。
 
 ## 四、素材与输出
 

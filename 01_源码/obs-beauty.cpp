@@ -3570,6 +3570,18 @@ static void beauty_region_upload_els(struct beauty_filter *f,
 	}
 	gs_texture_set_image(f->region_param, (const uint8_t *)pb, 64 * 16,
 			     false);
+	/* 2.8.2 诊断：确认「交到 shader 手里的是什么」。geomOnly 帧里五官效果
+	 * 整个消失，链却照样跑完 pass —— 先看参数表本身有没有内容。 */
+	if (getenv("BEAUTY_REGION_DBG")) {
+		static int up_dbg = 0;
+		if ((++up_dbg % 120) == 1)
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] [region-dbg] 上传 n=%d："
+			     "A=(%.1f,%.1f,%.2f,%.2f) B=(%.3f,%.3f,%.3f,%.3f) "
+			     "C.shade=%.3f",
+			     n, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
+			     pb[7], pb[8]);
+	}
 	free(pb);
 }
 
@@ -3641,6 +3653,20 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 	if (!fx || !beauty_ensure_region_rt(f, cx, cy))
 		return NULL;
 
+	/* 2.8.2 诊断（BEAUTY_REGION_DBG=1，每 120 帧一次）：geomOnly 帧认领了
+	 * REGION，但画面里五官效果整个消失 —— 这条日志用来分清「几何是空的」与
+	 * 「几何有值但 pass 白跑」。链尾再打一条 `cur == in_tex` 说明有没有真处理。 */
+	static int rg_dbg_n = 0;
+	static bool rg_rb_done = false;
+	const bool rg_dbg = getenv("BEAUTY_REGION_DBG") != NULL;
+	if (rg_dbg && (++rg_dbg_n % 120) == 1)
+		blog(LOG_INFO,
+		     "[" PLUGIN_NAME "] [region-dbg] mask=%d skin_use=%d "
+		     "geomskip=%d faces=%d els=%d naso=%d tail=%d spot=%d",
+		     job.mask ? 1 : 0, f->mask_skin_use ? 1 : 0, (int)job.maskGeomOnly,
+		     rg.faceCount, fc.elsCount, fc.nasoCount, fc.tailCount,
+		     rg.spotOn);
+
 	gs_texture_t *cur = in_tex;
 	if (fc.elsCount > 0) {
 		beauty_region_upload_els(f, rg, fc, fc.elsBeg, fc.elsCount);
@@ -3689,6 +3715,47 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 					 "meanTex", cx, cy, 3, rg, fc, 0);
 		if (!cur)
 			return NULL;
+	}
+	if (rg_dbg && (rg_dbg_n % 120) == 1)
+		blog(LOG_INFO, "[" PLUGIN_NAME "] [region-dbg] 出口：%s",
+		     (cur == in_tex) ? "**返回原图，一个 pass 都没跑**"
+				     : "已跑 pass（像素应当改变）");
+	/* 一次性读回：pass 跑过 ≠ 像素变过。读回链输出与输入逐像素比，
+	 * 结果分三种 —— maxdiff=0 说明 shader 没改动任何像素（输入为空/掩码为 0）；
+	 * 有差异但很小说明只施加了一部分；差异正常说明链本身没问题，是后面丢了。 */
+	if (rg_dbg && !rg_rb_done && cur && cur != in_tex) {
+		rg_rb_done = true;
+		const size_t npix = (size_t)cx * (size_t)cy;
+		uint8_t *pa = (uint8_t *)malloc(npix * 4);
+		uint8_t *pb = (uint8_t *)malloc(npix * 4);
+		if (pa && pb && beauty_readback_rgba(f, in_tex, pa, cx, cy) &&
+		    beauty_readback_rgba(f, cur, pb, cx, cy)) {
+			long dn = 0;
+			int dmx = 0;
+			for (size_t i = 0; i < npix; i++) {
+				int w = 0;
+				for (int c = 0; c < 3; c++) {
+					int dv = (int)pa[i * 4 + c] -
+						 (int)pb[i * 4 + c];
+					if (dv < 0)
+						dv = -dv;
+					if (dv > w)
+						w = dv;
+				}
+				if (w) {
+					dn++;
+					if (w > dmx)
+						dmx = w;
+				}
+			}
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] [region-dbg] 链输出 vs 输入："
+			     "maxdiff=%d 差异像素=%ld(%.4f%%)",
+			     dmx, dn, npix ? 100.0 * (double)dn / (double)npix
+					   : 0.0);
+		}
+		free(pa);
+		free(pb);
 	}
 	return cur;
 }
