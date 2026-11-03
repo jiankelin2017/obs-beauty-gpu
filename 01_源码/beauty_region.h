@@ -53,6 +53,11 @@ void applyEllipses(unsigned char* dst, int w, int h,
 // 拉回量按 k（0..1）缩放，面板档位直接乘在 k 上。
 //
 // scratch 由调用方持有（两个浮点平面，按 ROI 面积分配）。
+//
+// mask 可以为 nullptr（2.9.0）：S4a/S4b 之后 CPU 掩码在绝大多数帧里根本不存在
+// （geomOnly 帧只出几何、不落笔），此时 mask_ 是残留或全零。传 nullptr =
+// 「不做掩码门控，ROI 内全算」，靠下面的 dev 阈值排除细纹理与真边缘。
+// 此前一律传 mask，mw<=0 逐像素 continue，导致祛斑在默认配置下整帧零作用（P0-8）。
 void applySpotFix(unsigned char* dst, int w, int h,
                   const unsigned char* mask, const RoiRect& roi,
                   float k, int radius, float thrLo, float thrHi,

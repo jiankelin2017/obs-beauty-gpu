@@ -1888,6 +1888,7 @@ public:
                         // 要么 GPU 按几何重画，要么整帧跳过处理（绝不按「全皮肤」磨）。
                         const bool geomOnly = job.maskGeom.geomOnly != 0;
                         job.maskGeomOnly = geomOnly;
+                        maskGeomOnlyFrame_ = geomOnly;   // 2.9.0：见成员注释
                         job.mask = (haveMask && !geomOnly) ? &mask_[0] : nullptr;
                         if (geomOnly)
                             job.protect = nullptr;
@@ -3023,7 +3024,44 @@ private:
         // ROI 只在这里算一次（掩码每 4 帧才重算），中间帧直接复用。
         // pad 必须 >= radius：ROI 边缘像素的邻域会往外读，切掉了结果就变了。
         if (bx1 < 0) {
-            boundsOut = beautycore::RoiRect();          // 全零掩码
+            /* 2.9.0（P0-8）：这里要区分两种「bx1 < 0」。
+             *
+             * geomOnly 帧（S4a 显式降频 / S4b 缩略图检测）**一个像素都不落笔**，
+             * 所以 bx1 从来没被赋值。它不是「掩码全零」，而是「本帧没画」。
+             *
+             * 此前一律清空，后果是一条链：bounds_ 空 → GPU 段 geoOut->spotOn=0、
+             * CPU 段 applySpotFix 跳过 → 祛斑痘在两条路径上都不执行。而默认配置
+             * detect_small=1 几乎恒走缩略图，等于祛斑自 2.6.0 起基本没生效
+             * （实测：默认 spot=0，gonly 恒 180/180；关掉 geomOnly 后 spot=1）。
+             *
+             * 处置分两种：
+             *   · 有上一份真实包围盒 → **沿用**。与 mask_ 的「残留」语义一致，
+             *     滞后 ≤ 一个检测周期（S7 静止期最多 detAdaptStill 帧）。
+             *   · 从没建过（缩略图路径下永远没有落笔帧）→ 用本帧脸框兜底。
+             *     否则修了也白修：bounds_ 会一直是空的。
+             */
+            if (!geomOnly) {
+                boundsOut = beautycore::RoiRect();      // 真的全零掩码
+            } else if (boundsOut.empty() && !faces.empty()) {
+                const auto &f0 = faces[0];
+                if (f0.w > 0.0f && f0.h > 0.0f) {
+                    const float ccx = f0.x + f0.w * 0.5f;
+                    const float ccy = f0.y + f0.h * 0.5f;
+                    const float hw = f0.w * kFaceBoxGrow * 0.5f;
+                    const float hh = f0.h * kFaceBoxGrow * 0.5f;
+                    const int pad = g_cfg.radius + 1;
+                    beautycore::RoiRect r;
+                    r.x0 = (int)(ccx - hw) - pad;
+                    r.y0 = (int)(ccy - hh) - pad;
+                    r.x1 = (int)(ccx + hw) + pad + 1;
+                    r.y1 = (int)(ccy + hh) + pad + 1;
+                    if (r.x0 < 0) r.x0 = 0;
+                    if (r.y0 < 0) r.y0 = 0;
+                    if (r.x1 > gw) r.x1 = gw;
+                    if (r.y1 > gh) r.y1 = gh;
+                    if (r.x1 > r.x0 && r.y1 > r.y0) boundsOut = r;
+                }
+            }
         } else {
             const int pad = g_cfg.radius + 1;
             beautycore::RoiRect r;
@@ -3487,6 +3525,11 @@ private:
     // 「掩码是这一帧的、关键点是上一帧的」这种错配。
     std::vector<beautycore::FaceBox> faces_;
     beautycore::RoiRect bounds_;   // 掩码包围盒（外扩 radius），随掩码一起更新
+    // 2.9.0（P0-8）：本帧 mask_ 是不是「没有 GPU 掩码链时的那份真掩码」。
+    // geomOnly 帧（S4a 降频 / S4b 缩略图检测）**不落笔**，mask_ 里是上一份残留
+    // 或全零，任何按像素读它的算子都会整体跳过。祛斑就栽在这上面（另一处是
+    // bounds_ 被清空）。凡是「只在有掩码时才有意义」的 CPU 算子都要先看这个标志。
+    bool maskGeomOnlyFrame_ = false;
     bool maskValid_ = false;
     int  detMaxFaces_ = 8;   // 面板「人物个数」（1..8）
     int  detHighQ_ = 0;      // 面板「识别模式」：0 标准 / 1 高精度（conf 0.6 / 0.45）
@@ -3951,7 +3994,14 @@ private:
             geoOut->roiY1 = bounds_.y1;
         }
         if (dst && spot > 0.0f && !bounds_.empty()) {
-            beautycore::applySpotFix(dst, w, h, mk, bounds_,
+            /* 2.9.0（P0-8）：geomOnly 帧传 nullptr = 不做掩码门控。
+             * 原因：applySpotFix 的主循环是 `mw <= 0 → continue`，而 geomOnly
+             * 帧的 mask_ 是残留/全零，于是「spot=1 已进链、算子逐像素全跳过」，
+             * 画面一点变化都没有（实测：人造 26 灰阶斑点，maxdiff 仍为 0）。
+             * ROI 本身来自脸框，dev 阈值 [thrLo,thrHi] 已经把细纹理与真边缘
+             * 排除在外，所以 ROI 内全算是安全的。 */
+            const unsigned char* smask = maskGeomOnlyFrame_ ? nullptr : mk;
+            beautycore::applySpotFix(dst, w, h, smask, bounds_,
                                      g_cfg.regSpotK * spot, g_cfg.regSpotRadius,
                                      g_cfg.regSpotThrLo, g_cfg.regSpotThrHi,
                                      g_cfg.threads, spotScratch_);

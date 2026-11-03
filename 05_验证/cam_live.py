@@ -112,8 +112,16 @@ def parse_group(spec):
 def apply_group(c, source, filt, g):
     """返回实际读回的设置（None = 滤镜已关）。"""
     if g.get("_off"):
-        c.set_filter_enabled(source, filt, False)
-        return None
+        # 关滤镜也要重试：OBS 刚起时 websocket 已可用但源还没就绪，回 207。
+        last = None
+        for _ in range(15):
+            try:
+                c.set_filter_enabled(source, filt, False)
+                return None
+            except Exception as e:   # noqa: BLE001
+                last = e
+                time.sleep(2.0)
+        raise RuntimeError("关滤镜失败：%s" % last)
     st = {k: 0.0 for k in PANEL_KEYS}
     st.update({k: v for k, v in g.items() if not k.startswith("_")})
     st["enabled"] = True

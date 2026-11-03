@@ -332,7 +332,7 @@ void applySpotFix(unsigned char* dst, int w, int h,
                   const unsigned char* mask, const RoiRect& roi,
                   float k, int radius, float thrLo, float thrHi,
                   int threads, std::vector<float>& scratch) {
-    if (!dst || !mask || roi.empty() || w <= 0 || h <= 0) return;
+    if (!dst || roi.empty() || w <= 0 || h <= 0) return;
     if (k <= 0.0f) return;
     if (radius < 1) radius = 1;
     if (radius > 6) radius = 6;
@@ -342,6 +342,29 @@ void applySpotFix(unsigned char* dst, int w, int h,
     if (scratch.size() < n * 2) scratch.resize(n * 2);
     float* lum = &scratch[0];
     float* mean = &scratch[n];
+
+    /* 2.9.0（P0-8）：调用方给的掩码可能「非空指针但整块为 0」。
+     *
+     * 为什么会这样：掩码来自异步检测，滞后一帧；而 geomOnly 判定（只出几何、
+     * 不落笔）用的也是那一份滞后的快照。两者一旦错配，就会拿到一份「指针有效、
+     * 内容全零」的掩码 —— 主循环 `mw <= 0 → continue` 于是一个像素都不修，
+     * 表现是「开了祛斑，画面一模一样」。实测 maskNz=0 / hit=0 / devMax=0.00。
+     *
+     * 判据必须看**数据**而不是标志：这里抽样统计非零数，全零就等价于 nullptr。
+     * 抽样步长 4（1/16 像素），130k 的 ROI 约 8k 次读取，可忽略。
+     */
+    bool useMask = (mask != nullptr);
+    if (useMask) {
+        int nz = 0;
+        for (int y = 0; y < bh && nz == 0; y += 4) {
+            const unsigned char* mrow = mask + (size_t)(roi.y0 + y) * w + roi.x0;
+            for (int x = 0; x < bw; x += 4) {
+                if (mrow[x]) { nz = 1; break; }
+            }
+        }
+        if (!nz) useMask = false;      // 整块为 0：本帧没有可用掩码
+    }
+    if (!useMask) mask = nullptr;      // 统一交给下面的 nullptr 语义
 
     // 亮度平面取自**当前 dst**（磨皮/美白已经做完）。用原图算会把已经磨掉的
     // 斑再"修"一遍，等于白做。
@@ -393,27 +416,49 @@ void applySpotFix(unsigned char* dst, int w, int h,
     if (getenv("BEAUTY_SPOT_DEBUG")) {
         long hit = 0;
         float dmax = 0.0f;
+        long maskNz = 0;
         for (size_t i = 0; i < n; i++) {
             const size_t gy = (size_t)roi.y0 + i / (size_t)bw;
             const size_t gx = (size_t)roi.x0 + i % (size_t)bw;
-            if (mask[gy * (size_t)w + gx] == 0) continue;
+            if (mask && mask[gy * (size_t)w + gx] != 0) maskNz++;
+            if (mask && mask[gy * (size_t)w + gx] == 0) continue;
             const float ad = fabsf(lum[i] - mean[i]);
             if (ad > dmax) dmax = ad;
             if (ad >= thrLo && ad <= thrHi) hit++;
         }
-        fprintf(stderr, "[dbg] spot k=%.2f r=%d thr=[%.1f,%.1f] roi=%dx%d "
-                "hit=%ld devMax=%.2f\n", k, radius, thrLo, thrHi, bw, bh, hit, dmax);
+        // ⚠ 路径必须全 ASCII：fopen 走 ANSI，中文路径会乱码而失败（踩过）。
+        {
+            static int dbgS = 0;
+            if (dbgS < 6) {
+                dbgS++;
+                char pth[256];
+                const char *tmp = getenv("TEMP");
+                snprintf(pth, sizeof(pth), "%s/beauty_spot_inner.txt",
+                         tmp ? tmp : "C:/Windows/Temp");
+                FILE *fp = fopen(pth, "a");
+                if (fp) {
+                    fprintf(fp, "k=%.2f r=%d thr=[%.1f,%.1f] roi=%dx%d mask=%s "
+                            "maskNz=%ld hit=%ld devMax=%.2f\n",
+                            k, radius, thrLo, thrHi, bw, bh,
+                            mask ? "cpu" : "null", maskNz, hit, dmax);
+                    fclose(fp);
+                }
+            }
+        }
     }
 
     runRange(0, bh, threads, [&](int yBegin, int yEnd) {
         for (int y = yBegin; y < yEnd; y++) {
             unsigned char* row = dst + (size_t)(roi.y0 + y) * w * 4;
-            const unsigned char* mrow = mask + (size_t)(roi.y0 + y) * w;
+            const unsigned char* mrow = mask ? (mask + (size_t)(roi.y0 + y) * w)
+                                             : nullptr;
             const float* l = lum + (size_t)y * bw;
             const float* m = mean + (size_t)y * bw;
             unsigned char* p = row + (size_t)roi.x0 * 4;
             for (int x = 0; x < bw; x++, p += 4) {
-                const float mw = (float)mrow[roi.x0 + x] * (1.0f / 255.0f);
+                // mask == nullptr：本帧没有 CPU 掩码（geomOnly），ROI 内全算。
+                const float mw = mrow ? (float)mrow[roi.x0 + x] * (1.0f / 255.0f)
+                                      : 1.0f;
                 if (mw <= 0.0f) continue;
                 const float dev = l[x] - m[x];
                 const float ad = fabsf(dev);
