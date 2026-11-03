@@ -108,6 +108,17 @@ def gate_rows(perf, logpaths):
             "cover": med([r["cover"] for r in arr]),
             "align": med([r["align"] for r in arr]),
             "chain": chain, "warn": w, "err": e,
+            # 三个健康项取**最坏窗口**，不取中位数。
+            # gskip 是「geomOnly 但 GPU 建图失败 → 整帧跳过」，一窗里出现 1 帧就说明
+            # 掩码 RT/shader 出问题了，中位数会把它平均成 0；tskip 的判据本来就按
+            # 单窗定（<=3，见下方 --cmp 段），所以同样要取 max。
+            #
+            # 以前这三个键没进 rows，而 --save / --cmp 都在读它们（`r.get(x) or 0`），
+            # 后果是：基线 JSON 里恒为 0（假数据），且 f_gs(gskip==0)、f_ts(tskip<=3)
+            # **永远得 0、永远 PASS** —— gskip 爆了也判过。见 PROGRESS §9.15.3。
+            "gonly": max([r.get("gonly") or 0 for r in arr]),
+            "gskip": max([r.get("gskip") or 0 for r in arr]),
+            "tskip": max([r.get("tskip") or 0 for r in arr]),
         })
     return rows
 
@@ -192,12 +203,25 @@ def main():
             r["res"], r["n"], fmt(r["tot"]), fmt(r["tr"]), fmt(r["pr"]),
             fmt(r["cover"]), fmt(r["align"]), ch, r["warn"], r["err"]))
 
+    # 健康项单独起一行。这三个数取的是**最坏窗口**而非中位数（见 gate_rows 注释），
+    # 所以它们能直接回答「这轮有没有哪一窗整帧跳过」——尤其 tskip 一帧会被记两次。
+    for r in rows:
+        extra = ""
+        if r["tskip"]:
+            extra += "  ← tskip 最坏窗 %d 次 ≈ %d 帧整帧跳过" % (
+                r["tskip"], r["tskip"] // 2)
+        if r["gskip"]:
+            extra += "  ← gskip 最坏窗 %d 帧（GPU 建图失败）" % r["gskip"]
+        print("  %-9s 健康项(最坏窗口)：gonly=%d gskip=%d tskip=%d%s" % (
+            r["res"], r["gonly"], r["gskip"], r["tskip"], extra))
+
     if save:
         base = {r["res"]: {"n": r["n"], "tot": r["tot"], "tr": r["tr"],
                            "dl": r["dl"], "up": r["up"], "pr": r["pr"],
                            "cover": r["cover"], "align": r["align"],
                            "gonly": r.get("gonly") or 0,
                            "gskip": r.get("gskip") or 0,
+                           "tskip": r.get("tskip") or 0,
                            "gate": "A+C", "tol_transfer": tol_tr,
                            "tol_engine_pct": tol_pct}
                 for r in rows}
