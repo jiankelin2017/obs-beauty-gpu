@@ -27,8 +27,22 @@ py -3 05_验证\verify_smooth_compiles.py
 | 离线对拍（着色器编译 / 像素对齐） | `verify_tone_compiles.py`、`verify_smooth_compiles.py`、`verify_detail_compiles.py`、`verify_warp_compiles.py`、`verify_mask_compiles.py`、`verify_region_compiles.py` | 否 |
 | 门禁判定与配对 A/B | `gate.py`、`ab_pair.py` | 门禁读日志：否；采集：是 |
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
-| 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
-| 单项度量 | `mask_probe.py`（掩码/有脸/往返） | 是 |
+| 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
+| 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数） | 是 |
+
+> `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
+> 不体现在帧耗时里的改动（S7 的全部立论就在这里）。用法：
+>
+> ```bat
+> py -3 05_验证\cpu_probe.py --seconds 45 --every auto,4,8
+> ```
+>
+> `auto` = 不设 `BEAUTY_MASK_EVERY`，走 2.8.0 的运动自适应默认；整数 = 锁死固定周期（**这个动作本身会关掉自适应**）。
+> 末尾固定多跑一档「关滤镜」作下限。静止 720p 参考值见 `PROGRESS §9.13.1`。
+>
+> **2.8.0 起新增两个日志字段**（性能行行尾）：`dper=` 窗口内最大提交周期（0 = 每帧）、
+> `dmot=` 窗口内最大运动量（块平均亮度差）。判「自适应有没有生效」看这两个，不要看毫秒数——
+> 检测在 worker 上，渲染线程的耗时不变是正常的。
 
 > `mask_probe.py` 当前只能读「有脸 / 往返」两项：本构建的 `性能` 行里「掩码」字段恒为 `0.00%`（侧脸素材同样为 0），
 > 所以它**不能**用来比较掩码覆盖率，别拿这个数下结论。判「素材有没有被认出」，看「有脸」与 `faces` 取值。
@@ -37,6 +51,9 @@ py -3 05_验证\verify_smooth_compiles.py
 
 1. **收益只认配对**：`gate.py --skip-transfer` 判的是健康项与引擎项，跨会话的搬运项不可比；单次绝对值只能看趋势，收益结论必须来自 `ab_pair.py` 的同会话交替 A/B。
 2. **采集前先确认数据有效**：日志里 `engine=gpu` 且 `S/T/R/D/W` 非 0，否则那一轮测的是 CPU 路径，数字不能用。
+3. **`对齐%` 在 2.8.0 之后不能当静态采集的质量指标**：静止时检测每 8 帧才提交一次，
+   对齐率会从 100% 掉到 13%，这是设计后果不是回归 —— 静态内容下新旧掩码逐像素相同，
+   已用 `ADAPT=0` vs `ADAPT=1` 的五组 `maxdiff=0` 证明。要判质量用 `maxdiff`，不用对齐率。
 
 ## 四、素材与输出
 
@@ -55,4 +72,7 @@ py -3 05_验证\verify_smooth_compiles.py
   > `make_front_assets.py` 已内置「色度校正」（把主脸区推到 r²≈0.20），并会打印校正前后的 r²。
   > 另外：合成皮肤的毛孔级细节少于真人，**不能拿它评价磨皮/清晰的主观观感**，只用于耗时、检出、链路三类结论。
 - `out/`：每次验收一个子目录（如 `v271s4k`、`v271f720`、`v270f4k`），内含截图与 `_meta.json`；`_obs_screenshots/` 放整屏截图。
+- **运动素材的场景集合**：`beauty_motion720`（`motion_720p.mp4` 循环，1280×720），用
+  `py -3 05_验证\make_motion_collection.py` 重建。它是 S7 这类「按运动自适应」改动的唯一
+  验证手段 —— 静态素材看不出任何滞后，只能证明「不动时一致」。
 - **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。建议长跑一结束就把日志复制到 `out/logs/`（该目录当前不存在，首次使用先 `mkdir 05_验证\out\logs`），再启动下一个 OBS 实例。

@@ -431,6 +431,15 @@ struct beauty_filter {
 	bool thumb_frame;          // 本帧真的走了缩略图路径（钩子据此拒绝上传旧帧）
 	uint32_t an_thumb;         // 走缩略图的帧数（窗口内）
 	uint32_t an_thumbskip;     // 走了缩略图、但本帧认领不全 → 整帧跳过
+	// ---- 2.8.0（S7）：检测周期自适应 ------------------------------------
+	// dper_max = 本窗口内实际用到的**最大**提交周期。静止段应等于
+	// BEAUTY_DET_ADAPT_STILL（默认 8），人一晃动就掉回 1 —— 这是「自适应真的
+	// 生效」以及「运动时不掉帧」的唯一直接证据，光看毫秒数看不出来（检测在
+	// worker 上，渲染线程一分钱不多花）。
+	// dmot_max = 窗口内网格平均亮度差的最大值，用来标定阈值：真实摄像头静止时
+	// 的噪点如果逼近 4，就得把 BEAUTY_DET_ADAPT_THR 抬高，否则等于没降频。
+	uint32_t dper_max;
+	int      dmot_max;
 	int thumb_dbg_done;        // 一次性判据快照是否已打
 	bool thumb_fail_logged;    // 构建失败只报一次（防刷屏）
 	bool thumb_skip_logged;    // 认领不全导致跳过的原因只报一次
@@ -5575,6 +5584,16 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	if (f->prof_on) {
 		f->prof_up += beauty_now_ms() - t_up;
 		f->prof_frames++;
+		// S7（2.8.0）：按窗口取极值。周期用 max（静止 8 / 运动 1，max 能证明
+		// 静止段真的降了频），运动量也用 max（能标定阈值够不够）。
+		{
+			const int per = beautyCoreMaskPeriod();
+			if (per > (int)f->dper_max)
+				f->dper_max = (uint32_t)per;
+			const int mo = beautyCoreMaskMotion();
+			if (mo > f->dmot_max)
+				f->dmot_max = mo;
+		}
 		// T2：与 prof_frames 同处递增 —— 这是切臂相位不漂的唯一保证。
 		// 放在 prof 块内是刻意的：prof 关着就没有日志窗口，A/B 也无从统计，
 		// 此时计数不涨、臂恒为 chain（= 生产行为），是个安全的退化。
@@ -5631,7 +5650,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     " 对齐 %llu/%llu（%.0f%%）边框 %s ab=%s"
 			     " tick=%llu/%llu dup=%d"
 			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u"
-			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u tsm=%u tskip=%u tdl=%.2f",
+			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u tsm=%u tskip=%u tdl=%.2f"
+			     " dper=%u dmot=%d",
 			     cx, cy, dl, pr, up, dl + pr + up, f->prof_frames,
 			     f->prof_cover * 100.0 / n,
 			     (double)f->prof_face_frames * 100.0 / n,
@@ -5643,12 +5663,15 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     f->an_claimdrop,
 			     f->prof_dl_wait / n, f->prof_dl_copy / n,
 			     f->an_geomonly, f->an_geomskip,
-			     f->an_thumb, f->an_thumbskip, f->prof_dl_thumb / n);
+			     f->an_thumb, f->an_thumbskip, f->prof_dl_thumb / n,
+			     f->dper_max, f->dmot_max);
 			// 打印完清零，下一窗口重新统计
 			f->an_nofresh = f->an_masknull = 0;
 			f->an_histrst = f->an_claimdrop = 0;
 			f->an_geomonly = f->an_geomskip = 0;
 			f->an_thumb = f->an_thumbskip = 0;
+			f->dper_max = 0;
+			f->dmot_max = 0;
 			f->prof_dl_thumb = 0.0;
 
 			// 分项单独一行：把它和总耗时写在同一行会让本来就长的性能行更难读，

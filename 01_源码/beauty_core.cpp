@@ -454,6 +454,21 @@ struct SmoothCfg {
     // 提交周期 5 帧 = 167ms，滞后从 1 帧锯齿漂到 5 帧，而掩码边界是脸框硬切边，
     // 拖影非常显眼。实测 YuNet 只要 14.1ms，慢的从来不是推理，是节流。
     int maskEveryAsync = 0;
+    // 2.8.0（S7）：提交周期按「画面是否在动」自适应。
+    //
+    // 为什么需要它：maskEveryAsync=0 的语义是「每帧提交」，实测**画面完全静止**
+    // 时这一条就常驻 0.476 核（720p，见 05_验证/cpu_probe.py），按每次推理 15.4 ms
+    // CPU 反算，30fps 下等于每秒白烧 0.46 核。直播里主持人坐着不动的时间占比不低，
+    // 这部分开销换不到任何画面：脸没动，掩码就不该重算。
+    //
+    // 做法：16×16 亮度网格与上一帧比，差异超阈值 → 立刻回每帧；否则拉到
+    // detAdaptStill 帧。所以「人在动」时与 2.7.1 逐帧等价，只有静止时才降频 ——
+    // 拖影风险被限制在「静止的那几帧」，而那几帧本来就没有拖影可看。
+    // BEAUTY_DET_ADAPT=0 逐字节回到 2.7.1 的固定周期。
+    bool detAdapt = true;
+    int  detAdaptStill = 8;   // 静止时的提交周期（帧）= 3.75 次/秒 @30fps
+    int  detAdaptThr = 6;     // 运动阈值：16 个块（4×4 格/块）里最大块平均差，0..255
+    int  detAdaptHot = 3;     // 运动结束后继续每帧提交的帧数（吸收尾影与抖动）
     // 软膝：|mid| ≤ lo 全增益，≥ hi 完全不加。
     // 8/22 是扫出来的：软膝放到 20/45 时大幅度带会涨到 105.9（= 边缘被加亮，
     // 也就是光晕）。收到 8/22 后稳定在 100.0 以内，边缘平均改动只有 0.26 灰阶。
@@ -656,6 +671,14 @@ SmoothCfg g_cfg;
 // 为什么需要它：提交周期从 4 帧改成每帧，从「每帧毫秒」上完全看不出来 ——
 // 检测跑在 worker 上，渲染线程一分钱不多花。唯一直接可测的就是「多少帧提交了几次」。
 uint64_t g_maskSubmits = 0;
+
+// 2.8.0（S7）：自适应检测周期的两个瞬时诊断量（每次 updateMask 刷新）。
+//   g_detPeriod —— 最近一帧算出的提交周期，1 = 每帧（与 2.7.1 等价）。
+//   g_detDiff   —— 最近一帧的 16×16 网格平均亮度差，阈值是 detAdaptThr。
+// 为什么放全局：与 g_maskSubmits / g_frameTag 同一个理由 —— 一个进程只有一份
+// 引擎，宿主只认「引擎」这一个对象，全局量最不容易在包装层传丢。
+int g_detPeriod = 0;
+int g_detDiff = 0;
 
 // 无脸透传帧数（3.1.40，诊断用）。
 // noface=N 才能证明「本窗口真的有 N 帧是因为没人而跳过的」，是验证
@@ -1227,10 +1250,33 @@ public:
             // 异步提交周期：BEAUTY_MASK_EVERY=4 退回 3.1.7 的节奏（拖影回来，但省 CPU）。
             // 留这个口子是为了让真机能当场对比 0 / 1 / 2 / 4 四档，不用改代码重编译。
             const char* me = getenv("BEAUTY_MASK_EVERY");
-            if (me && *me) {
+            const bool maskEverySet = (me && *me);
+            if (maskEverySet) {
                 int v = atoi(me);
                 if (v < 0) v = 0;
                 g_cfg.maskEveryAsync = v;
+            }
+            // 2.8.0（S7）：运动自适应提交周期。
+            // 显式设了 BEAUTY_MASK_EVERY 就默认关掉自适应 —— 那个开关的用途正是
+            // 「把周期锁死」来量数据，不能被自适应悄悄改回去；要两个一起上，
+            // 显式写 BEAUTY_DET_ADAPT=1。
+            const char* da = getenv("BEAUTY_DET_ADAPT");
+            if (da && *da) g_cfg.detAdapt = (da[0] != '0');
+            else if (maskEverySet) g_cfg.detAdapt = false;
+            const char* das = getenv("BEAUTY_DET_ADAPT_STILL");
+            if (das && *das) {
+                int v = atoi(das);
+                if (v >= 1 && v <= 30) g_cfg.detAdaptStill = v;
+            }
+            const char* dat = getenv("BEAUTY_DET_ADAPT_THR");
+            if (dat && *dat) {
+                int v = atoi(dat);
+                if (v >= 1 && v <= 64) g_cfg.detAdaptThr = v;
+            }
+            const char* dah = getenv("BEAUTY_DET_ADAPT_HOT");
+            if (dah && *dah) {
+                int v = atoi(dah);
+                if (v >= 0 && v <= 30) g_cfg.detAdaptHot = v;
             }
             // 掩码边界羽化：BEAUTY_MASK_FEATHER=0 关闭（与 3.1.8 逐字节相同，A/B 用），
             // >0 固定像素；不设则按脸宽自适应（0.12 × 脸宽，对齐 wtnl-zhi 的默认值）。
@@ -2354,6 +2400,98 @@ private:
         }
     }
 
+    // S7（2.8.0）：本帧该用多大的提交周期。
+    //
+    // 只看 16×16 的亮度网格（256 个点，RGBA 步进采样），成本微秒级 —— 与被省掉的
+    // 15.4 ms 推理不在一个量级。判据是「4×4 个格子为一块，16 块里最大的块平均差」，
+    // 不是全图平均：运动只占少数格子，全图平均会被静止背景稀释到与噪点重叠
+    // （实测见函数内注释）。
+    //
+    // 判据方向刻意做成「非对称」：进入运动是立即的（本帧就回每帧），退出运动要等
+    // detAdaptHot 帧。这样最坏滞后是「运动开始的那一帧仍用旧掩码」，即 +1 帧，
+    // 与 2.7.1 的 1 帧滞后同量级；反过来若也延迟进入，就会出现可见拖影。
+    int detectPeriod(const unsigned char* src, int w, int h) {
+        if (!g_cfg.detAdapt || !src || w < 2 || h < 2) {
+            // 自适应关着也要刷新诊断量，否则日志里会留着上一轮的数
+            g_detPeriod = g_cfg.maskEveryAsync;
+            g_detDiff = -1;                 // -1 = 本窗口没做运动判定
+            return g_cfg.maskEveryAsync;
+        }
+        enum { kGrid = 16 };
+        const int sx = (w > kGrid) ? (w / kGrid) : 1;
+        const int sy = (h > kGrid) ? (h / kGrid) : 1;
+        int d16[kGrid * kGrid];
+        for (int gy = 0; gy < kGrid; gy++) {
+            const unsigned char* row = src + (size_t)(gy * sy) * (size_t)w * 4;
+            for (int gx = 0; gx < kGrid; gx++) {
+                const unsigned char* p = row + (size_t)(gx * sx) * 4;
+                // BT.601 整数近似：只用来判「动没动」，与掩码的肤色口径无关
+                int y = (54 * p[0] + 183 * p[1] + 19 * p[2]) >> 8;
+                if (y < 0) y = 0;
+                if (y > 255) y = 255;
+                const int i = gy * kGrid + gx;
+                const int d = motHave_ ? (y - (int)motPrev_[i]) : 0;
+                d16[i] = (d < 0) ? -d : d;
+                motPrev_[i] = (unsigned char)y;
+            }
+        }
+        const bool first = !motHave_;
+        motHave_ = true;
+        if (first) {                       // 首帧没有可比对象：按「在动」处理
+            motHot_ = g_cfg.detAdaptHot;
+            motPeriod_ = 0;                // 0 = 每帧（单位见下方注释）
+            motDiff_ = 0;
+            g_detPeriod = motPeriod_;
+            g_detDiff = motDiff_;
+            return motPeriod_;
+        }
+        // 判据用「4×4 个格子为一块，取 16 个块均值的最大者」，不是全图均值。
+        // 为什么不用全图均值：实测 motion_720p.mp4（脸在画面里匀速移动）的
+        // 16×16 全局平均差中位只有 **3.6**，而静止图 + σ=2 噪点是 2.3 —— 两者
+        // 几乎重叠，阈值怎么定都错。原因是运动只占少数格子，被静止背景稀释了。
+        // 块均值的分离度则很干净（同一次标定）：
+        //     运动视频 4×4 块最大均值 ≥ 9.9（中位 16.9）
+        //     静止+噪声            ≤ 3.8
+        // 默认阈值 6 对两侧各留 1.6 倍余量。
+        int best = 0;
+        for (int by = 0; by < kGrid; by += 4) {
+            for (int bx = 0; bx < kGrid; bx += 4) {
+                int sum = 0;
+                for (int yy = 0; yy < 4; yy++) {
+                    const int base = (by + yy) * kGrid + bx;
+                    for (int xx = 0; xx < 4; xx++)
+                        sum += d16[base + xx];
+                }
+                const int m = sum >> 4;    // /16
+                if (m > best) best = m;
+            }
+        }
+        motDiff_ = best;
+        // ⚠ 单位是「maskAge_ >= every」的那个 every，**不是**「每帧」的帧数：
+        // every=0 → 每帧提交；every=N → 每 N+1 帧提交。这条 off-by-one 踩过一次：
+        // 把「在动」写成 1，实际变成每 2 帧提交，运动素材的对齐率从 99% 掉到 50%。
+        //
+        // 为什么只分「动 / 不动」两档就够（曾加过第三档，被标定数据否掉了）：
+        // 阈值 6 对慢动作已经足够敏感 —— 把静止图每帧平移 **1 像素**（肉眼几乎
+        // 看不出的行人级慢动），块最大均值的中位就有 8.1，稳定高于 6；而 σ=2 的
+        // 传感器噪点只有 ≤3.8。两者的分离区就是 3.8~8，阈值 6 落在正中间。
+        // 所以「低于阈值但仍在动」这一档并不存在，多一档只会让噪点摄像头白白
+        // 多烧 0.03 核，换不到质量。
+        const int still = (g_cfg.detAdaptStill > 1) ? (g_cfg.detAdaptStill - 1) : 0;
+        if (motDiff_ > g_cfg.detAdaptThr) {
+            motHot_ = g_cfg.detAdaptHot;   // 在动：每帧，并把热窗口续满
+            motPeriod_ = 0;
+        } else if (motHot_ > 0) {
+            motHot_--;                     // 刚停下：再每帧提交几帧，避开边界抖动
+            motPeriod_ = 0;
+        } else {
+            motPeriod_ = still;            // 真的冻住了
+        }
+        g_detPeriod = motPeriod_;
+        g_detDiff = motDiff_;
+        return motPeriod_;
+    }
+
     // 生成「肤色 ∩ 人脸框」掩码。返回 false 表示本帧没有可用掩码。
     //
     // 这个函数只做三件轻活：① 收走 worker 算好的结果（O(1) swap）；② worker 空闲
@@ -2393,7 +2531,12 @@ private:
             // worker 忙时 submitAsync 会自己放弃这一轮（见它的注释），
             // 所以 60fps + 1080p 这种「推理 15ms / 帧 16.7ms」的极端情况
             // 会自我节流成「隔帧一次」，滞后从 1 帧变成 1~2 帧，不会堆积。
-            if (maskAge_ >= g_cfg.maskEveryAsync) {
+            //
+            // S7（2.8.0）：周期不再固定 —— detectPeriod() 按画面是否在动给出
+            // 「1（在动）或 detAdaptStill（静止）」。检测输入（缩略图或全帧）
+            // 每帧都够得着，所以运动判定与「本帧是否提交」解耦，静止期也不漏判。
+            const int every = detectPeriod(dsrc, dw, dh);
+            if (maskAge_ >= every) {
                 maskAge_ = 0;
                 submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy);
             } else {
@@ -3351,6 +3494,12 @@ private:
     // 「刚开开关、检测还没回来」（这几帧透传）和「人不在画面里」（全帧兜底）。
     bool everHadMask_ = false;
     int maskAge_ = 999;
+    // S7（2.8.0）：运动检测状态。motPrev_ 是上一帧的 16×16 亮度网格。
+    unsigned char motPrev_[256] = {};
+    bool motHave_ = false;   // 是否有可比对象（首帧恒按「在动」）
+    int  motHot_ = 0;        // 剩余「热」帧数（运动刚结束还要每帧跑几帧）
+    int  motPeriod_ = 1;     // 上一次算出的周期
+    int  motDiff_ = 0;       // 上一次的网格平均亮度差（诊断）
     int maskHold_ = 0;   // 连续丢检次数（用于沿用旧掩码）
     int lastFaces_ = 0;
     int maskPixels_ = 0;
@@ -4123,6 +4272,18 @@ const char* beautyEngineId() {
 
 int beautyCoreMaskCadence() {
     return g_cfg.maskEveryAsync;
+}
+
+// 2.8.0（S7）：当前生效的提交周期（1 = 每帧）。
+// 与 beautyCoreMaskCadence 的区别：那个是**配置值**（固定周期），这个是**本帧
+// 实际用的值**。宿主按窗口取最大值，静止段应看到 detAdaptStill、运动段回到 1。
+int beautyCoreMaskPeriod() {
+    return g_detPeriod;
+}
+
+// 最近一帧的网格平均亮度差；-1 表示自适应关着、本窗口没做判定。
+int beautyCoreMaskMotion() {
+    return g_detDiff;
 }
 
 uint64_t beautyCoreMaskSubmits() {

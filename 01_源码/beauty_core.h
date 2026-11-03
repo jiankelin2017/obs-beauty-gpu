@@ -219,6 +219,18 @@ void beautyCoreSetClarity(float maxGain, int radius, float kneeLo, float kneeHi)
 // 两者数字不可直接比。日志里打出实际节奏，省得下次又对不上账。
 int beautyCoreMaskCadence();
 
+// 2.8.0（S7）：**本帧实际使用的**提交周期。单位与 beautyCoreMaskCadence 相同：
+// 0 = 每帧提交，N = 每 N+1 帧提交一次（沿用引擎里 `maskAge_ >= every` 的老口径）。
+// 静止段应看到 detAdaptStill-1（默认 7 = 每 8 帧），运动段回到 0。
+// 这是验证「自适应真的生效、且运动时确实回到每帧」的唯一直接指标 ——
+// 检测在 worker 上，渲染线程的毫秒数看不出提交节奏。
+int beautyCoreMaskPeriod();
+
+// 最近一帧的运动量：16 个块（4×4 格/块）里最大的块平均亮度差（0..255）；
+// -1 = 自适应关着，未做判定。配合阈值看：稳定低于 BEAUTY_DET_ADAPT_THR
+// （默认 6）才是「静止」。实测静止图 + σ=2 噪点 ≤3.8，运动素材 ≥9.9。
+int beautyCoreMaskMotion();
+
 // 累计提交给检测 worker 的帧数（诊断用）。配合帧数就能算出实际节奏：
 //   提交数 / 帧数 ≈ 1/(周期+1)。周期 0 → ≈1.0，周期 4 → ≈0.2。
 // 这是「每帧检测」唯一能直接测到的证据 —— 它不体现在渲染线程的毫秒数上。
