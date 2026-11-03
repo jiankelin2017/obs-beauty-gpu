@@ -316,16 +316,30 @@ uniform float sThrLo;     // 斑点判据下限（细纹理不动）
 uniform float sThrHi;     // 上限（真边缘不动）
 
 // 横向窗口**求和**（不归一化），R 通道存和。
+//
+// 2.9.1（P0-10）：窗口语义必须与 CPU **逐字一致** —— 这是本次修的那个 bug。
+// CPU（beauty_region.cpp:386-414）是**截断窗口**：yA=max(ly-r,0)、yB=min(ly+r,bh-1)，
+// 分子只加 yA..yB，范围外的行**不计入**。
+// 旧写法是 clamp(px+k, roiMin+0.5, roiMax-0.5)：边缘的第 2r+1 次采样会**重复**
+// 同一个像素计入分子，而纵向分母 nx/ny 是按去重后的数量算的 —— 于是 ROI 边缘
+// r 行/列内均值偏大、dev 偏小、pull 偏小。实测 720p 差 178 像素（bbox 正好是
+// ROI 底边两行），见 `05_验证/out/logs/P0-10_spot_edge_20261103.md`。
+// 现在改成「越界直接 skip」，分子与分母都按同一批像素算。
 float4 PS_SpotSumH(vert_out vert_in) : TARGET
 {
     float2 uv = vert_in.uv;
     float2 px = uv * texSize;
-    float sum = 0.0;
     int r = sRadius;
+    int ix = (int)floor(px.x);
+    int lo = max(ix - r, (int)roiMin.x);
+    int hi = min(ix + r, (int)roiMax.x - 1.0);
+    float sum = 0.0;
     for (int k = -6; k <= 6; k++) {
-        if (k < -r || k > r) continue;
-        float2 q = float2(clamp(px.x + (float)k, roiMin.x + 0.5, roiMax.x - 0.5), px.y);
-        sum += lumOf(image.SampleLevel(imageTex, q / texSize, 0.0).rgb);
+        int xx = ix + k;
+        if (xx < lo || xx > hi) continue;   // 截断，不是 clamp
+        sum += lumOf(image.SampleLevel(imageTex,
+                                       float2((float)xx + 0.5, px.y) / texSize,
+                                       0.0).rgb);
     }
     return float4(sum * (1.0 / 255.0), 0.0, 0.0, 1.0);
 }
@@ -336,17 +350,23 @@ float4 PS_SpotMeanV(vert_out vert_in) : TARGET
     float2 uv = vert_in.uv;
     float2 px = uv * texSize;
     int r = sRadius;
+    int iy = (int)floor(px.y);
+    int lo = max(iy - r, (int)roiMin.y);
+    int hi = min(iy + r, (int)roiMax.y - 1.0);
     float sum = 0.0;
     for (int k = -6; k <= 6; k++) {
-        if (k < -r || k > r) continue;
-        float2 q = float2(px.x, clamp(px.y + (float)k, roiMin.y + 0.5, roiMax.y - 0.5));
-        sum += image.SampleLevel(imageTex, q / texSize, 0.0).r;
+        int yy = iy + k;
+        if (yy < lo || yy > hi) continue;   // 截断，不是 clamp
+        sum += image.SampleLevel(imageTex,
+                                 float2(px.x, (float)yy + 0.5) / texSize,
+                                 0.0).r;
     }
-    // 实际参与的元素数（x、y 两个方向分别按 clamp 后的行/列数）
-    float nx = floor(min(px.x + (float)r, roiMax.x - 0.5)) -
-               floor(max(px.x - (float)r, roiMin.x + 0.5)) + 1.0;
-    float ny = floor(min(px.y + (float)r, roiMax.y - 0.5)) -
-               floor(max(px.y - (float)r, roiMin.y + 0.5)) + 1.0;
+    // 实际参与的元素数（与上面两趟 skip 的集合完全是同一批）
+    int ix = (int)floor(px.x);
+    int loX = max(ix - r, (int)roiMin.x);
+    int hiX = min(ix + r, (int)roiMax.x - 1.0);
+    float nx = (float)(hiX - loX + 1);
+    float ny = (float)(hi - lo + 1);
     return float4(sum / (nx * ny), 0.0, 0.0, 1.0);
 }
 
