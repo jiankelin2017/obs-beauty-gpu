@@ -30,7 +30,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
-| 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样判帧间闪动。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md` | 是 |
+| 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md`，帧类型对比见 `out/logs/P0-9_geomonly_gate_20261103.md` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -125,6 +125,14 @@ py -3 05_验证\verify_smooth_compiles.py
     这就是 4K 祛斑三轮「被上一个 OBS 会话接管」的真因（`PROGRESS §9.23.3`）。
     **判据只有一个**：插件日志的 `target=` 尺寸必须等于素材尺寸；`verify_spot_pixels.py` 已把它做成
     末行 WARN，并在打补丁时把内部 `name` 一并改成文件名（跑完原样写回）。
+15. **想让祛斑走「有掩码帧」，必须同时关两个开关**：`BEAUTY_DETECT_SMALL=0`（不用 GPU 缩略图，
+    令 `mapped=false`）**和** `BEAUTY_MASK_GEOM_ONLY=0`。只关后者无效 —— `beauty_core.cpp:2635`
+    的判据是 `(mapped || g_maskGeomOnly)`，缩略图路径下 `mapped` 恒真。2.8.2 那轮「打开了却仍
+    `gonly=180`」就是只关了后者（`PROGRESS §9.24.6`）。用法：
+    `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0`。
+16. **报「改了多少像素」时先报分母**。P0-8 结案时写「47% vs 0.76%、差 7 倍」是错的：前者是
+    `hit/ROI`、后者是 `diffpx/整张画面`，混在一起就凭空造出 7 倍。同口径实测是 1.58 倍
+    （`PROGRESS §9.24.5`）。凡是跨来源比较，先确认 ROI / 分辨率 / 分母是否一致。
 
 ## 四、素材与输出
 

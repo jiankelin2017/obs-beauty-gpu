@@ -167,13 +167,15 @@ def scan_log(snap):
     return log, ver, faces, spot, box, perf, rsz
 
 
-def run(collection, canvas, level, settle, probe=0):
+def run(collection, canvas, level, settle, probe=0, extra=None):
     cfg = {k: 0.0 for k in V.PANEL_KEYS}
     cfg["delspot_level"] = float(level)
     cfg["enabled"] = True
     raw = patch_collection(collection, cfg)
 
     env = {"BEAUTY_PROFILE": "1", "BEAUTY_SPOT_DEBUG": "1"}
+    if extra:
+        env.update(extra)
     ts = time.strftime("%Y%m%d_%H%M%S")
     outdir = os.path.join(OUT, "spot_%s_%s" % (collection, ts))
     os.makedirs(outdir, exist_ok=True)
@@ -197,10 +199,13 @@ def run(collection, canvas, level, settle, probe=0):
         # 时序采样：内容静止，若 diffpx 在两档之间跳，说明「门控/不门控」
         # （非 geomOnly 帧用掩码、geomOnly 帧不门控）在帧间交替 → 观感上就是闪动。
         seq = []
+        seqmax = []
         for i in range(probe):
             time.sleep(0.08)
             im = c.shot(V.SRC, os.path.join(outdir, "seq%02d.png" % i))
-            seq.append(diff_stats(np.array(im), np.array(off))["diffpx"])
+            st = diff_stats(np.array(im), np.array(off))
+            seq.append(st["diffpx"])
+            seqmax.append(st["maxdiff"])
         c.close()
     finally:
         V.close_obs()
@@ -219,7 +224,7 @@ def run(collection, canvas, level, settle, probe=0):
                 "size": list(on.size), "render_size": rsz, "ver": ver, "log": log,
                 "faces": faces, "spot_flag": spot, "face_box": box,
                 "perf": perf, "spot_debug": dbg, "outdir": outdir,
-                "seq": seq})
+                "seq": seq, "seqmax": seqmax, "extra_env": extra or {}})
     with open(os.path.join(outdir, "_meta.json"), "w", encoding="utf-8") as fh:
         json.dump(res, fh, ensure_ascii=False, indent=2)
     return res
@@ -233,16 +238,29 @@ def main():
     ap.add_argument("--settle", type=float, default=6.0, help="下发后等待（等检测/掩码稳定）")
     ap.add_argument("--probe", type=int, default=0,
                     help="额外做 N 次时序采样（判帧间闪动；0 = 不做）")
+    ap.add_argument("--env", action="append", default=[],
+                    metavar="K=V",
+                    help="额外的插件环境开关，可重复（如 --env BEAUTY_MASK_GEOM_ONLY=0）")
     args = ap.parse_args()
 
     if V.obs_running():
         sys.exit("obs64 已在运行。先关掉：单实例会导致 --collection / --canvas 打偏")
 
+    extra = {}
+    for kv in args.env:
+        if "=" not in kv:
+            sys.exit("--env 需要 K=V 形式：%r" % kv)
+        k, v = kv.split("=", 1)
+        extra[k.strip()] = v.strip()
+
     w, h = [int(x) for x in args.canvas.lower().split("x")]
-    res = run(args.collection, (w, h), args.level, args.settle, args.probe)
+    res = run(args.collection, (w, h), args.level, args.settle, args.probe, extra)
 
     print("\n=== 祛斑像素判据（%s，%s，档位 %g，插件 v%s）===" %
           (args.canvas, args.collection, args.level, res["ver"]))
+    if res["extra_env"]:
+        print("  额外开关      : %s" %
+              " ".join("%s=%s" % kv for kv in sorted(res["extra_env"].items())))
     print("  素材/截图尺寸 : %dx%d（插件首帧 render=%s）" %
           (res["size"][0], res["size"][1],
            "%dx%d" % res["render_size"] if res["render_size"] else "-"))
@@ -257,9 +275,18 @@ def main():
     print("  非零处平均偏差: %.2f 灰阶" % res["avg"])
     if res["seq"]:
         s = sorted(res["seq"])
-        print("  时序采样(%d)  : min=%d 中位=%d max=%d" %
-              (len(s), s[0], s[len(s) // 2], s[-1]))
+        lo, mid, hi = s[0], s[len(s) // 2], s[-1]
+        ratio = (float(hi) / lo) if lo > 0 else float("inf")
+        print("  时序采样(%d)  : min=%d 中位=%d max=%d  极值比=%.2f" %
+              (len(s), lo, mid, hi, ratio))
         print("                  " + " ".join(str(v) for v in res["seq"]))
+        print("  对应 maxdiff  : " + " ".join(str(v) for v in res["seqmax"]))
+        # 帧类型（geomOnly / 有掩码）切换会让门控规则换一条，强度按倍数跳。
+        # 同一段静止画面里若出现两极值，就是观感上的闪动。
+        if lo > 0 and ratio > 1.2:
+            print("  !! 序列出现两极值（极值比 %.2f > 1.2）—— 帧间强度不稳" % ratio)
+        else:
+            print("  序列稳定（极值比 %.2f ≤ 1.2）：本段帧类型未切换" % ratio)
     if res["spot_debug"]:
         print("  内层诊断（%TEMP%/beauty_spot_inner.txt 末 12 行，已去重）:")
         for ln in res["spot_debug"]:
