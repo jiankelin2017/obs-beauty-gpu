@@ -32,7 +32,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
 | 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md`，帧类型对比见 `out/logs/P0-9_geomonly_gate_20261103.md` | 是 |
 | GPU 祛斑边界差离线复算 | **`analyze_spot_edge.py`（2.9.1）**：P0-10 用。从 `BEAUTY_M1_DUMP_DIR` 落盘的原图 + 掩码离线复算 CPU（截断窗口）与 GPU（clamp 重复）两种盒均值实现，验证「差异不随 k 变化、贴在 ROI 底边 2 像素带」这一结构性特征。复算结果（177 px / maxdiff 4 / 平均偏差 2.23 / bbox 一致）与插件内实测逐项对上。属诊断工具，**不进装机** | 否 |
-| 输入旋转验收 | **方案 B（2.10.0）**：设 `input_rot` 后检测几何须对齐旋转后的人脸。验收用「横屏里横躺的正脸素材 + `input_rot=90`」跑检测，比对 OpenCV 独立复算的 IoU/关键点误差（≤1 px），并肉眼确认 mask/五官落点；`input_rot=0` 必须与 2.9.1 逐字节一致。详见 `04_文档/方案B_输入旋转开发计划.md` §6 | 是 |
+| 输入旋转验收 | **2.10.0 实测过的方法**：判据不是「像素差多少」而是**效果落在哪里** —— `footprint = |输出 − 输入源图| > 0`，用「躺下就检不到」的 **3/4 侧脸**做阴性对照（正放 vs 躺放 + `input_rot=0/90/270`），比 footprint 面积与 IoU。实测：正放 14.30%、躺放 `ir=0` **0.24%**、`ir=90` **12.83%**、`ir=270` 0.23%。回归仍用 `verify_s1_correct.py capture` 六配置（`input_rot=0` 必须与上一版 `maxdiff=0`）。记录见 `out/logs/input_rot_2.10.0_20261104.md` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -135,6 +135,16 @@ py -3 05_验证\verify_smooth_compiles.py
 16. **报「改了多少像素」时先报分母**。P0-8 结案时写「47% vs 0.76%、差 7 倍」是错的：前者是
     `hit/ROI`、后者是 `diffpx/整张画面`，混在一起就凭空造出 7 倍。同口径实测是 1.58 倍
     （`PROGRESS §9.24.5`）。凡是跨来源比较，先确认 ROI / 分辨率 / 分母是否一致。
+17. **判「某参数有没有生效」，先确认它所在的那条路径这一帧到底有没有走**。`input_rot`（2.10.0）
+    只在 S4b 缩略图路径生效：`thumb_prev_ok=0`（上一帧没被链全认领）、多脸、`BEAUTY_DETECT_SMALL=0`、
+    `BEAUTY_ASYNC_STAGE=1`、mirror —— 任意一条成立，`input_rot` 就**完全不起作用，而且一行日志都没有**。
+    最容易踩的是**开了五官参数**：REGION 段在 `BEAUTY_GPU_REGION` 未开（默认）时落 CPU，
+    本帧不是「全段认领」→ 缩略图路径不启用 → 旋转失效。验证方法：运行中 `set_filter_settings`
+    把 `input_rot` 从 0 改到 90 再截一张，`maxdiff=0` 就说明它根本没进管线，别去改算法。
+18. **两个版本的截图能不能比，先看渲染的是不是同一个场景**。同一个集合 JSON 被 OBS 在退出时改写后
+    （`pos_rel` / `pos` 被重算），下一轮会整体平移/缩放：实测同一张图 `maxdiff=255、99.994%`，
+    而版本差异真实值是 **0**。做法：起 OBS 前把集合文件恢复成同一份快照（`beauty_static.good.json`
+    那种），两边都从同一份开始。
 
 ## 四、素材与输出
 

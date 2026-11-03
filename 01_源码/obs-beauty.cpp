@@ -5131,7 +5131,9 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 			// 计算用的就是旋转后尺寸 (Wr,Hr)，与上面 nw/nh 一致。
 			gs_matrix_push();
 			gs_matrix_translate3f((float)nw * 0.5f, (float)nh * 0.5f, 0.0f);
-			gs_matrix_rotate3d(GS_AXIS_Z, rad);
+			// libobs 32.1.1 没有 gs_matrix_rotate3d / GS_AXIS_Z；绕 Z 轴旋转
+			// 只有 gs_matrix_rotaa4f(x,y,z,angle)，angle 是弧度（matrix4_rotate_aa4f）。
+			gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, rad);
 			gs_matrix_translate3f(-sw * 0.5f, -sh * 0.5f, 0.0f);
 			gs_draw_sprite(src, 0, (uint32_t)(sw + 0.5f), (uint32_t)(sh + 0.5f));
 			gs_matrix_pop();
