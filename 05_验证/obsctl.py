@@ -159,6 +159,23 @@ class Client(object):
     def scene_items(self, scene):
         return self.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
 
+    # ---- 输入源（采集设备）设置 ----------------------------------------
+    def input_settings(self, source):
+        return self.req("GetInputSettings",
+                        {"inputName": source}).get("inputSettings") or {}
+
+    def set_input_settings(self, source, settings, overlay=True):
+        self.req("SetInputSettings", {"inputName": source,
+                                      "inputSettings": settings,
+                                      "overlay": bool(overlay)})
+
+    def input_prop_items(self, source, prop):
+        """枚举某个属性的候选项。dshow 设备列表用 prop='video_device_id'。
+        每个条目形如 {'itemName': 'USB Video', 'itemValue': 'USB Video:\\\\?\\usb#...'}。"""
+        r = self.req("GetInputPropertiesListPropertyItems",
+                     {"inputName": source, "propertyName": prop})
+        return r.get("propertyItems") or []
+
     def set_item_transform(self, scene, item_id, tr):
         self.req("SetSceneItemTransform",
                  {"sceneName": scene, "sceneItemId": int(item_id),
