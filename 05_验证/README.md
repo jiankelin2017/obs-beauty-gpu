@@ -30,6 +30,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
+| 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样判帧间闪动。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -114,9 +115,16 @@ py -3 05_验证\verify_smooth_compiles.py
    `ellipses=6+2+2`。`verify_region_samemask.py` 已改为「改集合 → 起 OBS → 跑完原样写回」。
 12. **`--zero`（五官全零）拿不到样本，不是工具坏**：`beauty_core.cpp:3619` 在五项全 0 时
    直接返回，几何快照 `faceCount=0`，自检按设计不跑。
-13. **`spot=0` 意味着祛斑这一族根本没进链**，不是"效果不明显"。默认配置下 geomOnly 帧
-   的 `bounds_` 恒为空，`geoOut->spotOn` 与 CPU 的 `applySpotFix` 同一条件都不成立
-   （P0-8，`PROGRESS §9.20.3`）。要看祛斑真跑，得加 `BEAUTY_MASK_GEOM_ONLY=0`。
+13. **`spot=0` 曾经意味着祛斑这一族根本没进链**（P0-8，`PROGRESS §9.20.3`）。**2.9.0 已修**：
+    geomOnly 帧沿用上次包围盒 / 用脸框兜底，且掩码全零时不做门控。现在默认配置下祛斑真的会改画面——
+    判据用 `verify_spot_pixels.py`（0 档 0 像素、40/100 单调），不要再拿「拉动滑块看有没有变化」凭肉眼判。
+14. **`--collection` 打偏是静默的，且坑在集合文件内部**。OBS 拿 `--collection` 去匹配集合 JSON 里的
+    `name` 字段，**不是文件名**；`beauty_spot` / `beauty_spot4k` 是从 soak 集合复制出来的，内部
+    `name` 还留着 `beauty_soak720` / `beauty_soak4k`，于是匹配不上、**回退到「上次用的集合」**。
+    症状：画布日志是 `base resolution: 1280x720`，插件日志却是 `target=still 3840x2160`。
+    这就是 4K 祛斑三轮「被上一个 OBS 会话接管」的真因（`PROGRESS §9.23.3`）。
+    **判据只有一个**：插件日志的 `target=` 尺寸必须等于素材尺寸；`verify_spot_pixels.py` 已把它做成
+    末行 WARN，并在打补丁时把内部 `name` 一并改成文件名（跑完原样写回）。
 
 ## 四、素材与输出
 
