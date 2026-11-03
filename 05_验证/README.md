@@ -34,6 +34,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | GPU 祛斑边界差离线复算 | **`analyze_spot_edge.py`（2.9.1）**：P0-10 用。从 `BEAUTY_M1_DUMP_DIR` 落盘的原图 + 掩码离线复算 CPU（截断窗口）与 GPU（clamp 重复）两种盒均值实现，验证「差异不随 k 变化、贴在 ROI 底边 2 像素带」这一结构性特征。复算结果（177 px / maxdiff 4 / 平均偏差 2.23 / bbox 一致）与插件内实测逐项对上。属诊断工具，**不进装机** | 否 |
 | 输入旋转验收 | **2.10.0 实测过的方法**：判据不是「像素差多少」而是**效果落在哪里** —— `footprint = |输出 − 输入源图| > 0`，用「躺下就检不到」的 **3/4 侧脸**做阴性对照（正放 vs 躺放 + `input_rot=0/90/270`），比 footprint 面积与 IoU。实测：正放 14.30%、躺放 `ir=0` **0.24%**、`ir=90` **12.83%**、`ir=270` 0.23%。回归仍用 `verify_s1_correct.py capture` 六配置（`input_rot=0` 必须与上一版 `maxdiff=0`）。记录见 `out/logs/input_rot_2.10.0_20261104.md` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
+| **发布一致性** | **`check_release.py`（2.11.0）**：不需要 OBS、不需要画面，六项九条判定 —— ① 版本单源（`BEAUTY_BUILD_STR` 只许一处定义）；② **在 dll 二进制里搜版本字符串**（ASCII + UTF-16LE，撞版本号当场暴露）；③ 装机 dll == 构建 dll；④ `07_安装包` 载荷 == 构建 dll；⑤ 源码 / 安装包 / 装机 / solo **四份 6 个 `.hlsl` 逐字节相同**（多一个文件也算 FAIL）；⑥ 开关表 ⊆ 源码 `getenv()`，且「源码有、表里没有、别的文档提到」= 0。`--strict` 把 WARN 也算失败（发布前用），`--no-installed` 只查仓库。**打完 `Setup.exe` 之后跑**，见 `PROGRESS §9.30` | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
 > 不体现在帧耗时里的改动（S7 的全部立论就在这里）。用法：

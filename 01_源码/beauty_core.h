@@ -104,6 +104,12 @@ public:
     // GpuEngine 虽标记 true，但 process() 仍是 CPU 直通，实际 GPU 计算在 Phase 2+ 接入。
     virtual bool supportsGpu() const { return false; }
 
+    // 2.11.0（方案C）：本帧要不要把像素提交给检测（宿主在回读之前问）。
+    // 默认 true = 「不知道，按要处理」—— 安全侧：多回读一次 1.6 MB 而已，
+    // 反过来「该提交却说不提交」会让掩码过期，是可见的画质问题。
+    // 只有 CoreEngine 覆写它；LegacyEngine / GpuEngine 之外保持默认即可编译。
+    virtual bool detectDue() { return true; }
+
     // 诊断：把**当前正在用的**皮肤掩码拷出（w*h 字节，0..255）。
     // 默认没有掩码 → 返回 false。
     //
@@ -119,8 +125,7 @@ public:
         return false;
     }
 
-    // 诊断：当前掩码的置位像素数与同源人脸数（见 beautyCoreMaskStat 的说明）。
-    // 默认实现表示「没有掩码」（px = -1），不改任何状态，可安全在渲染线程调用。
+    // 诊断：当前掩码的置位像素数与同源人脸数（见 beautyCoreMaskStat 的说明）。    // 默认实现表示「没有掩码」（px = -1），不改任何状态，可安全在渲染线程调用。
     virtual void maskStat(int* pixelsOut, int* facesOut) const
     {
         if (pixelsOut) *pixelsOut = -1;
@@ -633,6 +638,37 @@ void beautyCoreSetMaskGeomOnly(bool on);
 void beautyCoreSetThumbSource(const unsigned char* p, int tw, int th,
                               int fullW, int fullH, float scale, int ox, int oy);
 void beautyCoreClearThumbSource();
+
+// ---- 2.11.0（方案C）：运动判定搬 GPU，缩略图改成「按提交帧才回读」-----------
+//
+// 为什么：S7 之后静止时检测每 8 帧才提交一次，但 S4b 的 640×640 缩略图**每帧都
+// 回读**（1.6 MB）。回读的唯一用途是两件事：① 提交帧喂检测；② 每帧算 16×16 运动
+// 网格。① 只发生在 1/8 的帧上，② 只需要 256 个采样点 —— 于是每帧为 1 KB 的信息
+// 付 1.6 MB 的 map + memcpy。实测日志里 `下载 == tdl`：4K 0.61~1.57 ms、720p
+// 0.61~1.18 ms，是这两个分辨率往返里最大的一笔。
+//
+// 本组 API 把这件事拆成两段：
+//   1) 宿主每帧只喂一张 64×64（16 KB）的小图 → 引擎算运动网格（内部 4×4 块平均，
+//      降到 16×16 后走与原来完全相同的判据与阈值）；
+//   2) 宿主问 beautyCoreDetectDue()「本帧要不要检测输入」→ 要才回读 1.6 MB。
+//
+// 传 nullptr = 关闭，行为逐字节回到 2.10.x（运动判定仍从检测输入点采样）。
+// ⚠ 生命周期与缩略图源相同：每帧设一次，用完立刻 Clear，否则下一帧会读上一帧的图。
+// ⚠ beautyCoreDetectDue() 会推进引擎里的提交节奏（maskAge_），所以**每帧只能调一次**，
+//   而且调过之后 process() 内部不再自行判定 —— 两边都判会算成两个周期。
+void beautyCoreSetMotionImage(const unsigned char* rgba64, int w, int h);
+void beautyCoreClearMotionImage();
+
+// 本帧有没有全帧像素（缩略图帧 / 方案C 的「预判不提交、一个像素都没回读」帧）。
+// 用途只有一个：掩码到货那一帧要做帧号对齐（3.1.10），而缩略图帧的 src 是旧的、
+// 不能当像素源 —— 只能靠 srcTag 指到环里那一帧。没有这个标志时，nopix 帧会被
+// 当成「有全帧像素但没用上」，对齐直接失效（实测 对齐 0/180）。
+void beautyCoreSetNoPixelFrame(bool on);
+
+// 预判：本帧会不会把像素提交给检测 worker（同步路径恒为 true）。
+// 只有返回 true 时宿主才需要准备检测输入；返回 false 表示本帧不提交，
+// 引擎既不会读缩略图，也不会推进掩码。
+bool beautyCoreDetectDue();
 
 // 段区间钩子探针：hits/calls 语义同上（calls 只在磨皮段真的到位时涨），
 // segCounts 是五段的累计认领帧数，索引与 BEAUTY_SEG_* 的位序一致

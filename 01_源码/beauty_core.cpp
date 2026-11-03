@@ -716,6 +716,21 @@ static int g_thumbFullW = 0, g_thumbFullH = 0;
 static float g_thumbScale = 0.0f;
 static int g_thumbOx = 0, g_thumbOy = 0;
 
+// 2.11.0（方案C）：运动判定输入。宿主每帧喂一张小图（默认 64×64 RGBA），
+// 引擎在 detectPeriod 里把它切成 16×16 格，每格取「格内逐像素 |Δ| 的最大值」，
+// 得到与原来同样形状的 16×16 网格（**不是**格内先平均 —— 那样会抹平运动信号，
+// 实测对齐从 180/180 掉到 22/180，见 detectPeriod 里的注释）。
+// 置空 = 回到「从检测输入点采样」的老路径（逐字节不变）。
+static const unsigned char* g_motPx = nullptr;
+static int g_motW = 0, g_motH = 0;
+// 本帧的提交预判（beautyCoreDetectDue 写、updateMask 读并清）。
+// 只在宿主真的调过预判的帧上有效；不调就照旧由 updateMask 自己判定。
+static bool g_duePending = false;
+static bool g_dueValue = false;
+// 本帧有没有全帧像素（缩略图帧 / nopix 帧 = 没有）。对齐那一段靠它区分
+// 「有像素但没用上」与「本来就没有像素」—— 两者该做的事完全不同。
+static bool g_noPixFrame = false;
+
 // 掩码参数：人脸框外扩倍数。S1 对拍扫出来 IoU 峰值在 1.15
 // （IoU 0.727 / 精确率 0.934 / 召回率 0.767），见 05_文档/S1_掩码对拍结论.md。
 const float kFaceBoxGrow = 1.15f;
@@ -1667,7 +1682,7 @@ public:
                 src = &heldFrame_[0];
                 srcTagThisFrame = heldTag_;
                 g_alignUsed++;
-            } else if (g_thumbPx) {
+            } else if (g_thumbPx || g_noPixFrame) {
                 /* 2.7.0（S4b）：缩略图帧不能当 src（1.6 MB ≠ 全帧），但**帧号
                  * 照样要对齐** —— 这份掩码描述的是 heldTag_ 那一帧，链就必须画
                  * 那一帧（宿主按 srcTag 从显存环里取）。不改 srcTag 的话，宿主会
@@ -2357,6 +2372,30 @@ public:
         beautycore::poolShutdown();
     }
 
+    // 2.11.0（方案C）：宿主在回读检测输入**之前**问一句「本帧要不要提交」。
+    // 这里把节奏（maskAge_）一次性推进完；随后 process() 里的 updateMask 只执行
+    // 这个结论、不再自己判 —— 两边都判就会把一帧算成两个周期。
+    //
+    // 三种情形保守返回 true（宁可多回读一次 1.6 MB，也不能漏提交检测）：
+    //   · 同步路径 —— 每帧都要在本帧建掩码；
+    //   · 自适应关着 —— 周期是常量，维持由 updateMask 自己判的老分工；
+    //   · 宿主没喂运动小图 —— 没有判定依据。
+    bool detectDue() override {
+        if (!asyncOn_ || !g_cfg.detAdapt || !g_motPx) {
+            g_duePending = false;
+            return true;
+        }
+        const int every = detectPeriod(nullptr, 0, 0);
+        const bool due = (maskAge_ >= every);
+        if (due)
+            maskAge_ = 0;
+        else
+            maskAge_++;
+        g_duePending = true;
+        g_dueValue = due;
+        return due;
+    }
+
 private:
     // 首帧预热点（3.1.21）。
     //
@@ -2416,16 +2455,67 @@ private:
     // detAdaptHot 帧。这样最坏滞后是「运动开始的那一帧仍用旧掩码」，即 +1 帧，
     // 与 2.7.1 的 1 帧滞后同量级；反过来若也延迟进入，就会出现可见拖影。
     int detectPeriod(const unsigned char* src, int w, int h) {
-        if (!g_cfg.detAdapt || !src || w < 2 || h < 2) {
+        // 2.11.0（方案C）：宿主喂了小图就优先用它。判据、阈值、块划分全部不变，
+        // 变的只是「256 个采样点从哪来」——老路径从检测输入（640×640 缩略图或全帧）
+        // 按步长点采样，新路径对 64×64 小图取格内最大 |Δ|。两条路径**不逐点等价**，
+        // 所以默认关。阈值（`thr=6 / hot=3`）**没有重标**：实测在同一阈值下，
+        // 静止素材两臂都是 `dper=7`、运动素材两臂都是 `dper=0`、对齐同值
+        // （PROGRESS §9.29.5），说明分离度够；但这只是「这批素材上够」，
+        // 不是「证明等价」—— 换素材/换光照仍要重测这一对指标。
+        const bool useMot = (g_motPx && g_motW >= 16 && g_motH >= 16);
+        if (!g_cfg.detAdapt || (!useMot && (!src || w < 2 || h < 2))) {
             // 自适应关着也要刷新诊断量，否则日志里会留着上一轮的数
             g_detPeriod = g_cfg.maskEveryAsync;
             g_detDiff = -1;                 // -1 = 本窗口没做运动判定
             return g_cfg.maskEveryAsync;
         }
         enum { kGrid = 16 };
+        int d16[kGrid * kGrid];
+        if (useMot) {
+            /* 每格取「格内像素 |Δ| 的最大值」，**不是**「格内先平均再求差」。
+             * 这一条是被实测逼出来的：先平均会在运动素材上把信号抹平 ——
+             * 方向相反的位移在同一格里互相抵消，dmot 掉到阈值以下，自适应
+             * 当成静止（dper 变 7），实测 对齐 从 180/180 掉到 22/180。
+             * 取最大值的口径与老路径更接近：老路径对 640×640 每 40 px 取一个点
+             * （每点≈6×6 源像素均值），这里每格 4×4 个点（每点≈10×10 均值），
+             * 密度同量级。 */
+            const int bw = g_motW / kGrid;
+            const int bh = g_motH / kGrid;
+            if (!motHaveFull_)
+                motHave_ = false;   // 首次用小图：按「在动」起步，与老路径首帧一致
+            for (int gy = 0; gy < kGrid; gy++) {
+                for (int gx = 0; gx < kGrid; gx++) {
+                    int best = 0;
+                    for (int yy = 0; yy < bh; yy++) {
+                        const unsigned char* row =
+                            g_motPx +
+                            ((size_t)(gy * bh + yy) * (size_t)g_motW +
+                             (size_t)(gx * bw)) * 4;
+                        const size_t pidx =
+                            (size_t)(gy * bh + yy) * (size_t)g_motW +
+                            (size_t)(gx * bw);
+                        for (int xx = 0; xx < bw; xx++) {
+                            const unsigned char* p = row + (size_t)xx * 4;
+                            int y = (54 * p[0] + 183 * p[1] + 19 * p[2]) >> 8;
+                            if (y < 0) y = 0;
+                            if (y > 255) y = 255;
+                            const size_t k = pidx + (size_t)xx;
+                            const int d = motHaveFull_
+                                                  ? (y - (int)motPrevFull_[k])
+                                                  : 0;
+                            const int ad = (d < 0) ? -d : d;
+                            motPrevFull_[k] = (unsigned char)y;
+                            if (ad > best) best = ad;
+                        }
+                    }
+                    const int i = gy * kGrid + gx;
+                    d16[i] = best;
+                }
+            }
+            motHaveFull_ = true;
+        } else {
         const int sx = (w > kGrid) ? (w / kGrid) : 1;
         const int sy = (h > kGrid) ? (h / kGrid) : 1;
-        int d16[kGrid * kGrid];
         for (int gy = 0; gy < kGrid; gy++) {
             const unsigned char* row = src + (size_t)(gy * sy) * (size_t)w * 4;
             for (int gx = 0; gx < kGrid; gx++) {
@@ -2439,6 +2529,7 @@ private:
                 d16[i] = (d < 0) ? -d : d;
                 motPrev_[i] = (unsigned char)y;
             }
+        }
         }
         const bool first = !motHave_;
         motHave_ = true;
@@ -2532,6 +2623,16 @@ private:
         if (asyncOn_) {
             startAsyncIfNeeded();
             collectAsync();                 // 每帧都收，不受周期限制
+            // 2.11.0（方案C）：宿主已在回读之前调过 beautyCoreDetectDue()，
+            // 本帧的节奏与结论都已经定好 —— 这里只执行，不再调用 detectPeriod，
+            // 否则 maskAge_ 会被推进两次、运动历史也会被同一帧更新两次。
+            if (g_duePending) {
+                const bool due = g_dueValue;
+                g_duePending = false;
+                if (due)
+                    submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy);
+                return maskValid_;
+            }
             // 到了重算周期：提交一帧给 worker。周期 0 = 每帧提交。
             // worker 忙时 submitAsync 会自己放弃这一轮（见它的注释），
             // 所以 60fps + 1080p 这种「推理 15ms / 帧 16.7ms」的极端情况
@@ -3590,6 +3691,10 @@ private:
     // S7（2.8.0）：运动检测状态。motPrev_ 是上一帧的 16×16 亮度网格。
     unsigned char motPrev_[256] = {};
     bool motHave_ = false;   // 是否有可比对象（首帧恒按「在动」）
+    // 2.11.0（方案C）：走 64×64 小图时，逐像素保存上一帧亮度（4096 B），
+    // 因为判据是「格内 |Δ| 取最大」，必须先有逐像素的上一帧值。
+    unsigned char motPrevFull_[64 * 64] = {};
+    bool motHaveFull_ = false;
     int  motHot_ = 0;        // 剩余「热」帧数（运动刚结束还要每帧跑几帧）
     int  motPeriod_ = 1;     // 上一次算出的周期
     int  motDiff_ = 0;       // 上一次的网格平均亮度差（诊断）
@@ -4141,6 +4246,10 @@ public:
 
     bool supportsGpu() const override { return true; }   // 标记：走 GPU 渲染路径
 
+    // 2.11.0（方案C）：提交预判必须落到内部 CoreEngine 上 —— 节奏（maskAge_）
+    // 与运动历史都在那里，包装层自己判会两套状态各走一遍。
+    bool detectDue() override { return core_->detectDue(); }
+
     // 诊断透传：GPU 色调自检要拿「当前帧掩码」，而 CoreEngine 才是掩码的持有者。
     // 少了这一层，beautyCoreCopyMask() 在 BEAUTY_GPU=1 下会永远返回 false
     // （beautyCoreComputeMask 现有的 dynamic_cast 就是这样在 gpu 引擎下失效的）。
@@ -4233,6 +4342,43 @@ void beautyCoreClearThumbSource() {
     g_thumbFullW = g_thumbFullH = 0;
     g_thumbScale = 0.0f;
     g_thumbOx = g_thumbOy = 0;
+}
+
+// 2.11.0（方案C）：运动判定的小图（RGBA8，stride = w*4）。
+// 与缩略图源同一套生命周期约定：每帧设、用完清。传 nullptr 即回到点采样。
+void beautyCoreSetMotionImage(const unsigned char *rgba64, int w, int h)
+{
+    // 上限 64×64：引擎里逐像素的上一帧缓存就那么大（motPrevFull_）。
+    // 超过就退回点采样，不动态扩容 —— 这条路只是一次节流实验，不值得为它
+    // 引入一块可变的缓冲。
+    if (!rgba64 || w < 16 || h < 16 || w > 64 || h > 64) {
+        beautyCoreClearMotionImage();
+        return;
+    }
+    g_motPx = rgba64;
+    g_motW = w;
+    g_motH = h;
+}
+
+void beautyCoreClearMotionImage()
+{
+    g_motPx = nullptr;
+    g_motW = g_motH = 0;
+    /* ⚠ 这里**不能**清 g_duePending：宿主是「先问预判、再清小图、最后 process()」
+     * 的顺序，清了就等于把刚定好的结论扔掉，process() 会再自行判一次 ——
+     * maskAge_ 被推进两次、运动历史被同一帧更新两次。
+     * 预判决只有两个出口：process() 内部的 updateMask 消费掉，或下一次
+     * beautyCoreDetectDue() 覆盖。 */
+}
+
+bool beautyCoreDetectDue()
+{
+    return beautyEngine().detectDue();
+}
+
+void beautyCoreSetNoPixelFrame(bool on)
+{
+    g_noPixFrame = on;
 }
 
 // 皮肤判据快照（C20，只用于日志）。定义放在匿名命名空间外面 —— 否则外部

@@ -430,6 +430,23 @@ struct beauty_filter {
 	int thumb_ox, thumb_oy;
 	bool thumb_prev_ok;        // 上一帧 chain_out_valid → 本帧可以只回读缩略图
 	bool thumb_frame;          // 本帧真的走了缩略图路径（钩子据此拒绝上传旧帧）
+	// ---- 2.11.0（方案C）：运动判定搬 GPU + 缩略图按提交帧回读 -----------
+	// 问题：S7 之后静止时每 8 帧才提交一次检测，但 640×640 缩略图**每帧都回读**
+	// （1.6 MB），而它每帧唯一的用途是给运动判定采 256 个点。实测日志里
+	// `下载 == tdl`：4K 0.61~1.57 ms、720p 0.61~1.18 ms，是往返里最大的一笔。
+	// 做法：每帧只回读 64×64（16 KB）喂运动判定；预判到「本帧要提交检测」才回读
+	// 那张 1.6 MB 的。开关 BEAUTY_MOTION_GPU=1（默认关，未过完整验收前不动默认）。
+	bool motion_gpu;           // 开关
+	gs_texrender_t *mot_rt;    // 64×64 运动采样 RT
+	gs_stagesurf_t *mot_stage; // 双缓冲：本帧 stage_texture 到一张，map 上一帧那张
+	gs_stagesurf_t *mot_stage_alt;
+	bool mot_primed;           // 已经有一份可以 map 的上一帧样本
+	int mot_ping;              // 0/1，指向本帧要写入的那张
+	unsigned char *mot_buf;    // 64*64*4 = 16 KB
+	uint32_t mot_side;         // = kMotionSide
+	bool nopix_frame;          // 走了缩略图路径但本帧没回读任何像素（预判不提交）
+	uint32_t an_nopix;         // 省掉缩略图回读的帧数（窗口内，诊断）
+	uint64_t mot_skipped;      // 累计省掉的回读帧数（会话级，诊断）
 	uint32_t an_thumb;         // 走缩略图的帧数（窗口内）
 	uint32_t an_thumbskip;     // 走了缩略图、但本帧认领不全 → 整帧跳过
 	// ---- 2.8.0（S7）：检测周期自适应 ------------------------------------
@@ -725,13 +742,28 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		const int dly = rd ? atoi(rd) : 0;
 		f->region_cmp_delay = (dly < 0) ? 0 : (dly > 900 ? 900 : dly);
 	}
-	// 4d：GPU 五官进生产链。默认开，`BEAUTY_GPU_REGION=0` 退回 CPU 五官。
+	// 4d：GPU 五官进生产链。**默认关**，`BEAUTY_GPU_REGION=1` 才进 GPU 五官；
+	// 不设/设 0 = CPU 五官（老路）。
 	{
-		// 默认关：4K 会话崩溃（驱动层）尚未定位，且 4K 有一次 R1 maxdiff=2。
-		// 稳定之前只作为 opt-in（BEAUTY_GPU_REGION=1）。
+		// 为什么还是关（2.8.1 已修掉 54–58 ms 那条崩溃主因）：4K 有一次 R1
+		// maxdiff=2，缺「能证明等价」的判据 —— 截图对拍在 geomOnly 路径不成立
+		// （PROGRESS §9.19），同帧自检只在 5 个样本 × 2 个分辨率上 maxdiff≤1
+		// （§9.20.2）。判据补齐之前只作为 opt-in。
 		const char *gr = getenv("BEAUTY_GPU_REGION");
 		f->gpu_region = (gr && gr[0] == '1') &&
 				beautyEngine().supportsGpu();
+	}
+	// 2.11.0（方案C）：运动判定搬 GPU + 缩略图按提交帧回读。
+	// 默认**关**：它改变的是「检测输入什么时候被回读」，属于节流而不是新算法，
+	// 但阈值与新采样方式不逐点等价（见 PROGRESS §9.29 的标定），必须先过 A/B。
+	// 只认 '1' 开启 —— 拼错落在「关」侧 = 2.10.x 的已验证行为。
+	{
+		const char *mg = getenv("BEAUTY_MOTION_GPU");
+		f->motion_gpu = (mg && mg[0] == '1');
+		if (f->motion_gpu)
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 方案C 生效：运动判定走 64×64 GPU 采样，"
+			     "检测输入只在提交帧回读（BEAUTY_MOTION_GPU=0 回退）");
 	}
 	// Phase 3.5：GPU 磨皮**生产**路径。与上面那个诊断开关的区别是它会改画面
 	// —— 磨皮整段搬到 GPU，引擎只拿回读结果继续算色调/五官/细节/美形。
@@ -917,6 +949,15 @@ static void beauty_filter_destroy(void *data)
 		gs_stagesurface_destroy(f->thumb_stage);
 	if (f->thumb_buf)
 		bfree(f->thumb_buf);
+	// 2.11.0（方案C）：运动采样三件套
+	if (f->mot_rt)
+		gs_texrender_destroy(f->mot_rt);
+	if (f->mot_stage)
+		gs_stagesurface_destroy(f->mot_stage);
+	if (f->mot_stage_alt)
+		gs_stagesurface_destroy(f->mot_stage_alt);
+	if (f->mot_buf)
+		bfree(f->mot_buf);
 	if (f->tr)
 		gs_texrender_destroy(f->tr);
 	free(f->buf_in);
@@ -5060,10 +5101,188 @@ static bool beauty_ensure_thumb(struct beauty_filter *f, uint32_t side,
 	return true;
 }
 
-// 把 src 等比缩到 S×S（居中黑边），再回读到 f->thumb_buf。
-// 成功时 f->thumb_scale / thumb_ox / thumb_oy 就是引擎需要的映射参数。
+// 2.11.0（方案C）：运动采样的边长。64 让引擎的 16×16 网格正好是「每格 4×4 像素」，
+// 每格 16 个采样点 —— 与老路径的 256 个点采样同量级，但每一格是区域平均而不是
+// 单点命中，噪声更低。回读量 64×64×4 = 16 KB，是 640×640 那张的 1/100。
+static const uint32_t kMotionSide = 64;
+
+static bool beauty_ensure_mot(struct beauty_filter *f)
+{
+	if (f->mot_rt && f->mot_stage && f->mot_stage_alt && f->mot_buf &&
+	    f->mot_side == kMotionSide)
+		return true;
+	if (f->mot_rt) {
+		gs_texrender_destroy(f->mot_rt);
+		f->mot_rt = NULL;
+	}
+	if (f->mot_stage) {
+		gs_stagesurface_destroy(f->mot_stage);
+		f->mot_stage = NULL;
+	}
+	if (f->mot_stage_alt) {
+		gs_stagesurface_destroy(f->mot_stage_alt);
+		f->mot_stage_alt = NULL;
+	}
+	if (f->mot_buf) {
+		bfree(f->mot_buf);
+		f->mot_buf = NULL;
+	}
+	// 格式固定 RGBA8：运动判定只要亮度，不需要与源同格式（不做 sRGB 对称，
+	// 因为这里比的是「相邻两帧的差」，任何单调映射都不改变判据的分离度）。
+	f->mot_rt = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	f->mot_stage = gs_stagesurface_create(kMotionSide, kMotionSide, GS_RGBA);
+	f->mot_stage_alt = gs_stagesurface_create(kMotionSide, kMotionSide, GS_RGBA);
+	f->mot_buf = (unsigned char *)bzalloc((size_t)kMotionSide * kMotionSide * 4);
+	f->mot_side = kMotionSide;
+	f->mot_primed = false;
+	f->mot_ping = 0;
+	if (!f->mot_rt || !f->mot_stage || !f->mot_stage_alt || !f->mot_buf) {
+		blog(LOG_WARNING,
+		     "[" PLUGIN_NAME "] 运动采样资源不可用：本帧回退「每帧回读缩略图」"
+		     "（不影响画面，只是没省到那 0.6~1.5 ms）");
+		return false;
+	}
+	return true;
+}
+
+// 把 640×640 缩略图再缩到 kMotionSide×kMotionSide 并回读（16 KB），交给引擎算
+// 运动网格。**只回读这一张小图**，那张 1.6 MB 的等 beautyCoreDetectDue() 说要才读。
+static bool beauty_motion_sample(struct beauty_filter *f)
+{
+	static bool failed = false;
+	auto fail = [](const char *why) {
+		if (!failed) {
+			failed = true;
+			blog(LOG_WARNING,
+			     "[" PLUGIN_NAME "] 运动采样不可用：%s → 退回每帧回读缩略图",
+			     why);
+		}
+		return false;
+	};
+	if (!beauty_ensure_mot(f))
+		return fail("ensure resources");
+	gs_texture_t *src = gs_texrender_get_texture(f->thumb_rt);
+	if (!src)
+		return fail("thumb texrender texture null");
+	gs_effect_t *fx = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_technique_t *tech = fx ? gs_effect_get_technique(fx, "Draw") : NULL;
+	if (!tech)
+		return fail("default effect Draw technique missing");
+	const uint32_t S = f->mot_side;
+	if (!smooth_rt_begin(f->mot_rt, S, S))
+		return fail("texrender begin");
+	gs_eparam_t *img = gs_effect_get_param_by_name(fx, "image");
+	if (img)
+		gs_effect_set_texture(img, src);
+	// 与 beauty_thumb_build 同一形态：手动跑一遍 technique（外层可能已有
+	// active technique，gs_effect_loop 会直接退出）。
+	const size_t passes = gs_technique_begin(tech);
+	for (size_t i = 0; i < passes; i++) {
+		gs_technique_begin_pass(tech, i);
+		gs_draw_sprite(src, 0, S, S);
+		gs_technique_end_pass(tech);
+	}
+	gs_technique_end(tech);
+	smooth_rt_end(f->mot_rt);
+
+	gs_texture_t *tex = gs_texrender_get_texture(f->mot_rt);
+	if (!tex)
+		return fail("motion texrender texture null");
+	/* 双缓冲：本帧的样本先**只排队**拷进 cur（gs_stage_texture 不等 GPU），
+	 * 真正 map 的是上一帧那张 —— 那时它早已拷完，map 几乎不等待。
+	 *
+	 * 为什么非要这样：第一版是「本帧拷、本帧 map」，实测 tdl 从 0.85 掉到 0.05，
+	 * 但**下载总量几乎不动**（720p 1.10→0.90、4K 2.08→2.03）。说明 0.7~0.9 ms
+	 * 里占大头的是 map 的同步等待（要等 GPU 把本帧之前排的活干完），不是那
+	 * 1.6 MB 的 memcpy（≈0.1 ms）。所以字节数不是瓶颈，同步点才是。
+	 *
+	 * 代价：运动信息晚一帧。判据「运动起始滞后 ≤+1 帧」因此可能变成 +2，
+	 * 必须用运动素材实测（dper / 对齐%）再决定能不能用。 */
+	gs_stagesurf_t *cur = f->mot_ping ? f->mot_stage_alt : f->mot_stage;
+	gs_stagesurf_t *prev = f->mot_ping ? f->mot_stage : f->mot_stage_alt;
+	gs_stage_texture(cur, tex);
+	f->mot_ping ^= 1;
+	if (!f->mot_primed) {
+		// 首帧没有「上一份」可比 —— 交给调用方走全帧回读，一帧的代价。
+		f->mot_primed = true;
+		return false;
+	}
+	uint8_t *ptr = NULL;
+	uint32_t linesize = 0;
+	if (!gs_stagesurface_map(prev, &ptr, &linesize) || !ptr)
+		return fail("stage map");
+	const size_t row = (size_t)S * 4;
+	if (linesize == row) {
+		memcpy(f->mot_buf, ptr, row * S);
+	} else {
+		for (uint32_t y = 0; y < S; y++)
+			memcpy(f->mot_buf + (size_t)y * row,
+			       ptr + (size_t)y * linesize, row);
+	}
+	gs_stagesurface_unmap(prev);
+	beautyCoreSetMotionImage(f->mot_buf, (int)S, (int)S);
+	return true;
+}
+
+// 把当前 thumb_rt 的内容回读到 f->thumb_buf（S×S×4 = 1.6 MB）。
+// 2.11.0（方案C）把这一步从 beauty_thumb_build 里拆出来：第一阶段只画不读，
+// 第二阶段由宿主在「引擎说本帧要提交检测」之后单独调它。
+static bool beauty_thumb_readback(struct beauty_filter *f)
+{
+	static bool failed = false;
+	auto fail = [](const char *why) {
+		if (!failed) {
+			failed = true;
+			blog(LOG_WARNING,
+			     "[" PLUGIN_NAME "] 缩略图回读失败：%s → 本帧回退全帧路径",
+			     why);
+		}
+		return false;
+	};
+	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_buf)
+		return fail("resources");
+	const uint32_t S = f->thumb_w;
+	const double t0 = f->prof_on ? beauty_now_ms() : 0.0;
+	gs_texture_t *tex = gs_texrender_get_texture(f->thumb_rt);
+	if (!tex)
+		return fail("texrender texture null");
+	gs_stage_texture(f->thumb_stage, tex);
+	uint8_t *ptr = NULL;
+	uint32_t linesize = 0;
+	if (!gs_stagesurface_map(f->thumb_stage, &ptr, &linesize) || !ptr)
+		return fail("stage map");
+	const size_t row = (size_t)S * 4;
+	if (linesize == row) {
+		memcpy(f->thumb_buf, ptr, row * S);
+	} else {
+		for (uint32_t y = 0; y < S; y++)
+			memcpy(f->thumb_buf + (size_t)y * row,
+			       ptr + (size_t)y * linesize, row);
+	}
+	gs_stagesurface_unmap(f->thumb_stage);
+	/* 取证用：BEAUTY_THUMB_DUMP=1 时把这张缩略图原样落盘一份（RGBA 裸数据）。
+	 * 缩略图一旦有翻转 / 通道错 / 黑边偏移，检测会检出一堆假脸，但日志只报个
+	 * 数字 —— 只有把图拿出来看才能一次定位。 */
+	if (!f->thumb_dumped && getenv("BEAUTY_THUMB_DUMP")) {
+		f->thumb_dumped = true;
+		// 路径必须是纯 ASCII：fopen 走 ANSI 代码页，中文目录在这里直接失败。
+		FILE *fp = fopen("C:/Users/Administrator/AppData/Local/Temp/thumb_dump.rgba",
+				 "wb");
+		if (fp) {
+			fwrite(f->thumb_buf, 1, row * S, fp);
+			fclose(fp);
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 缩略图已 dump：%ux%u scale=%.4f "
+			     "ox=%d oy=%d",
+			     S, S, f->thumb_scale, f->thumb_ox, f->thumb_oy);
+		}
+	}
+	if (f->prof_on)
+		f->prof_dl_thumb += beauty_now_ms() - t0;
+	return true;
+}
 static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
-			       uint32_t cx, uint32_t cy)
+			       uint32_t cx, uint32_t cy, bool read_back = true)
 {
 	// 失败原因只报一次：这条路每帧都会试一次，不收敛的理由会刷屏。
 	auto fail = [](const char *why) {
@@ -5145,47 +5364,18 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 	gs_viewport_pop();
 	smooth_rt_end(f->thumb_rt);
 
-	gs_texture_t *tex = gs_texrender_get_texture(f->thumb_rt);
-	if (!tex)
-		return fail("texrender texture null");
-	gs_stage_texture(f->thumb_stage, tex);
-	uint8_t *ptr = NULL;
-	uint32_t linesize = 0;
-	if (!gs_stagesurface_map(f->thumb_stage, &ptr, &linesize) || !ptr)
-		return fail("stage map");
-	const size_t row = (size_t)S * 4;
-	if (linesize == row) {
-		memcpy(f->thumb_buf, ptr, row * S);
-	} else {
-		for (uint32_t y = 0; y < S; y++)
-			memcpy(f->thumb_buf + (size_t)y * row,
-			       ptr + (size_t)y * linesize, row);
-	}
-	gs_stagesurface_unmap(f->thumb_stage);
-	/* 取证用：BEAUTY_THUMB_DUMP=1 时把这张缩略图原样落盘一份（RGBA 裸数据）。
-	 * 缩略图一旦有翻转 / 通道错 / 黑边偏移，检测会检出一堆假脸，但日志只报个
-	 * 数字 —— 只有把图拿出来看才能一次定位。 */
-	if (!f->thumb_dumped && getenv("BEAUTY_THUMB_DUMP")) {
-		f->thumb_dumped = true;
-		// 路径必须是纯 ASCII：fopen 走 ANSI 代码页，中文目录在这里直接失败。
-		FILE *fp = fopen("C:/Users/Administrator/AppData/Local/Temp/thumb_dump.rgba",
-				 "wb");
-		if (fp) {
-			fwrite(f->thumb_buf, 1, row * S, fp);
-			fclose(fp);
-			blog(LOG_INFO,
-			     "[" PLUGIN_NAME "] 缩略图已 dump：%ux%u scale=%.4f "
-			     "ox=%d oy=%d（源 %ux%u）",
-			     S, S, scale, ox, oy, cx, cy);
-		}
-	}
-	if (f->prof_on)
-		f->prof_dl_thumb += beauty_now_ms() - t0;
-
+	// 映射参数每帧都要更新（引擎反算几何要用），与「读不读」无关。
 	f->thumb_scale = scale;
 	f->thumb_ox = ox;
 	f->thumb_oy = oy;
-	return true;
+	// 画的那一段耗时先记；回读那一段由 beauty_thumb_readback 自己记。
+	if (f->prof_on)
+		f->prof_dl_thumb += beauty_now_ms() - t0;
+	/* 2.11.0（方案C）：第一阶段只画不读 —— RT 里已是本帧缩略图，运动采样直接
+	 * 拿它当输入；那 1.6 MB 的回读等 beautyCoreDetectDue() 说「要」再做。 */
+	if (!read_back)
+		return true;
+	return beauty_thumb_readback(f);
 }
 
 static void beauty_filter_render(void *data, gs_effect_t *effect)
@@ -5460,6 +5650,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 				!f->stage_async && !f->mirror && f->verified &&
 				mkfaces0 == 1;
 	f->thumb_frame = false;
+	f->nopix_frame = false;   // 2.11.0（方案C）：每帧复位，见下方两段式分支
 	// S4b 一次性判据快照：缩略图路径「为什么会/不会生效」只看这一行。
 	if (!f->thumb_dbg_done && f->verified) {
 		f->thumb_dbg_done = 1;
@@ -5471,7 +5662,33 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		     f->stage_async ? 1 : 0, f->mirror ? 1 : 0,
 		     f->verified ? 1 : 0);
 	}
-	if (want_thumb && beauty_thumb_build(f, in_tex, cx, cy)) {
+	/* 2.11.0（方案C）：两段式。第一阶段只画缩略图（GPU，不读回）+ 采样 64×64
+	 * 运动小图（16 KB），问引擎「本帧要不要检测输入」；要才回读那 1.6 MB。
+	 * 不要的帧一个像素都不回读 —— buf_in 与今天的缩略图帧同语义（旧的），所以
+	 * 照样要求「上一帧全认领」，认领不全就整帧跳过，代价与今天完全一样。 */
+	bool thumb_ready = false;
+	if (want_thumb && f->motion_gpu) {
+		if (beauty_thumb_build(f, in_tex, cx, cy, /*read_back=*/false) &&
+		    beauty_motion_sample(f)) {
+			const bool due = beautyCoreDetectDue();
+			beautyCoreClearMotionImage();
+			if (due) {
+				// 回读失败 → 落到下面的全帧路径；引擎那边已经把本帧
+				// 记成「要提交」，全帧像素照样能喂给它，不会漏检测。
+				thumb_ready = beauty_thumb_readback(f);
+			} else {
+				thumb_ready = true;
+				f->nopix_frame = true;
+				f->an_nopix++;
+				f->mot_skipped++;
+			}
+		} else {
+			beautyCoreClearMotionImage();
+		}
+	} else if (want_thumb) {
+		thumb_ready = beauty_thumb_build(f, in_tex, cx, cy);
+	}
+	if (thumb_ready) {
 		got = true;
 		f->thumb_frame = true;
 		f->an_thumb++;
@@ -5575,7 +5792,11 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	/* S4b：把本帧的缩略图交给引擎 —— 像素来自 GPU 缩略图，几何仍是全帧。
 	 * 必须在 process() 之前设、之后立刻清：任何一帧「忘了清」都会让下一帧
 	 * 回退全帧时仍去读上一帧的缩略图，几何直接错一帧（4K 下 ≈6 px）。 */
-	if (f->thumb_frame)
+	/* 2.11.0（方案C）：nopix 帧没有全帧像素、也没有缩略图，引擎在掩码到货那一帧
+	 * 仍需知道「这不是有像素但没用上」——否则帧号对齐（3.1.10）会被跳过，
+	 * 掩码与画面差一帧（静态看不出，动起来就是拖影）。 */
+	beautyCoreSetNoPixelFrame(f->nopix_frame);
+	if (f->thumb_frame && !f->nopix_frame)
 		beautyCoreSetThumbSource(f->thumb_buf, (int)f->thumb_w,
 					 (int)f->thumb_h, (int)cx, (int)cy,
 					 f->thumb_scale, f->thumb_ox,
@@ -5931,6 +6152,22 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			f->dper_max = 0;
 			f->dmot_max = 0;
 			f->prof_dl_thumb = 0.0;
+			/* 2.11.0（方案C）：本窗口「预判不提交、因此没回读检测输入」的帧数。
+			 * 单独一行 + 字符串拼接：不动上面那条 printf 格式串（blog 不受
+			 * 编译器格式检查保护，3.1.4 就是因为多一个 %s 崩了两次）。 */
+			if (f->motion_gpu) {
+				std::string mm = "方案C 窗口 " + std::to_string(cx) +
+						 "x" + std::to_string(cy) +
+						 "：nopix=" +
+						 std::to_string(f->an_nopix) + "/" +
+						 std::to_string(f->prof_frames) +
+						 " 累计省 " +
+						 std::to_string(
+							 (unsigned long long)f->mot_skipped) +
+						 " 帧";
+				blog(LOG_INFO, "[" PLUGIN_NAME "] %s", mm.c_str());
+				f->an_nopix = 0;
+			}
 
 			// 分项单独一行：把它和总耗时写在同一行会让本来就长的性能行更难读，
 			// 而这两行是配套看的（差值应该很小，否则说明埋点位置错位）。
