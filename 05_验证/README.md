@@ -27,6 +27,11 @@ py -3 05_验证\verify_smooth_compiles.py
 | 离线对拍（着色器编译 / 像素对齐） | `verify_tone_compiles.py`、`verify_smooth_compiles.py`、`verify_detail_compiles.py`、`verify_warp_compiles.py`、`verify_mask_compiles.py`、`verify_region_compiles.py` | 否 |
 | 门禁判定与配对 A/B | `gate.py`、`ab_pair.py` | 门禁读日志：否；采集：是 |
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
+| 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
+| 单项度量 | `mask_probe.py`（掩码/有脸/往返） | 是 |
+
+> `mask_probe.py` 当前只能读「有脸 / 往返」两项：本构建的 `性能` 行里「掩码」字段恒为 `0.00%`（侧脸素材同样为 0），
+> 所以它**不能**用来比较掩码覆盖率，别拿这个数下结论。判「素材有没有被认出」，看「有脸」与 `faces` 取值。
 
 ## 三、两条容易踩的坑
 
@@ -36,6 +41,18 @@ py -3 05_验证\verify_smooth_compiles.py
 ## 四、素材与输出
 
 - `assets/`：静态人脸图（`face_720p.png`、`face_4k.png` 及 `*_single` 单脸版）与逐帧匀速移脸素材（`motion_720p.mp4` / `motion_4k.mp4` 及同名 `json`）。
-  > **⚠ 这批人脸图是四分之三侧脸**（头部左转约 30–40°），不是正脸。侧脸的人脸框更窄、关键点偏移，因此**覆盖率类指标与五官段几何不能外推到正面主持人**；耗时类结论不受影响（磨皮/色调/细节走全帧、draw 数固定）。要验证正脸效果需另补正面素材。
+  > **⚠ 这批人脸图是四分之三侧脸**（头部左转约 30–40°），不是正脸。侧脸的人脸框更窄、关键点偏移，因此**覆盖率类指标与五官段几何不能外推到正面主持人**；耗时类结论不受影响（磨皮/色调/细节走全帧、draw 数固定）。
+- `assets/face_front_4k.png`、`face_front_720p.png`：**正脸**验收素材（合成，单脸，主脸占画面高约 50%），配套集合 `beauty_front4k` / `beauty_front720`。来源与检出指标见 `face_front_meta.json`，复现命令：
+
+  ```bat
+  py -3 05_验证\make_front_assets.py <人像路径> --frac 0.50 --crop-bottom 100
+  py -3 05_验证\make_front_collection.py
+  py -3 05_验证\soak_s2.py soak --minutes 1 --collection beauty_front4k --canvas 3840x2160
+  ```
+
+  > **合成素材必须过肤色这一关**：插件用 YCbCr 椭圆判肤色（中心 `cb=-0.065 / cr=+0.095`），
+  > AI 人像常因色度过低落在椭圆外，表现为**掩码 0%、`faces` 恒 0**，而 cv2 直接测却是 `faces=1`。
+  > `make_front_assets.py` 已内置「色度校正」（把主脸区推到 r²≈0.20），并会打印校正前后的 r²。
+  > 另外：合成皮肤的毛孔级细节少于真人，**不能拿它评价磨皮/清晰的主观观感**，只用于耗时、检出、链路三类结论。
 - `out/`：每次验收一个子目录（如 `v271s4k`、`v271f720`、`v270f4k`），内含截图与 `_meta.json`；`_obs_screenshots/` 放整屏截图。
 - **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。建议长跑一结束就把日志复制到 `out/logs/`（该目录当前不存在，首次使用先 `mkdir 05_验证\out\logs`），再启动下一个 OBS 实例。
