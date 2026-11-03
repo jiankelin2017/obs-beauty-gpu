@@ -55,14 +55,17 @@ if (-not (Test-Path $dllSrc)) { throw "MISSING dll source under 02_*" }
 if (-not $shaderSrc)          { throw "MISSING shader source dir (01_*\shaders)" }
 if ($hlsl.Count -eq 0)        { throw "MISSING *.hlsl under $shaderSrc" }
 
-# --- P2-1: shader copies must not drift --------------------------------
+# --- P2-1 / P2-3: shader copies must not drift -------------------------
 # The 2.2.0 outage was caused by a stale smooth.hlsl being picked up from a
 # second copy (source said RGBA16F, the packaged copy still said RGBA32F).
-# Collect every shader folder that could be installed from - the 01_* source,
-# any other *\shaders under the project, and the legacy solo dir - and refuse
-# to install if ANY copy differs from the authoritative 01_* source. Multiple
-# identical copies are tolerated (warned), because the installer bundle and
-# the solo dev dir are legitimate; only DRIFT is fatal.
+# There is exactly ONE hand-written source (01_*\shaders); everything else is
+# generated from it:
+#   * 07_*\shaders                -> build artifact of build_setup.ps1 (WARN if stale)
+#   * D:\obs_beauty_gpu\shaders   -> NTFS junction into 01_*\shaders (see 8_link_dev_shaders.ps1)
+#   * %PROGRAMDATA%\...\data\shaders -> written by THIS script
+# Any *other* shaders folder inside the project is treated as a hand-made copy
+# and drift there is fatal, because it could be picked up as an install source.
+# Multiple identical copies are tolerated; only DRIFT in a hand-made copy is fatal.
 function Get-ShaderSig([string]$dir) {
     $parts = @()
     foreach ($f in (Get-ChildItem $dir -Filter "*.hlsl" | Sort-Object Name)) {
@@ -72,9 +75,15 @@ function Get-ShaderSig([string]$dir) {
 }
 $authSig = Get-ShaderSig $shaderSrc
 $shaderCopies = @($shaderSrc)
+$warnCopies = @()
 foreach ($d in (Get-ChildItem $srcRoot -Directory -ErrorAction SilentlyContinue)) {
     $sd2 = Join-Path $d.FullName "shaders"
-    if ((Test-Path $sd2) -and ($sd2 -ne $shaderSrc)) { $shaderCopies += $sd2 }
+    if ((-not (Test-Path $sd2)) -or ($sd2 -eq $shaderSrc)) { continue }
+    # P2-3: the installer payload (07_*) carries its own shaders\ folder, but that is a
+    # BUILD ARTIFACT produced by 07_*/build_setup.ps1 and git-ignored - it is never an
+    # install source. A stale copy there only means "the package has not been rebuilt",
+    # so warn instead of failing: the authoritative install source is always 01_*/shaders.
+    if ($d.Name -like '07_*') { $warnCopies += $sd2 } else { $shaderCopies += $sd2 }
 }
 # Solo dev copy: BEAUTY_SOLO_SHADER_DIR takes precedence; the hardcoded path is
 # only the default.  The env var must win when both exist - otherwise a machine
@@ -91,7 +100,16 @@ if ([string]::IsNullOrWhiteSpace($soloSd)) {
     Write-Output "solo dir : BEAUTY_SOLO_SHADER_DIR=$soloSd"
 }
 if (Test-Path $soloSd) {
-    $shaderCopies += $soloSd
+    # P2-3: the solo dev dir is now a NTFS junction into 01_*/shaders, so the "second
+    # copy" is literally the same bytes. Report it as a link instead of pretending it
+    # is an independent copy (and skip the redundant hash pass).
+    $soloItem = Get-Item -LiteralPath $soloSd -Force
+    if ($soloItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Write-Output "solo dir : junction -> $($soloItem.Target) (same files, not a copy)"
+    } else {
+        Write-Output "solo dir : real folder (copy - will verify it matches source)"
+        $shaderCopies += $soloSd
+    }
 } else {
     Write-Output "solo dir : skipped (not found: $soloSd)"
 }
@@ -105,6 +123,12 @@ if ($drift.Count -gt 0) {
     throw "shader copies not identical to source - sync or delete the drifted copies before installing"
 }
 Write-Output "shader copies: $($shaderCopies.Count) (all identical to source)"
+foreach ($sd in $warnCopies) {
+    if ((Get-ShaderSig $sd) -ne $authSig) {
+        Write-Output "WARN     : package payload is stale: $sd"
+        Write-Output "           (re-run 07_*/build_setup.ps1 before shipping - install itself is unaffected)"
+    }
+}
 
 $proc = Get-Process obs64 -ErrorAction SilentlyContinue
 if ($proc) { throw "obs64.exe is still running (pid $($proc.Id)). Close OBS first." }

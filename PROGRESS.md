@@ -2580,3 +2580,56 @@ beauty_spot4k.json 内部 name = beauty_soak4k
 只差高度说明 ROI 取法不同：geomOnly 帧用 P0-8 的兜底（沿用上次包围盒 / 脸框 × `kFaceBoxGrow` + pad），
 有掩码帧用本帧实际落笔包围盒。实际 bbox 只差 17 px（720p）/ 31 px（4K）。
 记为观察 —— 除非将来有人报告「脸颊下缘祛斑忽有忽无」。
+
+---
+
+## 9.25 P2-3 副本收敛：一个手写源 + 三个生成物（2026-11-03 22:15）
+
+### 9.25.1 问题
+
+shader 有四处，其中两处是「看起来像源码、其实是手抄或生成」的副本：
+
+| 位置 | 真实身份 | 收敛前 |
+|---|---|---|
+| `01_源码\shaders` | 唯一手写源 | 规范 |
+| `07_安装包\shaders` | `build_setup.ps1` 的打包产物 | **被 git 跟踪**，改了源码忘了重打包就留旧副本 |
+| `%ProgramData%\...\data\shaders` | 装机运行时 | 由 `7_install_gpu.ps1` 生成，正常 |
+| `D:\obs_beauty_gpu\shaders` | 开发期 `BEAUTY_SHADER_DIR` 指向 | **纯手工拷贝**，11 个 ASCII 启动脚本硬编码这个路径 |
+
+四处当前 MD5 全一致（`detail 77af69ee / mask 90b6141c / region b68671bb / smooth ab6c369c / tone 72b14063 / warp 6c53bea9`），
+但没有任何机制保证明天还一致 —— 2.2.0 那次事故（源码 RGBA16F、打包副本 RGBA32F）就是同源问题。
+
+### 9.25.2 做法
+
+1. **`07_安装包\shaders` 与 `setup.obj` / `setup.res` 移出版本控制**，加 `.gitignore`；
+   `build_setup.ps1` 在拷贝前先删目标目录内所有 `*.hlsl` —— 这样在源里改名/删掉的 shader
+   不会作为幽灵文件留在包里。
+2. **solo 目录改成 NTFS junction**：`D:\obs_beauty_gpu\shaders` → `01_源码\shaders`。
+   选 junction 而不是符号链接，是因为它不需要 `SeCreateSymbolicLinkPrivilege`；
+   选「链接」而不是「改 11 个 bat」，是因为那些 bat 刻意全 ASCII（BOM-less 中文路径的解析坑
+   在 2.2.0 踩过），换路径反而要动 11 个文件。
+   新增 `03_装机\8_link_dev_shaders.ps1`：幂等；已是正确链接则直接退出；
+   遇到「真实目录且内容与源码不一致」**拒绝执行**（exit 2），避免抹掉别处没有的改动。
+3. **`7_install_gpu.ps1` 的漂移检查细化**：把 `07_*` 目录从 FATAL 列表移到 WARN ——
+   那是打包产物的滞后，不该阻断装机（装机源永远是 `01_*`）；并识别 solo 是否为 junction，
+   是则打印 `junction -> ...  (same files, not a copy)` 并跳过重复哈希。
+
+### 9.25.3 验收（都实跑了）
+
+| 动作 | 结果 |
+|---|---|
+| `7_install_gpu.ps1` | `shader copies: 1 (all identical to source)`、dll md5 `8451E9ED…` match=True、6 个 hlsl `OK`、`INSTALL OK` |
+| 起 OBS（`beauty_spot` 720p，祛斑 0 档） | 6 条 `xxx.hlsl 已加载（C:\ProgramData\obs-studio/plugins/obs-beauty/data/shaders/xxx.hlsl）` + `引擎资源已预热 1280x720`；0 档仍然 **0 像素** |
+| `build_setup.ps1` 清空重拷 | 人为放入 `ghost.hlsl`、删掉 `warp.hlsl` → 跑完只剩正确 6 个（ghost 消失、warp 回来），`BUILD OK 1,398,272 B` |
+| `8_link_dev_shaders.ps1` 三分支 | 已链接 → `nothing to do` exit 0；真实目录且一致 → 备份后建链 exit 0；真实目录且**不一致** → `REFUSE` exit 2 且原件不动（三个分支都实测过） |
+
+### 9.25.4 留下的东西
+
+- `D:\obs_beauty_gpu\shaders_bak_20261103`：改名前的真实目录，与源码逐字节一致，确认后可删。
+- 现在「副本数」是 **1 个手写源 + 3 个生成物**（打包产物 / 装机运行时 / 指向源码的链接），
+  不再有需要人记着同步的手抄副本。换机器后跑一次 `8_link_dev_shaders.ps1` 即可重建链接。
+
+### 9.25.5 教训
+
+「内容一致」不等于「不会漂移」。四处 MD5 相同的那天，没有任何机制阻止其中一处被单独修改；
+真正该收敛的不是文件，而是**写入路径** —— 只留一个地方能写，其余全部由脚本从它生成。

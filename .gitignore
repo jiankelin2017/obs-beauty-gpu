@@ -17,6 +17,13 @@
 # 安装包二进制
 07_安装包/*.exe
 07_安装包/*.dll
+# 打包中间产物（rc.exe / cl.exe 每次重编，逐次变化，入库只会制造无意义 diff）
+07_安装包/*.obj
+07_安装包/*.res
+# 07_安装包/shaders 是 build_setup.ps1 从 01_源码/shaders 拷出来的打包中间产物（P2-3）。
+# 它曾被误当源码入库，导致「改了源码但忘了重打包」时出现旧 shader 副本。唯一手写源是
+# 01_源码/shaders/，另外三处（安装包 / ProgramData 装机目录 / D:\obs_beauty_gpu）全是生成物。
+07_安装包/shaders/
 
 # 离线验证运行时依赖（onnxruntime / core_probe 等第三方程序，体积大，非源码）
 06_离线验证/*.dll

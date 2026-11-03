@@ -142,6 +142,8 @@
 > **版本号递增规则（GPU/CPU/UI 三套共用，2026-11-02 重置）**：小更新 → 最右 +1（x.x.N）；重要更新 → 中间 +1、最右归零（x.N.0）；超大型更新（架构/不兼容） → 最左 +1、后两位归零（N.0.0）。
 >
 > **⚠ 部署必须包含 shaders（2026-11-02 2.2.0 补上的缺口）**：GPU 效果经 `obs_module_file()` 从 `<插件根>\data\` 加载，即 `C:\ProgramData\obs-studio\plugins\obs-beauty\data\shaders\*.hlsl`。**只装 dll 不装 shaders 时故障是静默的**——六个 effect 加载失败后各段自动回落 CPU，画面正常但 720p 引擎从 ~1 ms 恶化到 ~12 ms/帧、链钩子 `S/T/R/D/W` 全 0、A/B 数据失效。因此每次装机都必须跑 `03_装机\7_install_gpu.ps1`（dll + shaders 一并装、带备份与 MD5 校验），**禁止只手动复制 dll**。开发期可用 `BEAUTY_SHADER_DIR=<目录>` 覆盖（solo 启动器在用），但它只是便利手段，不能替代 data 目录的正式副本。自检方法：日志应出现六条 `xxx.hlsl 已加载（...data\shaders\xxx.hlsl）`；若出现 `未找到（data 目录缺 shaders/...）` 即部署不完整。
+>
+> **shader 只有一个手写源（P2-3 收敛，2026-11-03）**：`01_源码\shaders\*.hlsl`。其余三处都是生成物 —— 打包用的 `07_安装包\shaders`（`build_setup.ps1` 每次清空重拷、已移出 git）、装机运行时 `%ProgramData%\...\data\shaders`（`7_install_gpu.ps1` 拷）、开发用的 `D:\obs_beauty_gpu\shaders`（**指向源码的 NTFS junction**，不是副本）。换机器后跑一次 `03_装机\8_link_dev_shaders.ps1` 重建链接；不要再手工拷 shader 到那个目录。
 
 ## 目录结构
 

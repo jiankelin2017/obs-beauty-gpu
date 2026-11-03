@@ -60,6 +60,10 @@ Copy-Item $srcDll (Join-Path $pkgDir "obs-beauty.dll") -Force
 
 $pkgShaders = Join-Path $pkgDir "shaders"
 if (-not (Test-Path $pkgShaders)) { New-Item -ItemType Directory -Force -Path $pkgShaders | Out-Null }
+# P2-3: this folder is a BUILD ARTIFACT, never a source and never tracked by git.
+# Wipe stale *.hlsl BEFORE copying so a shader that was renamed or deleted in
+# 01_*/shaders cannot survive in the package as a ghost copy.
+Get-ChildItem $pkgShaders -Filter "*.hlsl" -ErrorAction SilentlyContinue | Remove-Item -Force
 $srcShaders = Join-Path $srcDir "shaders"
 Get-ChildItem $srcShaders -Filter "*.hlsl" | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $pkgShaders $_.Name) -Force
