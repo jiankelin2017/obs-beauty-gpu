@@ -28,7 +28,8 @@ py -3 05_验证\verify_smooth_compiles.py
 | 门禁判定与配对 A/B | `gate.py`、`ab_pair.py` | 门禁读日志：否；采集：是 |
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
-| 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数） | 是 |
+| 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
+| 五官正确性对拍 | `verify_region_geomonly.py`（五官 GPU vs CPU 逐像素比，`--zero` 作对照组、`--nospot` 试图只关祛斑） | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
@@ -89,6 +90,12 @@ py -3 05_验证\verify_smooth_compiles.py
 7. **「下载」在两套配置下不是同一种东西**。默认路径（S4b 缩略图）的 `下载` 约 1.6 ms，
    S3 路径的 `下载` 是全帧 4K memcpy，约 2.7 ms。跨配置横比这两个数没有意义，
    要比就比同一配置内的时间序列，或用 `ab_pair.py` 配对。
+8. **源名/滤镜名写错不会报错，只会「什么都没发生」**。`soak_s2.py` 用的是静态集合那一套
+   （`still` / `Beauty`）；拿它去驱动摄像头集合 `beauty_s1`（源 `视频采集设备`、滤镜 `OBS美颜`），
+   `SetSourceFilterSettings` 会静默打偏，结果是 `blur=0`、`ALLZERO_SKIP` 生效、全程
+   `有脸 0%`、`往返 0.00`，而脚本照样打印「存活」。**判别办法：看 `self-check` 那行的
+   `blur=` 是不是你设的值**；不是就说明参数没下去，那一轮数据无效（`cam_probe.py` 已把这条做成读回断言）。
+   另外刚连上 OBS 常回 `207 not ready`，必须重试 —— `soak_s2.apply_load` 重试 15 次就是这个原因。
 
 ## 四、素材与输出
 

@@ -3625,7 +3625,16 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 					 uint32_t cy, const BeautyChainJob &job)
 {
 	const BeautyRegionGeom &rg = job.regionGeom;
-	if (!in_tex || !job.mask || rg.faceCount != 1)
+	/* 2.8.1：掩码来源有两条 —— CPU 上传的（`job.mask` 非空）与 GPU 按几何重画的
+	 * （S4a 的 geomOnly 帧，`mask_skin_use` 非空）。链做的是把
+	 * `beauty_mask_skin(f)`（即 `mask_skin_use ?: skin_tex`）绑到 `skinMask` 上，
+	 * 所以这里的判据应该是「本帧有没有掩码纹理」，而不是「有没有 CPU 指针」。
+	 *
+	 * 原来的写法只认 `job.mask`，后果是：S7 静止降频后绝大多数帧是 geomOnly，
+	 * `job.mask == nullptr` → 五官链每帧在第一行就返回 NULL → REGION 不认领 →
+	 * 细节/美形被 `region_blocks` 连带挡住 → 整帧交回 CPU + 整帧回读。
+	 * 4K 开五官 54~58 ms 的主因在这里，不是"五官段没有 GPU 版本"（见 §9.17）。 */
+	if (!in_tex || (!job.mask && !f->mask_skin_use) || rg.faceCount != 1)
 		return NULL;
 	const BeautyRegionGeom::Face &fc = rg.faces[0];
 	gs_effect_t *fx = beauty_load_region_effect(f);
@@ -4065,9 +4074,14 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	// 美形是执行顺序的最后一段（磨皮→色调→五官→细节→美形），所以认领它要求
 	// **前面每一段都已认领** —— 否则 claim 不是 flags 的前缀，引擎会整份丢弃。
 	//
-	// 已知边界：五官段（REGION）插在色调与细节之间，目前没有 GPU 版本，它一
-	// 出现前缀就断在那里，美形只能留给 CPU。这不是 bug，是 5c 的作用范围 ——
-	// 用五官的用户拿不到美形的 GPU 化（也就拿不到 5b-1）。
+	// 已知边界：五官段（REGION）插在色调与细节之间。它出现前缀就断在这里的
+	// 两种情形是：① `BEAUTY_GPU_REGION=0`（五官链不跑）；② 五官链本帧失败
+	// （`rg.faceCount != 1` 多脸、着色器/RenderTarget 建不出来）。这两种情况
+	// 美形只能留给 CPU —— 认领必须是 flags 的**前缀**，断了就是断了。
+	//
+	// 3.1.72 起五官段本身**有** GPU 版本（`beauty_region_chain`），所以别再按
+	// 「五官没有 GPU 版本」去理解这条边界（旧注释就是这么写的，2026-11-03 更正）；
+	// 2.8.1 又补掉了「geomOnly 帧拿不到掩码就整段放弃」这一条假边界。
 	const bool warp_prefix_ok =
 		!region_blocks && tone_ok &&
 		(!(job.flags & BEAUTY_SEG_DETAIL) || (claim & BEAUTY_SEG_DETAIL));
