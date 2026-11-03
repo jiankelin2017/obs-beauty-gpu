@@ -29,6 +29,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 采集 / 长跑 / 正确性 | `s0_lock.py`、`soak_s2.py`、`verify_s1_correct.py`、`slope_smooth.py` | 是 |
 | 素材制作 | `make_assets.py`、`make_motion_assets.py`、`make_static_collection.py`、`make_front_assets.py`、`make_front_collection.py`、`make_motion_collection.py`、`scan_frontal_faces.py` | 否（建集合时 OBS 必须关） |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数） | 是 |
+| 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
 > 不体现在帧耗时里的改动（S7 的全部立论就在这里）。用法：
@@ -47,13 +48,28 @@ py -3 05_验证\verify_smooth_compiles.py
 > `mask_probe.py` 当前只能读「有脸 / 往返」两项：本构建的 `性能` 行里「掩码」字段恒为 `0.00%`（侧脸素材同样为 0），
 > 所以它**不能**用来比较掩码覆盖率，别拿这个数下结论。判「素材有没有被认出」，看「有脸」与 `faces` 取值。
 
-## 三、两条容易踩的坑
+## 三、几条容易踩的坑
 
 1. **收益只认配对**：`gate.py --skip-transfer` 判的是健康项与引擎项，跨会话的搬运项不可比；单次绝对值只能看趋势，收益结论必须来自 `ab_pair.py` 的同会话交替 A/B。
 2. **采集前先确认数据有效**：日志里 `engine=gpu` 且 `S/T/R/D/W` 非 0，否则那一轮测的是 CPU 路径，数字不能用。
 3. **`对齐%` 在 2.8.0 之后不能当静态采集的质量指标**：静止时检测每 8 帧才提交一次，
    对齐率会从 100% 掉到 13%，这是设计后果不是回归 —— 静态内容下新旧掩码逐像素相同，
    已用 `ADAPT=0` vs `ADAPT=1` 的五组 `maxdiff=0` 证明。要判质量用 `maxdiff`，不用对齐率。
+4. **采集前显卡必须是干净的**。`gpu_guard.py` 已在 `start_obs()` 里自动调用：有重度 GPU
+   程序在跑（DaVinci Resolve 等），或显存已用超过 3500 MiB，就直接拒绝启动，不再往下测。
+   单独看一眼当前状态：
+
+   ```bat
+   py -3 05_验证\gpu_guard.py
+   ```
+
+   本机实测（RTX 5060 Laptop，8151 MiB，2026-11-03）：桌面空闲 1.3~2.4 GB 已用；
+   DaVinci Resolve 一开就 5 GB 以上。问题不在「会不会卡」，而在**测出来的帧时会虚高**，
+   `gate.py` 会把它判成「引擎超差 FAIL」—— 那时人去翻源码找的是一个不存在的问题。
+
+   > 闸只在**启动前**查一次。长跑中途开 DaVinci 它看不见，只能靠人。
+   > 放行开关：`BEAUTY_GPU_BUDGET_MB=6000`（改预算）或 `BEAUTY_NO_GPU_GATE=1`（完全跳过）。
+   > 后者一旦用了，那一轮数据**不能进基线**。这两个变量只有验证脚本读，插件不读。
 
 ## 四、素材与输出
 

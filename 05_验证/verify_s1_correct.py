@@ -45,6 +45,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import obsctl  # noqa: E402
+import gpu_guard  # noqa: E402
 
 ROOT = os.path.dirname(HERE)
 OBS_ROOT = r"C:\Program Files\obs-studio"
@@ -237,6 +238,10 @@ def start_obs(collection, extra_env=None, canvas=None):
     global _CANVAS_BAK
     if obs_running():
         sys.exit("obs64 已在运行，先关掉（或跑 close_obs）")
+    # 起 OBS 之前确认显卡是干净的。别的程序在抢卡时，帧时整体抬高、窗口
+    # 抖动变大，gate.py 会判「引擎超差 FAIL」—— 而源码里并没有对应的问题。
+    # 闸放在这里是因为所有采集脚本都走这一个入口（见 gpu_guard.py 顶部）。
+    gpu_guard.require()
     env = dict(os.environ)
     env.pop("BEAUTY_ALLZERO_SKIP", None)
     env.pop("BEAUTY_ENGINE_IMPL", None)
