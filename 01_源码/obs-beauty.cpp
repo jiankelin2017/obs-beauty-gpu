@@ -444,6 +444,7 @@ struct beauty_filter {
 	int thumb_dbg_done;        // 一次性判据快照是否已打
 	bool thumb_fail_logged;    // 构建失败只报一次（防刷屏）
 	bool thumb_skip_logged;    // 认领不全导致跳过的原因只报一次
+	int  rot_warned;           // 2.10.1：input_rot≠0 但本帧没走缩略图路径，只告警一次
 	bool thumb_dumped;         // BEAUTY_THUMB_DUMP：缩略图只落盘一次
 	double prof_dl_thumb;      // 缩略图「缩放 + 回读」耗时（窗口累加）
 	// 4d：五官椭圆族的 GPU 对拍（R1-lite，BEAUTY_REGION_CMP=1）
@@ -5503,6 +5504,25 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			blog(LOG_WARNING,
 			     "[" PLUGIN_NAME "] 缩略图构建失败：本帧回退全帧回读"
 			     "（画面正确，只是没省到那 2~3 ms）");
+		}
+		/* 2.10.1（P0-11）：input_rot≠0 但本帧没走缩略图路径 —— 旋转完全不会生效，
+		 * 而画面上看不出异常（只是「脸没被摆正」，掩码落到别处或干脆没有）。
+		 * 最容易踩的是「开了一项五官参数、但 BEAUTY_GPU_REGION 没开」：REGION 段
+		 * 落 CPU → 本帧不是全段认领 → chain_out_valid=0 → thumb_prev_ok=0 → 缩略图
+		 * 路径永不启用。只报一次，把「为什么没生效」摊开，别再静默。 */
+		if (f->input_rot != 0 && !f->rot_warned) {
+			f->rot_warned = 1;
+			blog(LOG_WARNING,
+			     "[" PLUGIN_NAME "] ⚠ 输入方向=%d 但本帧没走缩略图检测路径，"
+			     "旋转不会生效（detect_small=%d mask_chain=%d ring=%d "
+			     "prev_full=%d async=%d mirror=%d verified=%d faces=%d）。"
+			     "常见原因：① 开了五官参数但 BEAUTY_GPU_REGION 未开；② 多脸；"
+			     "③ 上一帧未被链全认领；④ BEAUTY_DETECT_SMALL=0 / "
+			     "BEAUTY_ASYNC_STAGE=1 / 镜像。本会话只报这一次。",
+			     f->input_rot, f->detect_small ? 1 : 0,
+			     f->gpu_mask_chain ? 1 : 0, f->gpu_ring_ok ? 1 : 0,
+			     f->thumb_prev_ok ? 1 : 0, f->stage_async ? 1 : 0,
+			     f->mirror ? 1 : 0, f->verified ? 1 : 0, mkfaces0);
 		}
 	/* S3：上一帧的暂存面在上一次 render 里就已提交，到这一刻那趟拷贝早已完成，
 	 * 先 map 它几乎不等待；映射成功后再把本帧提交到**另一张**面。
