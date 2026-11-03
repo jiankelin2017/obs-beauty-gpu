@@ -202,15 +202,37 @@ def build(src_path, frac, crop_bottom=0, skin_target=True):
     #    为什么不镜像整图：镜像会把半张脸复制到两侧，模糊后成为「幽灵脸」。
     #    为什么不用平涂同色：原图背景带横向明暗渐变，平涂会在接缝上下出现色差台阶。
     #    只复制边界列可保证纵向渐变连续、横向恒定，模糊后即为干净背景。
-    # 2) 背景：同一张图 cover 铺满画布后重度模糊（散景），与前景同色温。
-    #    不用边缘镜像：镜像会把半张脸复制到两侧，模糊后成为「幽灵脸」。
-    #    不用平涂同色：原图背景带横向明暗渐变，平涂会在接缝处出现色差台阶。
-    s_bg = max(W / float(src.width), H / float(src.height))
-    bg = src.resize((int(round(src.width * s_bg)) + 2, int(round(src.height * s_bg)) + 2),
-                    Image.LANCZOS)
-    bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2,
-                  (bg.width - W) // 2 + W, (bg.height - H) // 2 + H))
-    bg = bg.filter(ImageFilter.GaussianBlur(BG_BLUR))
+    # 2) 背景：把清晰层自己缩小→重度模糊→放大，再向两侧补边。
+    #    为什么不用「整图 cover 铺满再模糊」：cover 的缩放比（~3.75）与清晰层（~1.66）
+    #    不同，背景里那团模糊的头发会落在头顶**上方**，看起来像人头被切掉。
+    #    同尺度模糊保证背景的明暗结构与前景对齐；两侧用最外一列像素补齐，
+    #    不会像镜像那样复制出「幽灵脸」。
+    fa = np.array(fg)
+    pad_l = max(0, (W - fg.width) // 2)
+    pad_r = max(0, W - fg.width - pad_l)
+
+    def flat_pad(a, width, left, band_frac=0.10):
+        """按行取外侧带宽的**中位色**补边。
+
+        为什么不用镜像：镜像会把肩膀/肩带的暗边复制成锯齿；也不用单列复制：
+        那会让横向渐变在接缝处出现台阶。按行取中位色 = 保留纵向明暗、抹掉结构，
+        模糊后就是自然的墙面过渡。
+        """
+        if width <= 0:
+            return np.zeros((a.shape[0], 0, a.shape[2]), dtype=a.dtype)
+        bw = max(8, int(a.shape[1] * band_frac))
+        band = a[:, :bw, :] if left else a[:, -bw:, :]
+        col = np.median(band.astype(np.float32), axis=1, keepdims=True)
+        col = np.repeat(col, width, axis=1)
+        return np.clip(col, 0, 255).astype(a.dtype)
+
+    left = flat_pad(fa, pad_l, True)
+    right = flat_pad(fa, pad_r, False)
+    bg_arr = np.concatenate([left, fa, right], axis=1)
+    bg = Image.fromarray(bg_arr)
+    sw, sh = max(1, bg.width // 16), max(1, bg.height // 16)
+    bg = bg.resize((sw, sh), Image.BOX).filter(ImageFilter.GaussianBlur(6))
+    bg = bg.resize((bg_arr.shape[1], bg_arr.shape[0]), Image.BICUBIC)
 
     # 3) 贴图：脸中心落在 (FACE_CX, FACE_CY)，且不允许裁掉头顶。
     #    画布尺寸固定为 CANVAS；不能跟着清晰层实际尺寸走，否则 4K 会变成
@@ -218,7 +240,10 @@ def build(src_path, frac, crop_bottom=0, skin_target=True):
     px = int(round(W * FACE_CX - fcx))
     py = int(round(H * FACE_CY - fcy))
     py = max(py, 40)                 # 头顶至少留 40px，避免整头被切
-    canvas = bg.copy()
+    # 背景上沿以上用「背景首行中位色」打底：沿用边缘复制会把发丝拉成细梳齿
+    top_col = tuple(int(v) for v in np.median(bg_arr[0].astype(np.float32), axis=0))
+    canvas = Image.new("RGB", (W, H), top_col)
+    canvas.paste(bg, (px - pad_l, py))
     mask = feathered_mask(fg.size, FEATHER)
     canvas.paste(fg, (px, py), mask)
     assert canvas.size == (W, H), "画布尺寸异常: %s" % (canvas.size,)
