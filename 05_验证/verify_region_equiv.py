@@ -39,8 +39,9 @@
 
 用法
 ----
-    py -3 05_验证/verify_region_equiv.py              # 全矩阵（约 5 分钟）
-    py -3 05_验证/verify_region_equiv.py --quick      # 立体 + 全开 + 4K（约 2 分钟）
+    py -3 05_验证/verify_region_equiv.py              # 全矩阵（约 6 分钟）
+    py -3 05_验证/verify_region_equiv.py --quick      # 立体 + 全开（约 3 分钟）
+    py -3 05_验证/verify_region_equiv.py --match 遮挡  # 只补遮挡那一格
     py -3 05_验证/verify_region_equiv.py --multiface  # 只验多脸回退
     py -3 05_验证/verify_region_equiv.py --dry-run    # 只打印矩阵，不起 OBS
 
@@ -82,6 +83,11 @@ CELLS = [
     # 真人视频，逐帧几何都在变 —— 这 6 个样本才是真正独立的样本
     ("1080x1920", "beauty_real_cam_1080x1920", None, 50, 6,
      "真人视频 6 帧（样本独立）"),
+    # 遮挡格（2026-11-04 真实采集素材 86–120s）：脸被包装盒反复遮住/露出，
+    # 几何在遮挡边界反复重建，取样会落在「遮挡刚结束、几何刚重建」的帧上。
+    # 补的是 §9.37.6 未验项 2 里「动态/遮挡」这一半（侧脸那半仍未覆盖）。
+    ("1920x1080", "beauty_real_cam_occ1080", None, 50, 6,
+     "真人视频·遮挡段 6 帧"),
 ]
 
 QUICK = [c for c in CELLS if c[2] in ("threed",) or c[2] is None]
@@ -254,9 +260,16 @@ def main():
     ap.add_argument("--quick", action="store_true", help="只跑立体 + 全开")
     ap.add_argument("--multiface", action="store_true", help="只验多脸回退")
     ap.add_argument("--dry-run", action="store_true", help="只打印矩阵")
+    ap.add_argument("--match", default=None,
+                    help="只跑说明里含该子串的格（如 遮挡），且不跑多脸回退")
     args = ap.parse_args()
 
     cells = QUICK if args.quick else CELLS
+    if args.match:
+        cells = [c for c in cells if args.match in c[5]]
+        if not cells:
+            sys.exit("--match %r 没匹配到任何格" % args.match)
+        print("--match %r → %d 格" % (args.match, len(cells)))
     if args.dry_run:
         print("%-32s %-11s %-7s %-5s %s" % ("格", "画布", "参数", "强度", "样本"))
         for c in cells:
@@ -274,11 +287,16 @@ def main():
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     rows = run_matrix(cells)
-    ok = report(rows, os.path.join(OUT, "T10b_region_equiv_%s.md" % stamp))
+    suffix = "" if not args.match else "_" + args.match
+    ok = report(rows, os.path.join(OUT, "T10b_region_equiv%s_%s.md" % (
+        suffix, stamp)))
 
-    print("\n=== 多脸回退 ===")
-    md, note = multiface()
-    ok = ok and md == 0
+    # 只补某一格时不再顺带跑多脸（那要多起两次 OBS），除非显式 --multiface
+    if not args.match:
+        print("\n=== 多脸回退 ===")
+        md, note = multiface()
+        ok = ok and md == 0
+    # --match 的全局 PASS 只代表「这一格」，报告标题里已写明格数
     print("\n总判定：%s" % ("**PASS**" if ok else "**FAIL/INCONCLUSIVE**"))
     return 0 if ok else 1
 
