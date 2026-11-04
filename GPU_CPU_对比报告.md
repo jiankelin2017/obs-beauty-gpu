@@ -16,7 +16,7 @@
 ## 2. 怎么用日志一眼判断（装机后必看）
 
 ```
-[obs-beauty] init OK (v2.10.0, engine=gpu/2.0.0, region=on, item=0, …)
+[obs-beauty] init OK (v2.14.1, engine=gpu/2.0.0, region=on, item=0, …)
 [obs-beauty] tone.hlsl 已加载（…\data\shaders\tone.hlsl）
 [obs-beauty] smooth.hlsl 已加载    [obs-beauty] detail.hlsl 已加载
 [obs-beauty] warp.hlsl 已加载      [obs-beauty] mask.hlsl 已加载
