@@ -1957,21 +1957,24 @@ static int beauty_smooth_passes_force()
 	return v;
 }
 
-// 缓冲编排（半分辨率，共 4 张 RGBA32F）：
+// 缓冲编排（半分辨率，共 4 张 RGBA16F/32F）：
 //   D = 下采样源，全程只读，Amp 之后才释放
 //   A = B1 结果        B = 临时 / amp 结果        C = B2 结果
 //
 //     1) Down   in → D
-//     2) Copy   D  → A                      （A 作 B1 的工作区）
-//     3) B1     (A,B) 交替 nPass 趟         → A = B1
-//     4) Copy   D  → C                      （C 作 B2 的工作区）
-//     5) B2     (C,B) 交替 nPass 趟         → C = B2
-//     6) Amp    D,C → B                      （B = |D.g − C.g|）
-//     7) Ampbox (B,D) 交替 nPass 趟         → B = amp   （D 此时已无用，拿来 ping-pong）
-//     8) Comp   in,D?否 —— in + A + C + B + gray → sm_out
+//     2) B1     首趟 H 直接读 D → B，随后 (B,A) 交替，共 2·nPass 趟 → A = B1
+//     3) B2     首趟 H 直接读 D → B，随后 (B,C) 交替，共 2·nPass 趟 → C = B2
+//     4) Amp    D,C → B                      （B = |D.g − C.g|）
+//     5) Ampbox (B,D) 交替 nPass 趟         → B = amp   （D 此时已无用，拿来 ping-pong）
+//     6) Comp   in + A + C + B + gray → sm_out
 //
-// 为什么 3) 和 5) 都要先 Copy：B1/B2 都从「下采样源」出发，而可分离盒式的
-// ping-pong 会覆写工作区。直接拿 D 当工作区会在第 2 趟就把源冲掉。
+// 为什么这里**不需要**先 Copy 一趟（Q8 / P1-2，draw 23→21）：
+// B1/B2 都从「下采样源」出发，而可分离盒式的 ping-pong 会覆写工作区 —— 直接拿 D
+// 当工作区确实会在第 2 趟就把源冲掉。但答案不是「先复制一份」，而是**让首趟
+// 水平盒式直接读 D、写临时区**，第二趟再读临时区、写结果区。数据经历的趟序
+// （H,V,H,V,…）与「Copy + nPass 趟」一模一样，只是首趟的输入从「刚复制好的 A」
+// 换成原封不动的 D，而 rad=0 那趟是逐像素纯采样复制（invBox=1、循环只跑 k=0，
+// 存储是浮点 RT 无二次量化），两者逐位相同 —— 所以这是等价重构，不是近似。
 static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in_tex,
 				       uint32_t cx, uint32_t cy, BeautyBandDiag *bp)
 {
@@ -2009,54 +2012,61 @@ static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in
 	if (!tex_d)
 		return NULL;
 
-	// 2) Copy D → A
-	smooth_box_pass(fx, f->sm_a, tex_d, ws, hs, 0, true, in_tex);
-	gs_texture_t *tex_a = gs_texrender_get_texture(f->sm_a);
-	if (!tex_a)
+	// 2) B1：首趟 H 直接读 D 写 B（原先这里是「Copy D→A」再「H(A)→B」两趟），
+	//    随后 (B,A) 交替，共 2·nPass 趟 → 最终落在 A（step 6 的 Comp 要读它）。
+	//    趟序逐趟等价：H(D), V, H, V, …；D 只被这一趟读过，此后不再当任何
+	//    渲染目标（step 5 的 amp 平滑才拿它做 ping-pong，那时 B1/B2 都算完了）。
+	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r1, true, in_tex);
+	gs_texture_t *tex_b = gs_texrender_get_texture(f->sm_b);
+	if (!tex_b)
 		return NULL;
-
-	// 3) B1：(A,B) 交替，nPass 趟 → 最终落在 A
+	gs_texture_t *tex_a = NULL;
 	for (int i = 0; i < nPass; i++) {
-		smooth_box_pass(fx, f->sm_b, tex_a, ws, hs, r1, true, in_tex);
-		gs_texture_t *tb = gs_texrender_get_texture(f->sm_b);
-		if (!tb)
-			return NULL;
-		smooth_box_pass(fx, f->sm_a, tb, ws, hs, r1, false, in_tex);
+		smooth_box_pass(fx, f->sm_a, tex_b, ws, hs, r1, false, in_tex);
 		tex_a = gs_texrender_get_texture(f->sm_a);
 		if (!tex_a)
 			return NULL;
+		// 末趟必须落在 A，别再绕回 B —— 绕回去结果就在 B 里了
+		if (i + 1 < nPass) {
+			smooth_box_pass(fx, f->sm_b, tex_a, ws, hs, r1, true, in_tex);
+			tex_b = gs_texrender_get_texture(f->sm_b);
+			if (!tex_b)
+				return NULL;
+		}
 	}
 
-	// 4) Copy D → C
-	smooth_box_pass(fx, f->sm_c, tex_d, ws, hs, 0, true, in_tex);
-	gs_texture_t *tex_c = gs_texrender_get_texture(f->sm_c);
-	if (!tex_c)
+	// 3) B2：同样首趟 H 直接读 D 写 B，随后 (B,C) 交替 → 最终落在 C。
+	//    r2 > r1 保证 B2 确实比 B1 宽（上面已按 CPU 同一条约束纠过 w2）。
+	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r2, true, in_tex);
+	tex_b = gs_texrender_get_texture(f->sm_b);
+	if (!tex_b)
 		return NULL;
-
-	// 5) B2：(C,B) 交替，nPass 趟 → 最终落在 C
+	gs_texture_t *tex_c = NULL;
 	for (int i = 0; i < nPass; i++) {
-		smooth_box_pass(fx, f->sm_b, tex_c, ws, hs, r2, true, in_tex);
-		gs_texture_t *tb = gs_texrender_get_texture(f->sm_b);
-		if (!tb)
-			return NULL;
-		smooth_box_pass(fx, f->sm_c, tb, ws, hs, r2, false, in_tex);
+		smooth_box_pass(fx, f->sm_c, tex_b, ws, hs, r2, false, in_tex);
 		tex_c = gs_texrender_get_texture(f->sm_c);
 		if (!tex_c)
 			return NULL;
+		if (i + 1 < nPass) {
+			smooth_box_pass(fx, f->sm_b, tex_c, ws, hs, r2, true, in_tex);
+			tex_b = gs_texrender_get_texture(f->sm_b);
+			if (!tex_b)
+				return NULL;
+		}
 	}
 
-	// 6) Amp 初值：|D.g − C.g| → B
+	// 4) Amp 初值：|D.g − C.g| → B
 	smooth_bind_tex(fx, "image", tex_d);
 	smooth_bind_tex(fx, "image2", tex_c);
 	if (!smooth_rt_begin(f->sm_b, ws, hs))
 		return NULL;
 	smooth_draw(fx, "AmpTech", in_tex, ws, hs);
 	smooth_rt_end(f->sm_b);
-	gs_texture_t *tex_b = gs_texrender_get_texture(f->sm_b);
+	tex_b = gs_texrender_get_texture(f->sm_b);   // 复用 B1/B2 时那个句柄
 	if (!tex_b)
 		return NULL;
 
-	// 7) amp 的盒式平滑：(B,D) 交替 → 最终落在 B。D 到这里已经不被需要。
+	// 5) amp 的盒式平滑：(B,D) 交替 → 最终落在 B。D 到这里已经不被需要。
 	for (int i = 0; i < nPass; i++) {
 		smooth_box_pass(fx, f->sm_d, tex_b, ws, hs, ra, true, in_tex);
 		gs_texture_t *td = gs_texrender_get_texture(f->sm_d);
@@ -2068,7 +2078,7 @@ static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in
 			return NULL;
 	}
 
-	// 8) Comp（全分辨率）
+	// 6) Comp（全分辨率）
 	smooth_bind_tex(fx, "image", in_tex);
 	smooth_bind_tex(fx, "image2", tex_a);   // B1
 	smooth_bind_tex(fx, "image3", tex_c);   // B2
