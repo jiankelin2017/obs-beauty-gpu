@@ -16,6 +16,11 @@ py -3 05_验证\verify_smooth_compiles.py
 
 `websocket-client` 是 `obsctl.py` 访问 obs-websocket v5 的客户端；只有需要**起停 OBS、改滤镜、截图**的脚本才会用到它。纯离线对拍（`verify_*_compiles.py`）不需要它，也不需要 OBS。
 
+**`tools/` 目录不进仓库**（`.gitignore` 已挡）。人眼 A/B 那轮用过的 `tools/ffmpeg.exe`（约 64 MB）与 `tools/ffpkg.tgz`
+（约 22 MB）是第三方二进制，与本仓库「二进制不入库」的规则（根 `README.md` N12）同口径。需要重跑 A/B 时自备 ffmpeg
+放到 `05_验证/tools/`；**当前没有任何脚本硬编码这个路径**（`ab_*.py` 全部走 Python 库与 OBS 录制，不外调 ffmpeg），
+所以删掉它不影响任何门禁脚本，只影响手工造片。
+
 > 这些脚本不是 argparse 写法，**没有 `--help`**。`gate.py --help` 只会把 `--help` 当选项滤掉、然后去扫日志；`probe_one.py --help` 会把它当浮点数并报错。参数说明看本文，或者直接看脚本头部。
 >
 > `gate.py` 无参运行时自动选用最近一份 OBS 日志：`py -3 05_验证\gate.py`；要指定日志就直接把路径传在后面。加 `--skip-transfer` 切到「A+C 合成口径」。
@@ -31,7 +36,13 @@ py -3 05_验证\verify_smooth_compiles.py
 | **方案C 边界（三族素材 + 判定复算）** | **`motion_model.py`（2.11.1，先看这支）**：引擎「运动判定」的 CPU 复算，全库唯一实现 —— 亮度 `(54r+183g+19b)>>8`、**两段缩放**（整帧 letterbox 进 640×640 再缩 64×64，不是一步到位）、16 格取格内最大 → 4×4 块均值 → 取 16 块最大。输出「判动%」就是 OBS 里 `判动 hit/calls` 的离线预测（实测偏差 +7 个百分点，离线偏保守）。**`make_flash_assets.py`**：空场里每 60 帧闪出人脸 k 帧（k=0/1/2/4/8）；**`make_dropout_assets.py`**：反向 —— 脸持续在场、每 60 帧消失 k 帧（k=1/2/4），这族才压得到方案C；**`make_camera_assets.py`（2.11.1）**：从真实画面出发逐项叠加噪声/手抖/AGC，分离各扰动的判动贡献；**`flash_probe.py --family flash\|drop` 或 `--coll NAME --canvas WxH`** 跑 ON/OFF 两臂；**`calib_motion_stat.py`** 早期的三口径对照（已被 `motion_model.py` 取代，保留作历史） | 采集时是 |
 | **块聚合口径（2.12.0 / P1-1c）** | **`calib_agg.py`**：一次解码同时算四种块聚合（`max` / `top4` / `rms` / `median`）的判动率，`--sweep` 追加阈值 5/6/7/8/10/12 下的判动率 —— 判断「换口径要不要跟着换阈值」就看它；**`face_box_drift.py`**：全片逐帧 YuNet，量「间隔 k 帧的两份检测框」位移、尺寸变化、IoU，并给出掩码羽化宽度（**0.08 × 脸宽**，2.13.0 据源码更正）作标尺；**`mask_lag_sim.py`**：复现 `detectPeriod`+`detectDue` 状态机 → 每帧掩码年龄 → 落到框序列 → 「掩码错多少像素」与「超羽化帧占比」，`--stills 8 6 4` 可一次扫多档周期、`--json` 落逐帧数据。三支都是离线，不启 OBS | 否（`face_box_drift` 要 onnx） |
 | **掩码偏移值多少灰阶（2.13.0）** | **`make_still_real.py`**：从真实素材里挑一帧「单脸 + 离边 ≥90 px + 脸最大」存 PNG（`assets/real_1080x1920.png`，配集合 `beauty_still_real`，`make_static_collection.py real` 建）；**`mask_off_probe.py --cfg blur\|combo\|strong`**：用 `BEAUTY_DET_OFFSET=dx,dy` 把掩码整体平移 d 像素，静态抓图相减 → 「≥1/2/4/8 灰阶各占多少面积、改动区平均/最大灰阶」，`d=0` 重复跑做阴性对照；**`mask_cost.py --cfg X --lag out/masklag_curve.json`**：把逐帧偏移喂进上面的曲线 → 「平均每帧脸上多大面积差几个灰阶」，并按 `detAdaptStill` 分档 | 是（要 OBS + `BEAUTY_DET_OFFSET`） |
+| **人眼 A/B（9.35，2.13.0）** | **`make_ab_clip.py`**：造 A/B 素材 —— 从 `assets/cam_real_1080x1920.mp4` 取最坏段 `[1421,1661)`，前置黑/红/绿三连同步锚，并在**每帧右下角烧 8 位帧号条码**（`stamp_code` / `read_code`，白=1 黑=0，灰=不可靠返回 −1）；**`ab_record.py --cfg combo --arms max rms rms4`**：起 OBS 逐臂录（无损 I444，见下）；**`ab_match.py --a A.mp4 --b B.mp4`**：**按帧号条码配对**（不是按时间，避开两臂起点差 2.5 帧与各自的重复/跳帧），输出 ≥4/≥8 灰阶面积、单帧最大差、均值差，并报告各臂时间线的重复/跳帧；**`ab_make.py`**：出 `ab_side`/`ab_face`/`ab_flicker`/`ab_slow`/`ab_brow`/`ab_diff_x20` 六支片，可直接给人眼判；**`ab_keys.py`**：抽最差/中位/最静关键帧图；**`ab_ladder.py`**：可见度标尺 —— 按实测 σ 在真帧上叠 0/半幅/实幅/2 倍/4 倍高斯鼓包，1:1 与 2 倍横排，把「差几个灰阶」换成「多大才看得见」。`ab_align*.py` 是三种失败的对齐尝试（**已废弃，只留作记录**：单帧匹配/序列互相关/DP，DP 会因匹配区静止给出残差 0.055 的假象） | 录制：是；其余：否 |
+| 录制前要改的 profile（人眼 A/B 专用） | `basic.ini`：`ColorFormat=NV12→I444`、`ColorRange=Partial→Full`、`RecEncoder=none→obs_nvenc_h264_tex` + `RecQuality=Lossless`。备份 `basic.ini.bak_i444`。**同臂两次逐像素差为 0** 是这套设置的验收线，改回有损编码前先复测噪声底 | — |
+| **帧节拍归因（9.35.7）** | **`pace_probe.py`**：量录制里源帧的真重复/跳帧。**两个口径必须分开**：真重复 = 码值相同 **且** 相邻帧像素差 < 0.2；码值相同但像素差 46–86 的是**条码误读**（`max` 臂 8 处全是这类）。归因臂在 `ab_record.py` 的 `ARMS` 里：`fix4`/`fix8`（`BEAUTY_MASK_EVERY=N` 会**自动关掉自适应**，把节奏钉死）、`rms30`（still=30）、`rms1`/`max64`（阈值对调，证明抖动跟 `dper` 走而不是跟 `agg` 走）。结论：重复率 ≈ 1/提交间隔，间隔为 1 时归零 | 录制：是 |
+| **闪烁 JND 标尺（9.35.8）** | **`ab_jnd.py`**：把「看不看得出」换成「从第几档看得见」。同位置同形状的高斯鼓包（σ 由 FWHM 63 px 反推）按 0/6/9/12/15/18/24/36 灰阶逐档闪（5 Hz，每档 3 s），1:1 裁切不缩放。**第 0 档是阴性对照**（两臂完全相同），它若也「看见闪烁」则整片作废。段长 4.5 s，所以第 n 档的闪烁起点是 `4.5×(n−1)+0.5` 秒。**`ab_amp.py`**：把标尺档位与实测差异放到同一把尺上（校验标尺片 + 对三对录制逐帧算带幅度） | 否 |
+| **幅度口径（务必统一，否则是两把尺子）** | 带幅度 = **逐像素取通道最大差 → 7×7 摊平 → 区域峰值**。同一对帧用灰度差会小 40%（12.76 vs 8.92），因为 `rms` 的掩码位移带动**色度**：一个通道涨、另一个跌，灰度加权后互相抵消。标尺上的鼓包是**三通道同加**的纯亮度变化，其通道最大 = 灰度差，所以只有通道最大口径能与标尺对齐。另注意：`ab_ladder`/`ab_jnd` 的「实幅」取的是**最差帧**，全序列中位数只有 7.04 | — |
 | 单项度量 | `mask_probe.py`（掩码/有脸/往返）、`cpu_probe.py`（OBS 进程占用核数）、`count_faces.py`（素材多脸占比）、`cam_probe.py`（摄像头劣化输入观测） | 前三者按用途：`count_faces.py` 否，其余是 |
+
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
 | 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md`，帧类型对比见 `out/logs/P0-9_geomonly_gate_20261103.md` | 是 |
 | GPU 祛斑边界差离线复算 | **`analyze_spot_edge.py`（2.9.1）**：P0-10 用。从 `BEAUTY_M1_DUMP_DIR` 落盘的原图 + 掩码离线复算 CPU（截断窗口）与 GPU（clamp 重复）两种盒均值实现，验证「差异不随 k 变化、贴在 ROI 底边 2 像素带」这一结构性特征。复算结果（177 px / maxdiff 4 / 平均偏差 2.23 / bbox 一致）与插件内实测逐项对上。属诊断工具，**不进装机** | 否 |

@@ -46,3 +46,6 @@ ehthumbs.db
 05_验证/baseline/*.dll
 05_验证/out/
 05_验证/assets/
+# 05_验证/tools：A/B 流水线的第三方二进制（ffmpeg.exe ~64 MB + ffpkg.tgz ~22 MB）。
+# 与「二进制不入库」同口径；无脚本硬编码该路径，需要时自备，见 05_验证/README.md。
+05_验证/tools/

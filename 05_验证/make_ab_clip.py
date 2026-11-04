@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""造「人眼 A/B」用的播放素材 + 专用 OBS 集合。
+
+为什么需要这个
+--------------
+两臂（max / rms）要各录一次屏，两次录制的起始时刻不可能对齐。所以素材开头
+放 4 帧**同步标记**（白/黑/红/绿），素材循环播放；录制时长覆盖一个完整循环，
+对齐时找这 4 帧就能求出相位差。
+
+为什么重编码可以接受
+--------------------
+两臂读的是**同一份**素材，编码损失是两臂共同的地基，不进入差异。用 FFV1
+（无损）只是为了别让编码噪声污染 S7 的判定值，不是为了画面本身。
+
+素材段的选择
+------------
+取 cam_real_1080x1920.mp4 的 [1421, 1661)（8.0 s @30fps）。这一段的挑选依据是
+mask_lag_sim 的逐帧数据：在 rms@8 口径下，它含全片最多的「rms 落后 ≥6 帧而
+max 只落后 ≤2 帧」的帧（76/240 = 31.7%，全片中位窗口约 22%），且偏移
+p90 = 15.6 px、max = 51.5 px。
+
+**用人眼 A/B 看最坏段，逻辑最硬**：如果最差段都看不出来，典型段必然看不出来。
+反过来不成立 —— 这一点写进结论时必须交代。
+
+用法
+----
+    py -3 make_ab_clip.py            # 造素材 + 建集合
+    py -3 make_ab_clip.py --check    # 只核对已有素材
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+
+import cv2
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "assets", "cam_real_1080x1920.mp4")
+DST = os.path.join(HERE, "assets", "ab_clip_1080x1920.avi")
+
+F0, F1 = 1421, 1661          # 8.0 s @30fps，见模块注释
+FPS = 30
+COLL_SRC = "beauty_real_cam_1080x1920"
+COLL_DST = "beauty_real_ab"
+
+# 同步标记：白 / 黑 / 纯红 / 纯绿（BGR）。四帧组合在真实画面里不可能出现，
+# 且用「每帧三通道的均值与方差」就能唯一识别，不依赖阈值调参。
+MARKS = [
+    np.full((1920, 1080, 3), 255, np.uint8),                      # 白
+    np.zeros((1920, 1080, 3), np.uint8),                          # 黑
+    np.dstack([np.zeros((1920, 1080), np.uint8)] * 2 +
+              [np.full((1920, 1080), 255, np.uint8)]),            # 红
+    np.dstack([np.zeros((1920, 1080), np.uint8),
+               np.full((1920, 1080), 255, np.uint8),
+               np.zeros((1920, 1080), np.uint8)]),                # 绿
+]
+
+
+def stamp_code(frame, n, bits=8):
+    """在帧右下角贴 8 格条码，bit i 写在第 i 格（白=1 黑=0）。
+
+    为什么需要帧号
+    --------------
+    两臂是两次独立录制，StartRecord 相对素材起播的延迟不可能相同 —— 实测
+    相差 **2.5 帧**（全局扫描在 +2 / +3 之间摆动）。整数帧对齐永远差半帧，
+    而说话时半帧就足以让嘴型差一大截。第一版正是被这个坑住：错位后统计出
+    「24% 脸部面积差 ≥4 灰阶」，其中绝大部分是对齐误差。
+
+    为什么用条码不用数字
+    --------------------
+    H.264 会把小字糊掉，但 8 个大色块在每个块内都是平坦的，压缩后仍能按
+    「格内均值 >155 / <100」稳定判读。它还能回答「哪一帧被重复或跳过了」。
+
+    位置选右下角：离脸（画面中上）远，不进美颜作用区，也不干扰人眼判断。
+    """
+    h, w = frame.shape[:2]
+    cw = 18
+    y0, y1 = h - 52, h - 10
+    x0 = w - bits * cw - 10
+    cv2.rectangle(frame, (x0 - 4, y0 - 4), (w - 2, y1 + 4), (0, 0, 0), -1)
+    for i in range(bits):
+        on = (n >> i) & 1
+        xa = x0 + i * cw
+        cv2.rectangle(frame, (xa + 1, y0), (xa + cw - 2, y1),
+                      (255, 255, 255) if on else (0, 0, 0), -1)
+    return frame
+
+
+def read_code(frame, bits=8):
+    """从录到的帧读条码，返回帧号；读不准（灰）返回 -1。"""
+    h, w = frame.shape[:2]
+    cw = 18
+    y0, y1 = h - 52, h - 10
+    x0 = w - bits * cw - 10
+    if y0 < 0 or x0 < 0:
+        return -1
+    v = 0
+    for i in range(bits):
+        xa = x0 + i * cw
+        cell = frame[y0 + 6:y1 - 6, xa + 4:xa + cw - 5]
+        if cell.size == 0:
+            return -1
+        m = float(cell.mean())
+        if 100.0 < m < 155.0:
+            return -1
+        if m >= 155.0:
+            v |= (1 << i)
+    return v
+
+
+def scenes_dir():
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
+    return os.path.join(appdata, "obs-studio", "basic", "scenes")
+
+
+def build_clip():
+    if not os.path.isfile(SRC):
+        sys.exit("源素材不存在：%s" % SRC)
+    cap = cv2.VideoCapture(SRC)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, F0)
+
+    tmp = DST + ".part.avi"
+    wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"FFV1"), FPS, (w, h))
+    if not wr.isOpened():
+        sys.exit("FFV1 写盘打不开")
+
+    for m in MARKS:
+        wr.write(m if m.shape[:2] == (h, w) else cv2.resize(m, (w, h)))
+    got = 0
+    for i in range(F1 - F0):
+        ok, fr = cap.read()
+        if not ok:
+            sys.exit("源素材在第 %d 帧提前结束" % (F0 + i))
+        # 内容帧烧帧号条码；标记帧保持纯色（否则「三连识别」会失效）
+        wr.write(stamp_code(fr, got))
+        got += 1
+    wr.release()
+    cap.release()
+
+    if os.path.exists(DST):
+        bak = DST + ".old"
+        try:
+            os.replace(DST, bak)
+        except OSError:
+            pass
+    os.replace(tmp, DST)
+
+    # 写盘后必须回读核对：帧数、尺寸、标记帧是否就在开头、条码是否读得回来
+    cap = cv2.VideoCapture(DST)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    marks = []
+    for i in range(len(MARKS)):
+        ok, fr = cap.read()
+        if not ok:
+            sys.exit("回读失败：第 %d 帧" % i)
+        marks.append(tuple(int(x) for x in np.array(cv2.mean(fr)[:3]).round()))
+    # 挑几个内容帧验条码（0 / 1 / 100 / 239）
+    codes = {}
+    for n_content in (0, 1, 100, got - 1):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, len(MARKS) + n_content)
+        ok, fr = cap.read()
+        if ok:
+            codes[n_content] = read_code(fr)
+    cap.release()
+
+    sz = os.path.getsize(DST) / 1e6
+    print("素材：%s" % DST)
+    print("  帧数 %d（应为 %d = %d 标记 + %d 内容）、%dx%d、%.1f MB、%.2f s/循环"
+          % (n, len(MARKS) + got, len(MARKS), got, w, h, sz,
+             n / float(FPS)))
+    print("  前 %d 帧均值 BGR：%s" % (len(MARKS), marks))
+
+    ok_n = (n == len(MARKS) + got)
+    ok_m = (marks[0] == (255, 255, 255) and marks[1] == (0, 0, 0)
+            and marks[2][2] > 250 and marks[2][0] < 5
+            and marks[3][1] > 250 and marks[3][2] < 5)
+    ok_c = (len(codes) == 4 and all(k == v for k, v in codes.items()))
+    print("  条码回读：%s（读出的帧号 %s）" % ("OK" if ok_c else "MISMATCH", codes))
+    print("  核对：帧数 %s、标记 %s、条码 %s"
+          % ("OK" if ok_n else "MISMATCH", "OK" if ok_m else "MISMATCH",
+             "OK" if ok_c else "MISMATCH"))
+    if not (ok_n and ok_m and ok_c):
+        sys.exit(1)
+
+
+def build_collection():
+    src = os.path.join(scenes_dir(), COLL_SRC + ".json")
+    dst = os.path.join(scenes_dir(), COLL_DST + ".json")
+    if not os.path.isfile(src):
+        sys.exit("找不到参考集合：%s" % src)
+    d = json.load(open(src, encoding="utf-8"))
+    hit = 0
+    for s in d.get("sources", []):
+        st = s.get("settings") or {}
+        for k in ("local_file", "playlist"):
+            v = st.get(k)
+            if isinstance(v, str) and v.lower().endswith((".mp4", ".avi", ".mkv")):
+                st[k] = DST.replace("\\", "/")
+                hit += 1
+    if not hit:
+        sys.exit("参考集合里没有可替换的媒体路径")
+    # OBS 按 json 里的 `name` 认集合，不是按文件名。复制过来不改这里，按名字
+    # 找不到就会静默落到上一次用的集合上（实测拿到的是 image_source，画面静止、
+    # 帧间差 0）—— 这个症状很像「素材没播」，很容易误诊。
+    d["name"] = COLL_DST
+    if os.path.exists(dst) and not os.path.exists(dst + ".bak"):
+        shutil.copy2(dst, dst + ".bak")
+    with open(dst, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, ensure_ascii=False, indent=4)
+    print("集合：%s（替换 %d 处媒体路径）" % (dst, hit))
+
+
+def check():
+    if not os.path.isfile(DST):
+        sys.exit("素材不存在：%s" % DST)
+    cap = cv2.VideoCapture(DST)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    print("%s：%d 帧 @%.0ffps %dx%d，%.2f s/循环"
+          % (os.path.basename(DST), n, fps, w, h, n / max(1.0, fps)))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="只核对，不重造")
+    a = ap.parse_args()
+    if a.check:
+        check()
+        return
+    build_clip()
+    build_collection()
+
+
+if __name__ == "__main__":
+    main()
