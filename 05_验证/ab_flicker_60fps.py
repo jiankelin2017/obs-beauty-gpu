@@ -123,6 +123,27 @@ def check_encode(dst, picks):
     return worst, n
 
 
+def blank_code(frame, bits):
+    """把右下角帧号条码涂黑。
+
+    为什么必须能关掉（2026-11-04，判读翻车后补）
+    ------------------------------------------
+    条码每帧都在变，实测该区域均值在 74 / 90 / 106 三个值之间逐帧跳，
+    单帧跳变 **15–30 灰阶**，面积 172×46 px。这比臂间差异（0–12 灰阶）
+    大一个量级，而且是一块纯黑白的硬边方块 —— 人眼 A/B 里「看到闪烁」
+    极可能来自它，不是脸。
+
+    条码是给机器配对用的，判读时它是纯粹的污染源：必须能关。
+    """
+    f = frame.copy()
+    h, w = f.shape[:2]
+    cw = 18
+    y0 = h - 56
+    x0 = w - bits * cw - 16
+    f[max(0, y0):, max(0, x0):] = 0
+    return f
+
+
 def burst_seq(amp_name, thr, pad, loop_n):
     """从 `amp_*.json` 里挑出超门限的帧，取它们所在的连续片段，循环若干遍。
 
@@ -177,6 +198,13 @@ def main():
     ap.add_argument("--thr", type=float, default=6.0, help="超门限判据（灰阶）")
     ap.add_argument("--pad", type=int, default=8, help="片段前后各扩几帧")
     ap.add_argument("--loop", type=int, default=4, help="片段循环几遍")
+    ap.add_argument("--blank-code", action="store_true",
+                    help="涂黑右下角帧号条码（判读专用；条码每帧跳 15–30 灰阶，会压倒信号）")
+    ap.add_argument("--frozen", default=None,
+                    help="冻结帧模式：max=取差异最大帧 / zero=取零差异帧（阴性对照）/ 数字=指定帧号。"
+                         "内容完全静止、条码也不变，只剩臂间差异，是灵敏度上限的干净测法")
+    ap.add_argument("--seconds", type=float, default=10.0,
+                    help="冻结帧模式的时长（秒）")
     a = ap.parse_args()
 
     fa = scan(os.path.join(OUT, a.a), a.bits)
@@ -185,7 +213,29 @@ def main():
     if len(common) < 30:
         raise SystemExit("可配对帧太少（%d）" % len(common))
 
-    if a.from_amp:
+    if a.frozen is not None:
+        if not a.from_amp:
+            raise SystemExit("--frozen 需要同时给 --from-amp（用它的 per_frame 挑帧）")
+        j = json.load(open(os.path.join(OUT, a.from_amp), encoding="utf-8"))
+        codes, pf = j["codes"], j["per_frame"]
+        if a.frozen == "max":
+            i = int(np.argmax(pf))
+        elif a.frozen == "zero":
+            zs = [k for k, v in enumerate(pf) if v <= 0.0]
+            if not zs:
+                raise SystemExit("%s 里没有零差异帧，无法做阴性对照" % a.from_amp)
+            i = zs[len(zs) // 2]
+        else:
+            want = int(a.frozen)
+            if want not in codes:
+                raise SystemExit("帧号 %d 不在配对集里" % want)
+            i = codes.index(want)
+        code = codes[i]
+        n = int(a.fps * a.seconds)
+        seq = [code] * n
+        print("冻结帧：帧号 %d，原始峰值 %.2f 灰阶，%d 帧（%.1f s，每 %d 帧切）"
+              % (code, pf[i], n, a.seconds, a.switch))
+    elif a.from_amp:
         seq, wins = burst_seq(a.from_amp, a.thr, a.pad, a.loop)
         if not seq:
             raise SystemExit("%s 里没有 >%.0f 灰阶的帧" % (a.from_amp, a.thr))
@@ -209,10 +259,11 @@ def main():
     picks = {}
     for i, c in enumerate(seq):
         src = fa if (i // a.switch) % 2 == 0 else fb
-        p.stdin.write(src[c].tobytes())
+        out = blank_code(src[c], a.bits) if a.blank_code else src[c]
+        p.stdin.write(out.tobytes())
         # 采样：开头 12 帧（含相位切换点）+ 每 40 帧 + 最后 3 帧
         if i < 12 or i % 40 == 0 or i >= len(seq) - 3:
-            picks[i] = src[c]
+            picks[i] = out
     p.stdin.close()
     rc = p.wait()
     if rc != 0:
