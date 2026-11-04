@@ -7,6 +7,8 @@ REM  What this turns on:
 REM    BEAUTY_ENGINE_IMPL=gpu    GPU engine (MANDATORY - see 2.1.1 note)
 REM    BEAUTY_SHADER_DIR=...     shader weight-free install dir
 REM    BEAUTY_GPU_REGION=1      GPU five-region segment (mouth/law-line/spot)
+REM                             (2.14.0: ON by default; =0 is now the fallback.
+REM                              Kept explicit here so the log line is unambiguous.)
 REM    BEAUTY_GPU_FRAME_RING=1  VRAM frame ring (skips the aligned upload)
 REM    BEAUTY_REGION_CMP=1      one-shot GPU-vs-CPU region diff line in the log
 REM    BEAUTY_PROFILE=1         the 'perf' / 'seg' lines every 6 s

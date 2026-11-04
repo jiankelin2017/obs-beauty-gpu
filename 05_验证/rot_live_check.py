@@ -8,6 +8,8 @@
 走全帧检测（上一帧没被链全认领 / 多脸 / mirror / 首帧），`input_rot` 完全不起作用。
 最容易踩的是**开了五官参数、但 BEAUTY_GPU_REGION 没开**：REGION 段落 CPU → 本帧
 不是全段认领 → `chain_out_valid=0` → 缩略图路径永不启用 → 旋转失效。
+（2.13.1 起该失效本身已修 —— 旋转进了全帧路径；2.14.0 起 `GPU_REGION` 默认开，
+所以本脚本在 start_obs 里**显式设 `=0`**，保留「最苛刻条件」这个测试语义。）
 
 2.10.0 的实测记录（`out/logs/input_rot_2.10.0_20261104.md` §4.2）写着：
 同样一张正脸躺放素材，`input_rot=0/90/270` 三臂输出**逐字节相同**。
@@ -212,10 +214,12 @@ def main(argv=None):
     else:
         if V.obs_running():
             sys.exit("obs64 已在运行，先关掉（或加 --attach）")
-        env_extra = {"BEAUTY_GPU": "1", "BEAUTY_PROFILE": "1"}
-        env_extra.pop("BEAUTY_GPU_REGION", None)   # 明确不设：这正是失效条件
+        env_extra = {"BEAUTY_GPU": "1", "BEAUTY_PROFILE": "1",
+                     "BEAUTY_GPU_REGION": "0"}
+        # 2.14.0：GPU_REGION 已翻默认开。旧写法是「不设」（当时不设=关）；
+        # 现在不设=开，同一语义必须显式写成 "0"，否则这一臂悄悄换了条件。
         proc, _ = V.start_obs(args.collection, extra_env=env_extra)
-        print("已启动 OBS（collection=%s, BEAUTY_PROFILE=1, 未设 BEAUTY_GPU_REGION）"
+        print("已启动 OBS（collection=%s, BEAUTY_PROFILE=1, BEAUTY_GPU_REGION=0）"
               % args.collection)
 
     try:

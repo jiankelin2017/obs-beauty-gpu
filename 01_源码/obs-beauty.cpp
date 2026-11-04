@@ -745,16 +745,34 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 		const int dly = rd ? atoi(rd) : 0;
 		f->region_cmp_delay = (dly < 0) ? 0 : (dly > 900 ? 900 : dly);
 	}
-	// 4d：GPU 五官进生产链。**默认关**，`BEAUTY_GPU_REGION=1` 才进 GPU 五官；
-	// 不设/设 0 = CPU 五官（老路）。
+	// 4d：GPU 五官进生产链。2.14.0 起**默认开**，只认 `BEAUTY_GPU_REGION=0`
+	// 退回 CPU 五官（老路）。不设 / 设 1 / 写错都落在「开」侧。
 	{
-		// 为什么还是关（2.8.1 已修掉 54–58 ms 那条崩溃主因）：4K 有一次 R1
-		// maxdiff=2，缺「能证明等价」的判据 —— 截图对拍在 geomOnly 路径不成立
-		// （PROGRESS §9.19），同帧自检只在 5 个样本 × 2 个分辨率上 maxdiff≤1
-		// （§9.20.2）。判据补齐之前只作为 opt-in。
+		// 为什么 2.8.x 一直保持 opt-in：4K 有一次 R1 maxdiff=2，缺「能证明
+		// 等价」的判据 —— 截图对拍在 geomOnly 路径不成立（PROGRESS §9.19），
+		// 同帧自检只在 5 个样本 × 2 个分辨率上 maxdiff≤1（§9.20.2）。
+		// 2.9.1 的 P0-10 把这个 4K 差异压到 1 像素 / 1 灰阶，判据可用。
+		//
+		// 翻默认的依据（T10-b，2026-11-04，PROGRESS §9.37）：13 格矩阵全 PASS
+		// —— 720p/4K × 立体/亮眼/眼袋/法令纹/祛斑/五族全开 × 强度 50/100，
+		// 外加真人视频 6 帧；判据 E1 maxdiff≤1、E5 静态格内极差=0，实测最坏
+		// 1 灰阶、最多 31 像素。多脸（faceCount≠1）两臂逐字节相同，属
+		// `beauty_region_chain` 的设计内回退（返回 NULL → 本帧五官留给 CPU）。
+		//
+		// 只认 '0' 关：拼错/空值都落在「开」侧，避免一个手误静默退回慢路径
+		// 却没人发现（旧写法 `== '1'` 是反过来的风险）。
 		const char *gr = getenv("BEAUTY_GPU_REGION");
-		f->gpu_region = (gr && gr[0] == '1') &&
+		f->gpu_region = !(gr && gr[0] == '0') &&
 				beautyEngine().supportsGpu();
+		// 一次性状态行：实机验收只要在日志里搜 "五官段" 就能确认本机跑的是
+		// 哪条路，不必再去猜环境变量有没有生效。
+		blog(LOG_INFO,
+		     "[" PLUGIN_NAME "] 五官段（REGION）：%s（%s）",
+		     f->gpu_region ? "GPU 生产链" : "CPU 老路",
+		     f->gpu_region ? "默认开，BEAUTY_GPU_REGION=0 可退回"
+				   : (beautyEngine().supportsGpu()
+					      ? "BEAUTY_GPU_REGION=0 显式关闭"
+					      : "引擎未提供 GPU 链，自动退回"));
 	}
 	// 2.11.0（方案C）：运动判定搬 GPU + 缩略图按提交帧回读。
 	// 默认**关**：它改变的是「检测输入什么时候被回读」，属于节流而不是新算法，

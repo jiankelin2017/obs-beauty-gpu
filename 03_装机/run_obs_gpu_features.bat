@@ -21,6 +21,7 @@ echo [2/3] Setting GPU flags + opt-in features under test...
 set BEAUTY_ENGINE_IMPL=gpu
 set BEAUTY_SHADER_DIR=D:/obs_beauty_gpu/shaders
 set BEAUTY_PROFILE=1
+REM 2.14.0: GPU_REGION is ON by default now; set explicitly for a clean log line.
 set BEAUTY_GPU_REGION=1
 set BEAUTY_GPU_FRAME_RING=1
 echo   BEAUTY_ENGINE_IMPL     = %BEAUTY_ENGINE_IMPL% >> "%DBG%"

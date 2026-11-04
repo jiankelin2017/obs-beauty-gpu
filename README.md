@@ -3,7 +3,12 @@
 > **一句话**：把一个原本全在 CPU 上的五段人脸美颜，整体搬到 GPU 的 OBS 滤镜。
 > 生产默认路径 **4K 往返 ≈2.3–2.8 ms**、**720p ≈0.8–1.5 ms**（移植前 4K 是 81 ms / 约 7 fps）。
 >
-> - **装机 + 已验收：2.13.1**（`MD5 E94B4961F8153EFACD159B073B22149A`，585,728 B）—— 装机 / `02_构建` / `07_安装包` 三处逐字节一致（`Setup.exe` `2F04AE7A…`）；`check_release.py` 九项全 PASS
+> - **装机 + 已验收：2.14.0**（`MD5 2BCE8C967956FAC72F337D482CF75CC6`，585,728 B）—— 装机 / `02_构建` / `07_安装包` 三处逐字节一致（`Setup.exe` `76A4E6EF…`）；`check_release.py` 九项全 PASS
+> - **2.14.0 是默认行为变化（本分支第一处）**：五官段 `BEAUTY_GPU_REGION` 由「默认关、认 `=1`」翻成
+>   「**默认开、只认 `=0`**」，不设环境变量的用户从此默认走 GPU 五官。
+>   依据 T10-b 的 13 格等价矩阵（13/13 PASS，最坏 **1 灰阶 / 31 像素**，`PROGRESS §9.37`）；
+>   多脸（`faceCount≠1`）仍自动回退 CPU，**画面与之前逐字节相同**。
+>   开关两侧实机日志都验过（`§9.39`）；回退只需 `BEAUTY_GPU_REGION=0`，不必换 dll。
 > - **2.13.1 修掉 N1（输入旋转静默失效）**：旋转提到 `letterboxRgb` 之前做进重采样，**全帧回退路径也会转**了，
 >   不再依赖 S4b 缩略图路径。`rot=0` 仍走原函数，四个黄金基准 `maxdiff=0`。
 >   实机验收（正面机位 + 真人，`PROGRESS §9.36`）：`有脸` **100% / 1% / 2% / 0%**（`ir=0/90/180/270`，两轮独立采样同结论）——
@@ -102,8 +107,8 @@
 
 | # | 现象 | 触发条件 | 影响 | 现状 / 回退 |
 |---|---|---|---|---|
-| N1 | ~~**输入方向（`input_rot`）不生效且无提示**~~ **2.13.1 已修** | 原触发条件：走全帧检测的帧（多脸 / `DETECT_SMALL=0` / `ASYNC_STAGE=1` / 镜像 / 上一帧未被链全认领）；**或开了任一五官参数**（`GPU_REGION` 默认关 → REGION 落 CPU → 非全段认领）。现因旋转已提前到 `letterboxRgb` 之前，上述路径同样生效 | 修复前面临：竖屏摄像头用户以为设了旋转就对齐，实际掩码/五官全在错位置，且没有任何报错 | 2.10.1 打过一次性 WARN；**2.13.1 真修**（`§9.36`，实机两轮采样）。方向（90 vs 270）的正确性沿用 2.10.0 已验证的同一套变换式 |
-| N2 | **五官段（4K 5.6×）默认拿不到** | `BEAUTY_GPU_REGION` 是 opt-in | 开五官参数时整帧回到 CPU 路径。稳定性早已不是阻塞（4K 60 min / 65160 帧零异常，`§9.12.4`；2.8.1 又把 54–58 ms 的主因修掉，`§9.17`），**缺的是等价判据**：只有 5 样本 × 2 分辨率的 `maxdiff≤1`（§9.20.2） |
+| N1 | ~~**输入方向（`input_rot`）不生效且无提示**~~ **2.13.1 已修** | 原触发条件：走全帧检测的帧（多脸 / `DETECT_SMALL=0` / `ASYNC_STAGE=1` / 镜像 / 上一帧未被链全认领）；**或开了任一五官参数**（当时 `GPU_REGION` 默认关 → REGION 落 CPU → 非全段认领）。现因旋转已提前到 `letterboxRgb` 之前，上述路径同样生效 | 修复前面临：竖屏摄像头用户以为设了旋转就对齐，实际掩码/五官全在错位置，且没有任何报错 | 2.10.1 打过一次性 WARN；**2.13.1 真修**（`§9.36`，实机两轮采样）。方向（90 vs 270）的正确性沿用 2.10.0 已验证的同一套变换式 |
+| N2 | ~~**五官段（4K 5.6×）默认拿不到**~~ **2.14.0 已解决** | 原触发条件：`BEAUTY_GPU_REGION` 是 opt-in（默认关） | 当时开五官参数会整帧回到 CPU 路径，4K 往返 5.6×。稳定性早已不是阻塞（4K 60 min / 65160 帧零异常，`§9.12.4`；2.8.1 又把 54–58 ms 的主因修掉，`§9.17`），**真正缺的是等价判据**（旧只有 5 样本 × 2 分辨率的 `maxdiff≤1`，§9.20.2） | **2.14.0 翻默认开**：依据 T10-b 13 格矩阵（13/13 PASS，最坏 1 灰阶 / 31 像素，`§9.37`）。多脸仍回退 CPU（设计边界，见 N3）；超小脸与真侧脸未覆盖，但翻默认不改变这两项走的路径。回退：`BEAUTY_GPU_REGION=0`（`§9.39`） |
 | N3 | **多脸场景收益归零** | 画面里 ≥2 张脸 | 缩略图检测与显存帧环都要求单脸 → 全部绕开，退回全帧回读；`input_rot` 同时失效 | 设计边界；素材统计多脸只占 1.59%，不立项（§9.18.2） |
 | N4 | 开箱即改画面 | 磨皮默认 **20** | 「默认零影响」只对参数全 0 成立，不是装上不变 | 有意为之；要零影响把磨皮拖到 0 |
 | N5 | 竖屏/横竖混用时观感像「被拉伸」 | 画布 1080×1920 + 源 1280×720 + 场景项框 = 画布尺寸 | 与滤镜无关，是场景项几何；历史上被误判成滤镜 bug 查了三轮 | 见 §三「BUG 3 更正」；滤镜侧无解 |
@@ -182,7 +187,7 @@ powershell -ExecutionPolicy Bypass -File 07_安装包\build_setup.ps1
 | 磨皮 | `blur_level` | **20** | 0–100 |
 | 清晰 / 美白 / 红润 | `clarity` / `color_level` / `red_level` | 0 | 色调段 |
 | 锐化 / 全局锐化 | `sharpen` / `global_sharpen` | 0 | 细节段 |
-| 五官立体 / 亮眼 / 去黑眼圈 / 去法令纹 / 祛斑痘 | `face_threed` / `eye_bright` / `remove_pouch_strength` / `remove_nasolabial_folds_strength` / `delspot_level` | 0 | 五官段（GPU 化是 opt-in） |
+| 五官立体 / 亮眼 / 去黑眼圈 / 去法令纹 / 祛斑痘 | `face_threed` / `eye_bright` / `remove_pouch_strength` / `remove_nasolabial_folds_strength` / `delspot_level` | 0 | 五官段（**2.14.0 起 GPU 默认开**，`GPU_REGION=0` 退回 CPU） |
 | 瘦脸 / 大眼 / 下巴 | `thin_face` / `big_eye` / `chin` | 0 | 美形段 |
 | 磨皮算法 | `blur_type` | 1（双边） | 0 高斯 / 2 弱磨皮 |
 | 磨皮模式 | `smooth_mode` | 0（人像） | 1 清晰 / 2 精细 / 3 朦胧 |
@@ -196,8 +201,8 @@ powershell -ExecutionPolicy Bypass -File 07_安装包\build_setup.ps1
 
 | 层 | 开关 | 默认 |
 |---|---|---|
-| 生产链 | `GPU_SMOOTH_PROD` / `GPU_MASK` / `CHAIN_PROD` / `CHAIN_OUT` / `GPU_FRAME_RING` / `DETECT_SMALL` / `ALLZERO_SKIP` / `NOFACE_SKIP` / `ASYNC_DETECT` / `DET_ADAPT` | **开**（只认 `=0` 关） |
-| opt-in | `GPU_REGION`（五官）/ `ASYNC_STAGE`（S3）/ `MOTION_GPU`（2.11.0 方案C）/ `DET_ADAPT_AGG=rms`（2.12.0） | **关**（只认 `=1` / 字面量开） |
+| 生产链 | `GPU_SMOOTH_PROD` / `GPU_MASK` / `CHAIN_PROD` / `CHAIN_OUT` / `GPU_FRAME_RING` / `DETECT_SMALL` / `ALLZERO_SKIP` / `NOFACE_SKIP` / `ASYNC_DETECT` / `DET_ADAPT` / **`GPU_REGION`（2.14.0 起）** | **开**（只认 `=0` 关） |
+| opt-in | `ASYNC_STAGE`（S3）/ `MOTION_GPU`（2.11.0 方案C）/ `DET_ADAPT_AGG=rms`（2.12.0） | **关**（只认 `=1` / 字面量开） |
 | 诊断 | `PROFILE` / `GPU_TONE` / `GPU_SMOOTH` / `GPU_DETAIL` / `GPU_WARP` / `GPU_MASK_CMP` / `REGION_CMP` / `CHAINOUT_CMP` / `SPOT_DEBUG` / `THUMB_DUMP` / `M1_DUMP_DIR` / `REGION_GEOM` / `MOT_DUMP`（2.11.1）/ `DET_OFFSET`（2.13.0，**会改画面**） | 关 |
 
 逐项含义与回退见 [`04_文档/开关总表.md`](04_文档/开关总表.md)（47 条主开关 + 面板控件）。

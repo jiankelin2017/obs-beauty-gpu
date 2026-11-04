@@ -43,13 +43,16 @@ CANVAS_4K = (3840, 2160)
 # 长跑时的负载：尽量把链上各段拉起来，让对齐换帧频繁发生，帧环才会被真正
 # 反复使用（空转 30 分钟等于没测）。
 #
-# 为什么**默认不带五官参数**：五官段（REGION）目前是 opt-in，没开时
+# 为什么**默认不带五官参数**：五官段（REGION）在 2.14.0 之前是 opt-in，没开时
 # `region_blocks=true` 会连带把细节与美形一起交回 CPU（obs-beauty.cpp:3839，
 # 注释写明「不是 bug，是 5c 的作用范围」）。带上五官后 4K 实测引擎 26.5 ms、
 # 往返 38.5 ms，S2 的性能门槛（≤9.0 ms）就没法判了。所以：
 #   默认        → 磨皮/色调/细节/美形（S/T/D/W 都能认领）——用于判 S2 性能门槛
 #   --region-params → 再加五官参数（D/W 回落 CPU，真实用户场景，慢）
 #   --with-region   → 再开 BEAUTY_GPU_REGION=1（T10 那条合并崩溃场景）
+# ⚠ 2.14.0 起 GPU_REGION **默认是开的**。所以 env_for() 现在**两侧都显式写**：
+#   不带 --with-region 时写 "0"，否则这一路会从「五官落 CPU」悄悄变成「走 GPU」，
+#   与 2.14.0 之前的历史对拍就不可比了。
 # ⚠ 单位是**面板刻度 0..100**，不是 0..1。
 # `beauty_params.h` 的 g_params 写得很清楚：「面板刻度统一 0..100，max_val 是
 # 面板 100 对应的内部量程（value = panel / 100 * max_val）」。引擎侧一律按
@@ -100,8 +103,9 @@ def env_for(ring=1, with_region=False, profile=True):
     e = {"BEAUTY_GPU_FRAME_RING": "1" if ring else "0"}
     if profile:
         e["BEAUTY_PROFILE"] = "1"
-    if with_region:
-        e["BEAUTY_GPU_REGION"] = "1"
+    # 2.14.0：GPU_REGION 翻默认开后，这里必须**两侧都写**。"不设" 的含义已经
+    # 从「关」变成「开」，沿用旧写法会让 --region-params 这一臂悄悄换路径。
+    e["BEAUTY_GPU_REGION"] = "1" if with_region else "0"
     return e
 
 
