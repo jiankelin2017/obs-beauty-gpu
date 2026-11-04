@@ -18,6 +18,10 @@
                                  而不是更高：1080p 的 1% = 2 万像素，已足够证明
                                  「真的碰到了像素」；真人素材的脸只占画面 4%，
                                  用 5% 会把合法样本误杀（第一次跑就是这么错的）。
+                                 **超小脸格例外**：掩码覆盖只有 0.4%，必然低于 1%。
+                                 这些格在 `MIN_COV` 里单独标下限
+                                 （0.2~0.3%），仍能挡住空掩码 —— E2 的本意是
+                                 「别拿全零掩码假通过」，不是「覆盖率必须 1%」。
   E3 每格至少 1 个样本来自 GPU 掩码 —— 否则验的是 CPU 掩码，geomOnly 路径没碰到。
   E4 参数确实进了链            —— 按族核对 `els[0]/els[1]/spot` 的存在性，
                                  防「参数没下发、量到上一次会话」。
@@ -30,6 +34,18 @@
 「不同格」：不同族、不同强度、不同分辨率、不同素材。所以判据按**格**统计，
 不把 3 帧当 3 个独立证据。视频那一格（真人素材）的样本才是逐帧独立的。
 
+超小脸为什么单独成格（§9.41）
+----------------------------
+`beauty_region.cpp` 的施加循环有两处 `if (rx < 0.5f || ry < 0.5f) continue;`
+（主椭圆与法令纹各一处），而 GPU 侧拿到的是**归一化** `rx/ry`（
+`beauty_core.cpp:4180` 原样拷贝），shader 自己乘脸宽算像素半径、没有这条短路。
+所以理论上存在分叉。但触发条件是 `rx*faceW < 0.5`，最小系数 `rx=0.050`（鼻梁）
+→ **脸宽 < 10 px**；`ry=0.055`（亮眼）→ 脸高 < 9 px。YuNet 在 1080p 上检不出
+这个量级的脸（实测 160w 档、掩码覆盖推算约 0.18% 时已 `faces=0`），所以这条短路在产品
+路径上**不可达**，离线台也没有注入 face box 的接口、构造不出来。
+实测边界：掩码覆盖 0.4% / 0.7% / 1.4% 三档 `maxdiff=0`，最小椭圆像素半径仍有 5 px 量级。
+（注意「掩码覆盖」是肤色掩码面积占画面比，小于脸框面积；240w 档约 0.4%，对应脸宽百像素级。）
+
 多脸为什么不在判据里
 ------------------
 `beauty_region_chain()` 第一行就 `rg.faceCount != 1 → return NULL`，五官段退回 CPU
@@ -39,9 +55,10 @@
 
 用法
 ----
-    py -3 05_验证/verify_region_equiv.py              # 全矩阵（约 6 分钟）
+    py -3 05_验证/verify_region_equiv.py              # 全矩阵（约 8 分钟）
     py -3 05_验证/verify_region_equiv.py --quick      # 立体 + 全开（约 3 分钟）
     py -3 05_验证/verify_region_equiv.py --match 遮挡  # 只补遮挡那一格
+    py -3 05_验证/verify_region_equiv.py --match 超小脸 # 只补超小脸三格
     py -3 05_验证/verify_region_equiv.py --multiface  # 只验多脸回退
     py -3 05_验证/verify_region_equiv.py --dry-run    # 只打印矩阵，不起 OBS
 
@@ -88,7 +105,21 @@ CELLS = [
     # 补的是 §9.37.6 未验项 2 里「动态/遮挡」这一半（侧脸那半仍未覆盖）。
     ("1920x1080", "beauty_real_cam_occ1080", None, 50, 6,
      "真人视频·遮挡段 6 帧"),
+    # 超小脸格（2026-11-04，§9.41）：素材是 face_front_4k.png 等比缩到 W 宽
+    # 再 pad 到 1920×1080 黑底，脸占画面分别是 1.4% / 0.7% / 0.4%。
+    # 补的是 §9.37.6 未验项 1。第四档 160w（0.17%）不进矩阵 —— 它 `faces=0`，
+    # 本来就不是等价问题，是用来证明「检测先于五官失效」的阴性对照。
+    ("1920x1080", "beauty_tinyface0480", "threed", 60, 3, "超小脸 480w（掩码 1.4%）"),
+    ("1920x1080", "beauty_tinyface0320", "threed", 60, 3, "超小脸 320w（掩码 0.7%）"),
+    ("1920x1080", "beauty_tinyface0240", "threed", 60, 3, "超小脸 240w（掩码 0.4%）"),
 ]
+
+# 超小脸格的 E2 下限。掩码覆盖只有 0.4%，不可能到 1%；
+# 取实测值的一半左右作下限，既能挡住空掩码（0%），又不会误杀合法小脸样本。
+MIN_COV = {
+    "beauty_tinyface0320": 0.3,
+    "beauty_tinyface0240": 0.2,
+}
 
 QUICK = [c for c in CELLS if c[2] in ("threed",) or c[2] is None]
 
@@ -104,9 +135,10 @@ def grade(cell, ver, samples, sem):
     worst = max(s["maxdiff"] for s in samples)
     if worst > 1:
         why.append("E1 maxdiff=%d >1" % worst)
-    low = [s for s in samples if s["mask_pct"] < 1.0]
+    low = [s for s in samples if s["mask_pct"] < MIN_COV.get(coll, 1.0)]
     if low:
-        why.append("E2 覆盖率 %.2f%% <1%%（空掩码假通过）" % low[0]["mask_pct"])
+        why.append("E2 覆盖率 %.2f%% <%.2f%%（空掩码假通过）" % (
+            low[0]["mask_pct"], MIN_COV.get(coll, 1.0)))
     if not any(s["mask_src"] == "GPU" for s in samples):
         why.append("E3 全部样本走 CPU 掩码，geomOnly 路径没验到")
     cfg = R.build_cfg(True, only, False, strength)
@@ -172,7 +204,8 @@ def report(rows, path):
     lines.append("- 生成：%s" % time.strftime("%Y-%m-%d %H:%M:%S"))
     vers = sorted({str(r["ver"]) for r in rows})
     lines.append("- 插件版本：%s" % ", ".join(vers))
-    lines.append("- 判据：E1 maxdiff≤1、E2 覆盖率≥1%、E3 至少一个 GPU 掩码样本、"
+    lines.append("- 判据：E1 maxdiff≤1、E2 覆盖率≥1%（超小脸格按 `MIN_COV` 放宽，"
+                 "见脚本头部 §9.41）、E3 至少一个 GPU 掩码样本、"
                  "E4 参数确实进链、E5 静态格内极差=0")
     lines.append("- 结论：**%d/%d 格 PASS**%s\n" % (
         len(ok), len(rows), "" if not bad else "，%d 格未过" % len(bad)))
