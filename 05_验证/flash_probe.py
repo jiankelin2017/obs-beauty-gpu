@@ -113,7 +113,17 @@ def main(argv=None):
     ap.add_argument("--json", metavar="PATH")
     ap.add_argument("--family", default="flash", choices=("flash", "drop"),
                     help="flash=空场里闪出人脸；drop=脸持续在场、每 60 帧消失 k 帧")
+    ap.add_argument("--coll", metavar="NAME",
+                    help="直接指定集合名（real 族等非 k 编号的集合用这个）；"
+                         "给了它就不再按 --ks 生成")
+    ap.add_argument("--canvas", metavar="WxH",
+                    help="画布尺寸，默认 1280x720；real 族是 1080x1920")
     args = ap.parse_args(argv)
+
+    global CANVAS
+    if args.canvas:
+        w, h = args.canvas.lower().split("x")
+        CANVAS = (int(w), int(h))
 
     if V.obs_running():
         print("OBS 正在运行，先关闭")
@@ -124,11 +134,12 @@ def main(argv=None):
     S.keep_awake(True)
     rows, out = [], []
     try:
-        for k in args.ks:
-            coll = "beauty_%s%d_720" % (args.family, k)
+        targets = ([(None, args.coll)] if args.coll else
+                   [(k, "beauty_%s%d_720" % (args.family, k)) for k in args.ks])
+        for k, coll in targets:
             for arm in args.arms:
-                print("\n==== k=%d / 臂=%s（%s, %ss）====" % (k, arm, coll,
-                                                            args.seconds))
+                print("\n==== k=%s / 臂=%s（%s, %ss）===="
+                      % ("-" if k is None else k, arm, coll, args.seconds))
                 log = run_one(coll, args.seconds, arms[arm])
                 if not log:
                     print("  !! 采集失败")
@@ -180,8 +191,8 @@ def main(argv=None):
             r = by_k[k].get(arm)
             if not r:
                 continue
-            print("%5d | %-3s | %8s | %5d/%d | %s"
-                  % (k, arm,
+            print("%5s | %-3s | %8s | %5d/%d | %s"
+                  % ("-" if k is None else k, arm,
                      "-" if r["faces_med"] is None else "%.1f" % r["faces_med"],
                      r["cold_windows"], r["windows"],
                      " ".join("-" if v is None else "%.0f" % v

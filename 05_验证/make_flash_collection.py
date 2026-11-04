@@ -13,6 +13,11 @@ drop 族（脸持续在场，每 60 帧消失 k 帧 —— 方案C 真正生效�
     beauty_drop2_720 : 2 帧（67 ms）
     beauty_drop4_720 : 4 帧（133 ms）
 
+real 族（2.11.1 补：真人出镜的**真实**素材，方案C 翻默认的最后一道前置）：
+    beauty_real_cam_1080x1920 : assets/cam_real_1080x1920.mp4，固定机位、单人正脸说话、
+                                 顶部有滚动字幕。1080x1920 竖屏，画布同尺寸（1:1 不缩放）。
+                                 与合成素材的区别：真实传感器噪声 + 真实压缩 + 真人运动。
+
 用法（OBS 必须关闭，否则退出时会把集合文件覆盖回去）：
     py -3 05_验证/make_flash_collection.py
 """
@@ -27,9 +32,11 @@ import make_static_collection as M   # noqa: E402
 KS = (0, 1, 2, 4, 8)
 DROP_KS = (1, 2, 4)
 CANVAS = (1280, 720)
+REAL_FILE = "cam_real_1080x1920.mp4"
+REAL_CANVAS = (1080, 1920)
 
 
-def build(name, avi):
+def build(name, avi, canvas=CANVAS):
     p = os.path.join(M.ASSETS, avi)
     if not os.path.isfile(p):
         sys.exit("缺素材: %s（先跑 make_flash_assets.py）" % p)
@@ -94,9 +101,9 @@ def build(name, avi):
     scene["name"] = M.SCENE_NAME
     scene["uuid"] = M.fix_guid(name + "/scene")
     scene["settings"]["custom_size"] = True
-    scene["settings"]["cx"] = CANVAS[0]
-    scene["settings"]["cy"] = CANVAS[1]
-    scene["settings"]["items"] = [M.make_item(src_uuid, M.SRC_NAME, CANVAS)]
+    scene["settings"]["cx"] = canvas[0]
+    scene["settings"]["cy"] = canvas[1]
+    scene["settings"]["items"] = [M.make_item(src_uuid, M.SRC_NAME, canvas)]
     scene["settings"]["id_counter"] = 2
     scene["hotkeys"] = {}
 
@@ -119,7 +126,7 @@ def build(name, avi):
         "scaling_off_x": 0.0, "scaling_off_y": 0.0,
         "virtual-camera": {"type2": 3},
         "modules": {"scripts-tool": []},
-        "resolution": {"x": CANVAS[0], "y": CANVAS[1]},
+        "resolution": {"x": canvas[0], "y": canvas[1]},
         "version": 2,
     }
 
@@ -128,7 +135,7 @@ def build(name, avi):
         shutil.copy2(dst, dst + ".bak")
     with open(dst, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=4)
-    print("写入: %s  (%dx%d, src=%s)" % (dst, CANVAS[0], CANVAS[1], avi))
+    print("写入: %s  (%dx%d, src=%s)" % (dst, canvas[0], canvas[1], avi))
 
 
 def main():
@@ -137,6 +144,10 @@ def main():
         build("beauty_flash%d_720" % k, "flash_k%d_720p.avi" % k)
     for k in DROP_KS:
         build("beauty_drop%d_720" % k, "drop_k%d_720p.avi" % k)
+    if os.path.isfile(os.path.join(M.ASSETS, REAL_FILE)):
+        build("beauty_real_cam_1080x1920", REAL_FILE, canvas=REAL_CANVAS)
+    else:
+        print("跳过 real 族：缺 %s" % REAL_FILE)
     print("完成。")
     return 0
 
