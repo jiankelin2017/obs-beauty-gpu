@@ -99,49 +99,80 @@ RE_WAIT = re.compile(r"五官对拍等待中：本帧掩码来源=(\w+)")
 RE_GEOM = re.compile(r"五官几何快照：(.*)$")
 
 
+# 2.13.2（T10-b）：「立体」补进来了。它一直不在 LOAD_REGION 里，所以 2.8.3 起的
+# 每一次五官对拍都是 `els=6+2+2`（只有亮眼/眼袋），**立体那 8 个椭圆从没被验过**。
+# 全开应当是 `14+2+2`。ONLY 里显式写 face_threed:0 只是让「只开 X」的语义完整，
+# 数值上与历史一致（LOAD_REGION 本来就没这个键）。
 ONLY = {
-    "eye":   {"eye_bright": 50, "remove_pouch_strength": 0,
+    "threed": {"face_threed": 60, "eye_bright": 0,
+               "remove_pouch_strength": 0,
+               "remove_nasolabial_folds_strength": 0, "delspot_level": 0},
+    "eye":   {"face_threed": 0, "eye_bright": 50,
+              "remove_pouch_strength": 0,
               "remove_nasolabial_folds_strength": 0, "delspot_level": 0},
-    "pouch": {"eye_bright": 0, "remove_pouch_strength": 50,
+    "pouch": {"face_threed": 0, "eye_bright": 0,
+              "remove_pouch_strength": 50,
               "remove_nasolabial_folds_strength": 0, "delspot_level": 0},
-    "naso":  {"eye_bright": 0, "remove_pouch_strength": 0,
+    "naso":  {"face_threed": 0, "eye_bright": 0, "remove_pouch_strength": 0,
               "remove_nasolabial_folds_strength": 50, "delspot_level": 0},
-    "spot":  {"eye_bright": 0, "remove_pouch_strength": 0,
+    "spot":  {"face_threed": 0, "eye_bright": 0, "remove_pouch_strength": 0,
               "remove_nasolabial_folds_strength": 0, "delspot_level": 40},
 }
 
+# 五官五族的面板键（顺序与 beauty_params.h 的 P_THREED… 一致）。
+REGION_KEYS = ["face_threed", "eye_bright", "remove_pouch_strength",
+               "remove_nasolabial_folds_strength", "delspot_level"]
+ONLY_KEY = {"threed": "face_threed", "eye": "eye_bright",
+            "pouch": "remove_pouch_strength",
+            "naso": "remove_nasolabial_folds_strength", "spot": "delspot_level"}
 
-def build_cfg(region, only, zero):
-    """面板刻度是 0..100（beauty_params.h 的 g_params 注释），不是 0..1。"""
+
+def build_cfg(region, only, zero, strength=None):
+    """面板刻度是 0..100（beauty_params.h 的 g_params 注释），不是 0..1。
+
+    `strength` 只在显式给出时覆盖，默认 None = 沿用历史口径（eye/pouch/naso 50、
+    spot 40），否则与 §9.20/§9.26 的历史数据不可比。
+    """
     cfg = {k: 0.0 for k in V.PANEL_KEYS}
     cfg.update(S.LOAD)
     if region and not zero:
         cfg.update(S.LOAD_REGION)
     if only:
         cfg.update(ONLY[only])
+    if strength is not None and region and not zero:
+        if only:
+            cfg[ONLY_KEY[only]] = float(strength)
+        else:
+            for k in REGION_KEYS:
+                cfg[k] = float(strength)
     cfg["enabled"] = True
     return cfg
 
 
-def run(canvas, collection, samples, gpu_region, only, zero, delay):
+def run(canvas, collection, samples, gpu_region, only, zero, delay,
+        strength=None):
     env = {
         "BEAUTY_GPU_REGION": "1" if gpu_region else "0",
         "BEAUTY_REGION_CMP": "1",
         "BEAUTY_REGION_CMP_N": str(samples),
         "BEAUTY_REGION_CMP_DELAY": str(delay),
     }
-    cfg = build_cfg(not zero, only, zero)
+    cfg = build_cfg(not zero, only, zero, strength)
     raw = patch_collection(collection, cfg)
-    print("  起 OBS：BEAUTY_GPU_REGION=%d BEAUTY_REGION_CMP=1 N=%d delay=%d%s"
+    print("  起 OBS：BEAUTY_GPU_REGION=%d BEAUTY_REGION_CMP=1 N=%d delay=%d%s%s"
           % (1 if gpu_region else 0, samples, delay,
-             "" if not only else " only=%s" % only))
+             "" if not only else " only=%s" % only,
+             "" if strength is None else " strength=%g" % strength))
     try:
         p, snap = V.start_obs(collection, extra_env=env, canvas=canvas)
         try:
             c = obsctl.wait_ready(wait=90)
             # 参数在集合里已经是对的；这里只是确认滤镜处于启用态并触发一次
             # 「设置变更 → 重建掩码」，值完全相同，不会改变测量口径。
-            S.apply_load(c, region=not zero, extra=ONLY.get(only))
+            # ⚠ 必须把 cfg 里那 5 个五官值原样再下发一遍：apply_load 会先铺一遍
+            # LOAD_REGION（50/40），自定义 strength 会被它覆盖回去。
+            S.apply_load(c, region=False,
+                         extra={k: cfg[k] for k in REGION_KEYS})
             # 取样发生在 delay 个「可对拍帧」之后（30fps × 120 ≈ 4 s），
             # 所以这里必须等够，否则不等样本写进日志就关 OBS。
             time.sleep(max(4.0, delay / 30.0 + 3.0))
@@ -203,15 +234,19 @@ def main():
     ap.add_argument("--collection", default="beauty_soak4k")
     ap.add_argument("--samples", type=int, default=3)
     ap.add_argument("--gpu-region", type=int, default=1, choices=(0, 1))
-    ap.add_argument("--only", choices=["eye", "pouch", "naso", "spot"])
+    ap.add_argument("--only", choices=["threed", "eye", "pouch", "naso",
+                                       "spot"])
     ap.add_argument("--zero", action="store_true")
+    ap.add_argument("--strength", type=float, default=None,
+                    help="五官强度（面板 0..100）。不给 = 沿用历史口径"
+                         "（eye/pouch/naso 50、threed 60、spot 40）")
     ap.add_argument("--delay", type=int, default=120,
                     help="预热帧数（可对拍帧），30fps 下 120 ≈ 4 s；默认 120")
     args = ap.parse_args()
 
     w, h = [int(x) for x in args.canvas.lower().split("x")]
     snap = run((w, h), args.collection, args.samples, bool(args.gpu_region),
-               args.only, args.zero, args.delay)
+               args.only, args.zero, args.delay, args.strength)
     ver, samples, waits, perf, geom = parse_log(snap)
 
     print()
@@ -236,17 +271,29 @@ def main():
         print("  （等待掩码非零 %d 次，来源=%s）" % (len(waits), ",".join(
             sorted(set(waits)))))
 
-    # 参数一致性自检：`--only X` 时另外三族必须不在链上。判据取「不等于全开
-    # 的签名 6+2+2」—— 全开那一组是「参数压根没生效」的特征（第一版就踩到：
-    # --only spot 日志里仍是 ellipses=6+2+2，量到的是上次会话存的参数）。
+    # 参数一致性自检：`--only X` 时**别的族**必须不在链上。
+    # 旧写法只认「全开签名 6+2+2」，可 2.13.2 起全开会随 face_threed 变化（14+2+2），
+    # 而且 eyebright 与 pouch 都落在 els[0] 这一桶里，按计数区分不了。改成按
+    # `build_cfg` 的期望逐族核对，比「不等于 6+2+2」严格。
     cfg = build_cfg(not args.zero, args.only, args.zero)
-    if args.only and samples[0]["els"] == (6, 2, 2):
-        print("  ⚠ 参数未生效：--only %s 但链上仍是全开签名 6+2+2 —— "
-              "本次结论无效" % args.only)
+    sig = samples[0]["els"]
+    exp_main = (cfg["face_threed"] > 0 or cfg["eye_bright"] > 0 or
+                cfg["remove_pouch_strength"] > 0)
+    exp_naso = cfg["remove_nasolabial_folds_strength"] > 0
+    exp_spot = cfg["delspot_level"] > 0
+    bad = []
+    if exp_main != (sig[0] > 0):
+        bad.append("主椭圆族 期望%s 实得 els[0]=%d"
+                   % ("有" if exp_main else "无", sig[0]))
+    if exp_naso != (sig[1] > 0):
+        bad.append("法令纹 期望%s 实得 els[1]=%d"
+                   % ("有" if exp_naso else "无", sig[1]))
+    if exp_spot != (samples[0]["spot"] > 0):
+        bad.append("祛斑 期望%s 实得 spot=%d"
+                   % ("有" if exp_spot else "无", samples[0]["spot"]))
+    if bad:
+        print("  ⚠ 参数未生效（本次结论无效）：%s" % "；".join(bad))
         return 2
-    if cfg["delspot_level"] > 0 and all(s["spot"] == 0 for s in samples):
-        print("  ⚠ 祛斑参数=%.0f，但快照 spot=0：这一族本帧没进链"
-              "（geoOut->spotOn 要求 bounds_ 非空）" % cfg["delspot_level"])
 
     gpu_src = [s for s in samples if s["mask_src"] == "GPU"]
     worst = max(s["maxdiff"] for s in samples)
