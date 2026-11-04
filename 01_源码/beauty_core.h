@@ -241,6 +241,11 @@ int beautyCoreMaskMotion();
 // 这是「每帧检测」唯一能直接测到的证据 —— 它不体现在渲染线程的毫秒数上。
 uint64_t beautyCoreMaskSubmits();
 
+// 2.11.1（诊断）：自上次调用以来「判成在动」的次数 / 判定次数，取值即清零。
+// 用来区分「每帧都在动」与「运动分支根本没进」—— 这两种情况在 2.11.0 的
+// 日志里都表现为 `nopix=0`（PROGRESS §9.31）。
+void beautyCoreMotionStat(int* hotOut, int* callsOut);
+
 // 3.1.40（移植自 CPU 版 v3.1.39）：累计「确认本帧没人 → 直接透传跳过」的帧数。
 // 这是验证无脸跳过修复是否生效的唯一直接指标；配合总帧数可得跳过占比。
 uint64_t beautyCoreNoFaceFrames();

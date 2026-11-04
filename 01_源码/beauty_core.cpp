@@ -679,6 +679,13 @@ uint64_t g_maskSubmits = 0;
 // 引擎，宿主只认「引擎」这一个对象，全局量最不容易在包装层传丢。
 int g_detPeriod = 0;
 int g_detDiff = 0;
+// 2.11.1：运动判定本身的命中率（本窗口「判成在动」的帧数 / 判定次数）。
+// 为什么需要它：dper/dmot 都是**瞬时值**（窗口最后一帧 / 窗口最大值），
+// 无法回答「这个窗口里到底几帧被判成在动」。2.11.0 在现场就是被这一点
+// 骗过去的 —— `nopix=0/180` 同时可以由「每帧都在动」和「分支根本没进」
+// 两种原因造成，光看瞬时值分不开。见 PROGRESS §9.31。
+int g_motHot = 0;
+int g_motCalls = 0;
 
 // 无脸透传帧数（3.1.40，诊断用）。
 // noface=N 才能证明「本窗口真的有 N 帧是因为没人而跳过的」，是验证
@@ -2563,6 +2570,13 @@ private:
             }
         }
         motDiff_ = best;
+        // 2.11.1：只统计「真的用 64×64 小图判过」的帧 —— 老路径不进这两个数，
+        // 否则同一个比值会把两条路的命中率混在一起。
+        if (useMot) {
+            g_motCalls++;
+            if (motDiff_ > g_cfg.detAdaptThr)
+                g_motHot++;
+        }
         // ⚠ 单位是「maskAge_ >= every」的那个 every，**不是**「每帧」的帧数：
         // every=0 → 每帧提交；every=N → 每 N+1 帧提交。这条 off-by-one 踩过一次：
         // 把「在动」写成 1，实际变成每 2 帧提交，运动素材的对齐率从 99% 掉到 50%。
@@ -4530,6 +4544,17 @@ int beautyCoreMaskPeriod() {
 // 最近一帧的网格平均亮度差；-1 表示自适应关着、本窗口没做判定。
 int beautyCoreMaskMotion() {
     return g_detDiff;
+}
+
+// 2.11.1：自上次 Reset 以来「判成在动」的次数 / 判定次数。
+// 取值即清零 —— 与宿主的窗口统计同频，避免窗口边界对齐问题。
+void beautyCoreMotionStat(int* hotOut, int* callsOut) {
+    if (hotOut)
+        *hotOut = g_motHot;
+    if (callsOut)
+        *callsOut = g_motCalls;
+    g_motHot = 0;
+    g_motCalls = 0;
 }
 
 uint64_t beautyCoreMaskSubmits() {

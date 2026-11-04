@@ -447,6 +447,9 @@ struct beauty_filter {
 	bool nopix_frame;          // 走了缩略图路径但本帧没回读任何像素（预判不提交）
 	uint32_t an_nopix;         // 省掉缩略图回读的帧数（窗口内，诊断）
 	uint64_t mot_skipped;      // 累计省掉的回读帧数（会话级，诊断）
+	uint64_t an_sub0;          // 本窗口起点的提交计数（2.11.1 窗口差值用）
+	int      mot_dump_i;       // 64×64 小图已存盘张数（BEAUTY_MOT_DUMP）
+	char     mot_dump_dir[512];// 空 = 不存
 	uint32_t an_thumb;         // 走缩略图的帧数（窗口内）
 	uint32_t an_thumbskip;     // 走了缩略图、但本帧认领不全 → 整帧跳过
 	// ---- 2.8.0（S7）：检测周期自适应 ------------------------------------
@@ -764,6 +767,15 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 			blog(LOG_INFO,
 			     "[" PLUGIN_NAME "] 方案C 生效：运动判定走 64×64 GPU 采样，"
 			     "检测输入只在提交帧回读（BEAUTY_MOTION_GPU=0 回退）");
+	}
+	// 2.11.1（诊断）：把喂给引擎的 64×64 小图逐张存成裸 RGBA（16 KB/张），
+	// 前 40 张。只在排查「判定为什么一直是在动」时用，不参与任何生产路径。
+	{
+		const char *md = getenv("BEAUTY_MOT_DUMP");
+		f->mot_dump_i = 0;
+		f->mot_dump_dir[0] = 0;
+		if (md && md[0])
+			snprintf(f->mot_dump_dir, sizeof(f->mot_dump_dir), "%s", md);
 	}
 	// Phase 3.5：GPU 磨皮**生产**路径。与上面那个诊断开关的区别是它会改画面
 	// —— 磨皮整段搬到 GPU，引擎只拿回读结果继续算色调/五官/细节/美形。
@@ -5221,6 +5233,18 @@ static bool beauty_motion_sample(struct beauty_filter *f)
 	}
 	gs_stagesurface_unmap(prev);
 	beautyCoreSetMotionImage(f->mot_buf, (int)S, (int)S);
+	// 2.11.1（诊断）：前 40 张存盘，便于离线看清「引擎到底吃到了什么」。
+	if (f->mot_dump_dir[0] && f->mot_dump_i < 40) {
+		char path[600];
+		snprintf(path, sizeof(path), "%s/mot_%03d.raw",
+			 f->mot_dump_dir, f->mot_dump_i);
+		FILE *fp = fopen(path, "wb");
+		if (fp) {
+			fwrite(f->mot_buf, 1, row * S, fp);
+			fclose(fp);
+			f->mot_dump_i++;
+		}
+	}
 	return true;
 }
 
@@ -6156,11 +6180,20 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			 * 单独一行 + 字符串拼接：不动上面那条 printf 格式串（blog 不受
 			 * 编译器格式检查保护，3.1.4 就是因为多一个 %s 崩了两次）。 */
 			if (f->motion_gpu) {
+				int mhot = 0, mcalls = 0;
+				beautyCoreMotionStat(&mhot, &mcalls);
+				const uint64_t sub_now = beautyCoreMaskSubmits();
+				const uint64_t sub_win =
+					(sub_now >= f->an_sub0) ? sub_now - f->an_sub0 : 0;
+				f->an_sub0 = sub_now;
 				std::string mm = "方案C 窗口 " + std::to_string(cx) +
 						 "x" + std::to_string(cy) +
 						 "：nopix=" +
 						 std::to_string(f->an_nopix) + "/" +
 						 std::to_string(f->prof_frames) +
+						 " 判动=" + std::to_string(mhot) + "/" +
+						 std::to_string(mcalls) +
+						 " 提交=" + std::to_string(sub_win) +
 						 " 累计省 " +
 						 std::to_string(
 							 (unsigned long long)f->mot_skipped) +
