@@ -223,8 +223,15 @@ def build(name, png, canvas):
     print("写入: %s  (%dx%d, src=%s)" % (dst, canvas[0], canvas[1], os.path.basename(png)))
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     print("场景集合目录: %s" % scenes_dir())
+    # 2.13.0：真实帧静态集合，专供「掩码偏移代价」实验（make_still_real.py 产 PNG）。
+    # 只在显式要的时候建，避免动到其它验收在用的四套集合。
+    if "real" in argv:
+        build("beauty_still_real", "real_1080x1920.png", (1080, 1920))
+        print("完成（只建 real）。")
+        return 0
     build("beauty_static", "face_720p.png", (1280, 720))
     build("beauty_static_4k", "face_4k.png", (3840, 2160))
     # S2 帧环长跑专用：单脸 4K（帧环只在 mg.count==1 时启用，多脸素材等于空跑）

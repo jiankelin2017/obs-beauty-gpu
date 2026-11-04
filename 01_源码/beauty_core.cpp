@@ -824,6 +824,19 @@ const float kMaskFeatherRatio = 0.08f;
 // -1 = 按脸宽自适应；0 = 关闭（与 3.1.8 逐字节相同，A/B 用）；>0 = 固定像素
 int g_maskFeatherPx = -1;
 
+// 2.13.0：把**检测几何**整体平移 (dx,dy) 像素，纯诊断，默认 0 = 不介入。
+//
+// 为什么需要它：2.12.0 的 RMS 聚合让掩码的平均年龄从 1 帧涨到 3 帧，日志里
+// 只能看到 `align%` 68.5%→23.5% 和「掩码偏了 16.8 px（p90）」。但「偏 17 像素」
+// 不是结论 —— 结论是**画面上值多少灰阶**。这个开关就是把「偏 d 像素」这件事
+// 做成一帧可以被逐字节对拍的输入：静态素材、两个 d、两张截图相减。
+//
+// 只平移掩码几何、不动交给五官段的那份（`fboxOut` 在平移前就拷走了）：
+// 这样测出来的是「磨皮区域错位」的代价，不掺五官/美形的位移。
+// 生产路径永不设置它，因此默认值下逐字节等于 2.12.0。
+int g_detOffX = 0;
+int g_detOffY = 0;
+
 // 掩码几何形状（3.1.20）。
 //
 // 问题：旧版把掩码画成**两个矩形**——脸框一个、脖子通道一个。羽化只能把硬边变成
@@ -1325,6 +1338,15 @@ public:
             // 掩码几何：BEAUTY_MASK_SHAPE=0 退回矩形（3.1.19 行为），3 = 脸+脖子都用椭圆。
             const char* msh = getenv("BEAUTY_MASK_SHAPE");
             if (msh && *msh) g_maskShape = atoi(msh);
+            // 2.13.0：检测几何平移（只诊断）。格式 "dx,dy"，解析失败按 0。
+            const char* dof = getenv("BEAUTY_DET_OFFSET");
+            if (dof && *dof) {
+                int ox = 0, oy = 0;
+                if (sscanf(dof, "%d,%d", &ox, &oy) == 2) {
+                    g_detOffX = ox;
+                    g_detOffY = oy;
+                }
+            }
             // 2.6.0（S4a）的 BEAUTY_MASK_GEOM_ONLY 不在这里读：开关由宿主的
             // beautyCoreSetMaskGeomOnly() 打开，而它可能晚于本函数（acquireSlot
             // 会触发 init），环境变量判断放在那个 setter 里才不会被覆盖。
@@ -2899,6 +2921,19 @@ private:
                     invRotateFace(faces[i], inputRot_, Wr, Hr, gw, gh);
             }
             fboxOut = faces;   // 交给宿主/五官段的那一份也要是全帧坐标
+        }
+
+        // 2.13.0 诊断：掩码几何整体平移 (dx,dy)，单位=全帧像素，默认 (0,0)。
+        //
+        // 位置必须在缩略图 unscale / 旋转反算**之后**：在缩略图坐标里平移再除以
+        // mapScale，量级会差一个 640/w 的系数，看起来「没事」其实是没测到。
+        // 位置也必须在 `fboxOut` 两次赋值之后：交出去的那份保持原样，
+        // 于是「掩码相对脸错位 d 像素」成为实验里唯一的变量（五官/美形不跟着动）。
+        if (g_detOffX || g_detOffY) {
+            for (size_t i = 0; i < faces.size(); i++) {
+                faces[i].x += (float)g_detOffX;
+                faces[i].y += (float)g_detOffY;
+            }
         }
 
         // 5b-2：中心定稿之后再记快照 —— 落笔用的就是这两个值（见函数开头的警告）。

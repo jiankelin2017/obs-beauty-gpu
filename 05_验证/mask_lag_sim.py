@@ -22,7 +22,8 @@
     3. `detectPeriod` + `detectDue` 的状态机复现（含 `detAdaptHot` 续期与
        `maskAge_ >= every` 的 off-by-one），分别喂 max / rms 两种判定值。
 于是每帧都有一条「这份掩码描述的是 t − lag 帧」的 lag 序列，把 lag 落到
-第 1 步的框序列上，就得到**掩码位置偏差**。与掩码羽化宽度（0.12 × 脸宽）比：
+第 1 步的框序列上，就得到**掩码位置偏差**。与掩码羽化宽度（0.08 × 脸宽，
+源码 `kMaskFeatherRatio`）比：
 偏差远小于羽化宽度 = 渐变带吃掉它；远超 = 掩码边界会跟错位置。
 
 用法
@@ -35,6 +36,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -64,15 +66,16 @@ def metric_pair(prev, cur):
     return float(flat.max()), float(np.sqrt(np.mean(flat * flat)))
 
 
-def simulate(vals, thr):
+def simulate(vals, thr, still=STILL):
     """detectPeriod + detectDue 的状态机。返回每帧的 lag（掩码描述的是 t-lag 帧）。
 
     约定：lag = maskAge_ + 1 —— 提交发生在 maskAge_==every 那一帧，worker 下一帧
     才到货，所以「本帧拿到的掩码」描述的是上一次提交那一帧，再往回差一个异步帧。
+    `still` 是引擎里那个 every 值，= detAdaptStill - 1。
     """
     lag, age, hot = [], 0, 0
     for v in vals:
-        every = 0 if (v > thr or hot > 0) else STILL
+        every = 0 if (v > thr or hot > 0) else still
         if v > thr:
             hot = HOT
         elif hot > 0:
@@ -118,8 +121,8 @@ def run(path, limit, thr, interp):
     return n, boxes, vals_max, vals_rms, fw
 
 
-def report(name, boxes, vals, thr, fw):
-    lag = simulate(vals, thr)
+def report(name, boxes, vals, thr, fw, still=STILL):
+    lag = simulate(vals, thr, still)
     # boxes[i] 对应第 i 帧；判定值从第 1 帧才有 → vals[j] 对应第 j+1 帧
     off = 1
     dxy, iou = [], []
@@ -154,6 +157,10 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--thr", type=int, default=6)
     ap.add_argument("--interp", default="linear", choices=("linear", "area"))
+    ap.add_argument("--json", default="",
+                    help="把逐帧 lag/偏差 落盘，供 mask_off_probe 的曲线做加权")
+    ap.add_argument("--stills", nargs="*", type=int, default=[8],
+                    help="要扫的 detAdaptStill（面板语义 8/6/4…），可给多个")
     args = ap.parse_args(argv)
 
     n, boxes, vm, vr, fw = run(args.file, args.limit, args.thr, args.interp)
@@ -162,9 +169,22 @@ def main(argv=None):
     print("   %d 帧，脸宽中位 %.0f px，羽化宽度 %.1f px，阈值 %d，%s 缩放"
           % (n, fw, feather, args.thr, args.interp))
     print("   「偏差」= 本帧该用的掩码位置 与 实际用的那份（lag 帧前）之间的距离")
-    print()
-    report("max", boxes, vm, args.thr, fw)
-    report("rms", boxes, vr, args.thr, fw)
+    r_save = {}
+    for st in args.stills:
+        print("\n-- detAdaptStill = %d --" % st)
+        for lab, vv in (("max", vm), ("rms", vr)):
+            r_save["%s@%d" % (lab, st)] = report(lab, boxes, vv, args.thr, fw, st - 1)
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump({"file": os.path.basename(args.file), "frames": n,
+                       "face_w": fw, "feather": feather, "thr": args.thr,
+                       "interp": args.interp,
+                       "arms": {k: {"hot": v["hot"],
+                                    "lag": [int(x) for x in v["lag"]],
+                                    "dxy": [float(x) for x in v["dxy"]]}
+                                for k, v in r_save.items()}},
+                      fh, ensure_ascii=False)
+        print("\n   逐帧数据写入 %s" % args.json)
     print()
     print("读法：把「超羽化」看成「这一帧的掩码边界明显跟错了位置」的比例。")
     print("      羽化 %.1f px 是渐变带的宽度，带内的偏移会被抹平；" % feather)

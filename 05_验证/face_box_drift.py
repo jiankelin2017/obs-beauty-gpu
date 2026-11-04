@@ -19,7 +19,8 @@
 ----------------------------------
     · 输入 640×640 等比 letterbox（`beauty_face.cpp:42`）
     · score = sqrt(cls*obj)，阈值 0.6、NMS 0.3（`beauty_face.h:65`）
-    · 掩码羽化宽度 = 0.12 × 脸宽（`BEAUTY_MASK_FEATHER` 默认自适应）
+    · 掩码羽化宽度 = 0.08 × 脸宽（`beauty_core.cpp` kMaskFeatherRatio；
+      2026-11-04 更正：此前本文件写 0.12，那是 wtnl-zhi 的参考系数，不是本插件的）
 
 结论用法：**框位移 << 羽化宽度** 时，align% 下降不构成可见拖影 ——
 羽化带本来就把边界抹成了渐变，几十像素的羽化吃掉 1–2 px 的偏移绰绰有余。
@@ -50,7 +51,7 @@ MODEL_CANDIDATES = [
 DET_SIDE = 640
 CONF = 0.6
 NMS = 0.3
-FEATHER_K = 0.12     # 掩码羽化 = 0.12 × 脸宽
+FEATHER_K = 0.08     # 掩码羽化 = 0.08 × 脸宽（源码 kMaskFeatherRatio）
 
 
 def find_model():
@@ -160,7 +161,7 @@ def main(argv=None):
                   % (g, pct(r["dxy"], 50), pct(r["dxy"], 90), max(r["dxy"]),
                      pct(r["dw"], 50), pct(r["iou"], 50)))
         print()
-    print("读法：位移与「0.12 × 脸宽」的羽化宽度比。羽化带把掩码边界抹成渐变，")
+    print("读法：位移与「0.08 × 脸宽」的羽化宽度比。羽化带把掩码边界抹成渐变，")
     print("      框位移远小于羽化宽度时，用 8 帧前的掩码与用本帧掩码在画面上")
     print("      不可区分 —— align%% 掉下来才不等于拖影。")
     return 0

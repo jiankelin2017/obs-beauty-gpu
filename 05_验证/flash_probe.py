@@ -114,7 +114,7 @@ def main(argv=None):
     ap.add_argument("--ks", type=int, nargs="*", default=[1, 2, 4, 8])
     ap.add_argument("--seconds", type=float, default=25.0)
     ap.add_argument("--arms", nargs="*", default=["off", "on"],
-                    choices=("off", "on", "rms"))
+                    choices=("off", "on", "rms", "rms4", "rms6"))
     ap.add_argument("--json", metavar="PATH")
     ap.add_argument("--family", default="flash", choices=("flash", "drop"),
                     help="flash=空场里闪出人脸；drop=脸持续在场、每 60 帧消失 k 帧")
@@ -139,7 +139,13 @@ def main(argv=None):
     # 两臂只差一个环境变量，其余逐字节相同 —— 差值就是「判据」本身的贡献。
     arms = {"off": {},
             "on": {"BEAUTY_MOTION_GPU": "1"},
-            "rms": {"BEAUTY_MOTION_GPU": "1", "BEAUTY_DET_ADAPT_AGG": "rms"}}
+            "rms": {"BEAUTY_MOTION_GPU": "1", "BEAUTY_DET_ADAPT_AGG": "rms"},
+            # 2.13.0：rms + 缩短静止周期。掩码偏移的代价随「静止周期」涨，
+            # 把 8 换成 6/4 是拿 GPU 往返换画面（见 PROGRESS §9.34）。
+            "rms6": {"BEAUTY_MOTION_GPU": "1", "BEAUTY_DET_ADAPT_AGG": "rms",
+                     "BEAUTY_DET_ADAPT_STILL": "6"},
+            "rms4": {"BEAUTY_MOTION_GPU": "1", "BEAUTY_DET_ADAPT_AGG": "rms",
+                     "BEAUTY_DET_ADAPT_STILL": "4"}}
     S.keep_awake(True)
     rows, out = [], []
     try:
