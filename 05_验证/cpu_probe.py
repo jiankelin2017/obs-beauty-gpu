@@ -96,16 +96,20 @@ def engine_ms(log):
     return best
 
 
-def run_once(every, seconds, collection, canvas, enable=True):
+def run_once(every, seconds, collection, canvas, enable=True, extra_env=None,
+             set_env=None):
     """一种设置跑一轮：起 OBS → 下发参数 → 预热 → 采样 → 关闭。
 
     every = "auto" → 不设 BEAUTY_MASK_EVERY，走 2.8.0 的运动自适应默认；
             整数   → 锁死固定周期（注意这个动作本身会**关掉**自适应）；
             None   → 关滤镜，测下限。
+    set_env 里若显式给了 BEAUTY_MASK_EVERY，以它为准（--env 要能覆盖）。
     """
     env = S.env_for(1, False)
     if every not in (None, "auto"):
         env["BEAUTY_MASK_EVERY"] = str(every)
+    if extra_env:
+        env.update(extra_env)
     proc, snap = V.start_obs(collection, extra_env=env, canvas=canvas)
     pid = proc.pid
     res = None
@@ -132,7 +136,18 @@ def main(argv):
     ap.add_argument("--seconds", type=float, default=60.0)
     ap.add_argument("--every", default="0,2,4,8",
                     help="逗号分隔的提交周期；末尾自动加一档 'off'（关滤镜）作下限")
+    ap.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="附加环境变量，可多次（如 --env BEAUTY_MOTION_GPU=1 "
+                         "--env BEAUTY_DET_ADAPT_AGG=rms）")
+    ap.add_argument("--no-off", action="store_true",
+                    help="跳过『关滤镜』下限档（只想比两档判据时省一轮）")
     a = ap.parse_args(argv[1:])
+    extra = {}
+    for kv in a.env:
+        if "=" not in kv:
+            sys.exit("--env 要写成 K=V：%r" % kv)
+        k, v = kv.split("=", 1)
+        extra[k.strip()] = v.strip()
     w, h = a.canvas.lower().split("x")
     canvas = (int(w), int(h))
     evers = [x.strip() for x in a.every.split(",") if x.strip() != ""]
@@ -147,19 +162,23 @@ def main(argv):
     for e in evers:
         arg = "auto" if e in ("auto", "adapt") else int(e)
         label = ("auto(自适应默认)" if arg == "auto" else "every=%d" % arg)
+        if extra:
+            label += " " + " ".join("%s=%s" % (k, v) for k, v in extra.items())
         print("\n=== %s ===" % label)
-        (avg, peak, n, dur), eng = run_once(arg, a.seconds, a.collection, canvas)
+        (avg, peak, n, dur), eng = run_once(arg, a.seconds, a.collection,
+                                            canvas, extra_env=extra)
         print("  核数 平均 %.3f  峰值 %.3f  （%d 点 / %.0fs）  引擎 %s ms"
               % (avg if avg else -1, peak if peak else -1, n, dur,
                  "%.2f" % eng[0] if eng else "-"))
         rows.append((label, avg, peak, eng))
 
-    print("\n=== 关滤镜（下限） ===")
-    (avg, peak, n, dur), eng = run_once(None, a.seconds, a.collection, canvas,
-                                        enable=False)
-    print("  核数 平均 %.3f  峰值 %.3f  （%d 点 / %.0fs）"
-          % (avg if avg else -1, peak if peak else -1, n, dur))
-    rows.append(("filter-off", avg, peak, eng))
+    if not a.no_off:
+        print("\n=== 关滤镜（下限） ===")
+        (avg, peak, n, dur), eng = run_once(None, a.seconds, a.collection,
+                                            canvas, enable=False)
+        print("  核数 平均 %.3f  峰值 %.3f  （%d 点 / %.0fs）"
+              % (avg if avg else -1, peak if peak else -1, n, dur))
+        rows.append(("filter-off", avg, peak, eng))
 
     S.keep_awake(False)
     print("\n=== 汇总 ===")

@@ -12,8 +12,12 @@
    直接 720p→64×64 是**另一条数学**：内容铺满全图、格内像素数从 16 变成 400，
    算出来的噪声底会低一个数量级。
 3. **聚合**：16×16 格 → 每格取「逐像素 |Δ| 的最大值」（B 口径，2.11.0 现状）或
-   均值（C 口径，已否决）→ 4×4 格为一块取均值 → 取 16 个块的最大值。
+   均值（C 口径，已否决）→ 4×4 格为一块取均值 → 16 个块再聚合。
    **与阈值 6 比的就是这个数**（`detectPeriod` 里 `res > thr`）。
+   块聚合口径由 `agg` 决定（2.12.0 新增，对应开关 `BEAUTY_DET_ADAPT_AGG`）：
+     · `max` —— 16 块取最大（2.11.x 现状，默认）
+     · `rms` —— sqrt(Σm²/16)（2.12.0 候选，对局部微动不敏感）
+   四种口径的对比见 `calib_agg.py` 与 `PROGRESS §9.32.7`。
 
 第二段缩放有两种近似，结果差得不小，两个都给出来：
   · `linear` —— GPU 双线性 10:1 缩小不做 box 平均，采样点稀疏，**噪声保留得多**，
@@ -71,8 +75,13 @@ def motion_small(frame, interp="linear"):
     return luma(sm)
 
 
-def metric(prev, cur, mode="max"):
-    """两张 64×64 亮度图 → 与阈值比较的那个数（16 个块均值的最大值）。"""
+def metric(prev, cur, mode="max", agg="max"):
+    """两张 64×64 亮度图 → 与阈值比较的那个数。
+
+    mode 控「格内统计」（max = 2.11.x 现状；mean = 已否决的 C 口径）。
+    agg  控「16 个块怎么合并成一个数」（max / rms / top4 / median）。
+    引擎里 `BEAUTY_DET_ADAPT_AGG` 只切 agg，不切 mode。
+    """
     d = np.abs(cur.astype(np.int32) - prev.astype(np.int32)).astype(np.float64)
     bh = MOTION_SIDE // GRID
     bw = MOTION_SIDE // GRID
@@ -83,21 +92,29 @@ def metric(prev, cur, mode="max"):
     else:
         cells = cells.max(axis=(1, 3))
     blocks = cells.reshape(GRID // BLK, BLK, GRID // BLK, BLK).mean(axis=(1, 3))
-    return float(blocks.max())
+    flat = blocks.ravel()
+    if agg == "rms":
+        return float(np.sqrt(np.mean(flat * flat)))
+    if agg == "top4":
+        return float(np.sort(flat)[-4:].mean())
+    if agg == "median":
+        return float(np.median(flat))
+    return float(flat.max())
 
 
-def predict_frames(frames, interp="linear", mode="max"):
+def predict_frames(frames, interp="linear", mode="max", agg="max"):
     """逐帧序列 → 每帧的判定值（第一帧没有前驱，跳过）。"""
     res, prev = [], None
     for f in frames:
         cur = motion_small(f, interp)
         if prev is not None:
-            res.append(metric(prev, cur, mode))
+            res.append(metric(prev, cur, mode, agg))
         prev = cur
     return res
 
 
-def predict(path, interp="linear", mode="max", thr=DEFAULT_THR, limit=None):
+def predict(path, interp="linear", mode="max", agg="max", thr=DEFAULT_THR,
+            limit=None):
     """读一个视频文件，返回判定值序列与统计。
 
     `hot_ratio` 就是 OBS 日志里 `判动 hit/calls` 的离线预测值：
@@ -116,7 +133,7 @@ def predict(path, interp="linear", mode="max", thr=DEFAULT_THR, limit=None):
             break
         cur = motion_small(frame, interp)
         if prev is not None:
-            res.append(metric(prev, cur, mode))
+            res.append(metric(prev, cur, mode, agg))
         prev = cur
     cap.release()
     if not res:

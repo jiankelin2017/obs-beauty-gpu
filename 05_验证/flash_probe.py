@@ -43,6 +43,8 @@ NOPIX_RE = re.compile(r"方案C 窗口 (\d+)x(\d+)：nopix=(\d+)/(\d+)")
 # 2.11.1：窗口行多了「判动=hit/calls 提交=N」。老 dll 没有这两段 → 全 None。
 MHOT_RE = re.compile(r"判动=(\d+)/(\d+)")
 SUB_RE = re.compile(r"提交=(\d+)")
+# 2.12.0：窗口行多了「聚合=max|rms」。老 dll 没有这一段 → None。
+AGG_RE = re.compile(r"聚合=(max|rms)")
 
 
 def run_one(coll, seconds, extra_env):
@@ -75,9 +77,9 @@ def run_one(coll, seconds, extra_env):
 
 
 def parse(log):
-    """返回 (perf_rows, dper, dmot, nopix, mhot, sub)。"""
+    """返回 (perf_rows, dper, dmot, nopix, mhot, sub, agg)。"""
     perf, _ = P.parse_file(log)
-    dper, dmot, nopix, mhot, sub = [], [], [], [], []
+    dper, dmot, nopix, mhot, sub, agg = [], [], [], [], [], []
     with open(log, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             m = DPER_RE.search(line)
@@ -93,7 +95,10 @@ def parse(log):
                 b = SUB_RE.search(line)
                 if b:
                     sub.append(int(b.group(1)))
-    return perf, dper, dmot, nopix, mhot, sub
+                a = AGG_RE.search(line)
+                if a:
+                    agg.append(a.group(1))
+    return perf, dper, dmot, nopix, mhot, sub, agg
 
 
 def med(vals):
@@ -109,7 +114,7 @@ def main(argv=None):
     ap.add_argument("--ks", type=int, nargs="*", default=[1, 2, 4, 8])
     ap.add_argument("--seconds", type=float, default=25.0)
     ap.add_argument("--arms", nargs="*", default=["off", "on"],
-                    choices=("off", "on"))
+                    choices=("off", "on", "rms"))
     ap.add_argument("--json", metavar="PATH")
     ap.add_argument("--family", default="flash", choices=("flash", "drop"),
                     help="flash=空场里闪出人脸；drop=脸持续在场、每 60 帧消失 k 帧")
@@ -130,7 +135,11 @@ def main(argv=None):
         if not V.close_obs():
             sys.exit("关不掉 OBS")
 
-    arms = {"off": {}, "on": {"BEAUTY_MOTION_GPU": "1"}}
+    # on = 方案C 现状（块聚合取最大）；rms = 方案C + 2.12.0 的均方根口径。
+    # 两臂只差一个环境变量，其余逐字节相同 —— 差值就是「判据」本身的贡献。
+    arms = {"off": {},
+            "on": {"BEAUTY_MOTION_GPU": "1"},
+            "rms": {"BEAUTY_MOTION_GPU": "1", "BEAUTY_DET_ADAPT_AGG": "rms"}}
     S.keep_awake(True)
     rows, out = [], []
     try:
@@ -144,7 +153,7 @@ def main(argv=None):
                 if not log:
                     print("  !! 采集失败")
                     continue
-                perf, dper, dmot, nopix, mhot, sub = parse(log)
+                perf, dper, dmot, nopix, mhot, sub, agg = parse(log)
                 faces = med([r["faces"] for r in perf])
                 cover = med([r["cover"] for r in perf])
                 fs = [r["faces"] for r in perf]
@@ -165,6 +174,10 @@ def main(argv=None):
                 rec["hot"] = hot
                 rec["calls"] = calls
                 rec["submits"] = sum(sub) if sub else None
+                # 口径必须落进 JSON：否则事后回看分不清这一轮是 max 还是 rms。
+                rec["agg"] = sorted(set(agg)) if agg else None
+                if rec["agg"]:
+                    print("  口径 = %s" % "/".join(rec["agg"]))
                 out.append(rec)
                 rows.append(rec)
                 print("  窗口 %d | 有脸逐窗口 %s | 掩码中位 %s%% | "
@@ -181,8 +194,8 @@ def main(argv=None):
         S.keep_awake(False)
 
     print("\n================ 汇总（同一 k 下两臂对比）================")
-    print("k(帧) | 臂  | 有脸%中位 | 冷窗口 | 有脸%逐窗口")
-    print("------+-----+----------+--------+--------------------------")
+    print("k(帧) | 臂  | 有脸%中位 | 冷窗口 | 判动    | nopix | 有脸%逐窗口")
+    print("------+-----+----------+--------+---------+-------+--------------------------")
     by_k = {}
     for r in rows:
         by_k.setdefault(r["k"], {})[r["arm"]] = r
@@ -191,10 +204,13 @@ def main(argv=None):
             r = by_k[k].get(arm)
             if not r:
                 continue
-            print("%5s | %-3s | %8s | %5d/%d | %s"
+            print("%5s | %-3s | %8s | %5d/%d | %5.1f%% | %5s | %s"
                   % ("-" if k is None else k, arm,
                      "-" if r["faces_med"] is None else "%.1f" % r["faces_med"],
                      r["cold_windows"], r["windows"],
+                     100.0 * r["hot"] / max(1, r["calls"]),
+                     "-" if r["nopix"] is None else "%.0f%%"
+                     % (r["nopix"] * 100),
                      " ".join("-" if v is None else "%.0f" % v
                               for v in r["faces_series"])))
     print("\n「冷窗口」= 有脸% < 5 的窗口数。一个窗口 180 帧 ≈ 3 次闪脸，"

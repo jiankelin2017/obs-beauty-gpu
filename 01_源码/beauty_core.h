@@ -246,6 +246,11 @@ uint64_t beautyCoreMaskSubmits();
 // 日志里都表现为 `nopix=0`（PROGRESS §9.31）。
 void beautyCoreMotionStat(int* hotOut, int* callsOut);
 
+// 2.12.0（P1-1c）：当前生效的块聚合口径（1 = 均方根，0 = 16 块取最大）。
+// 必须在日志里打出来 —— 否则「改了代码但数字没变」分不清是开关没生效，
+// 还是两种口径在这段素材上确实没差别。
+int beautyCoreMotionAggRms();
+
 // 3.1.40（移植自 CPU 版 v3.1.39）：累计「确认本帧没人 → 直接透传跳过」的帧数。
 // 这是验证无脸跳过修复是否生效的唯一直接指标；配合总帧数可得跳过占比。
 uint64_t beautyCoreNoFaceFrames();

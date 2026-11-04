@@ -469,6 +469,16 @@ struct SmoothCfg {
     int  detAdaptStill = 8;   // 静止时的提交周期（帧）= 3.75 次/秒 @30fps
     int  detAdaptThr = 6;     // 运动阈值：16 个块（4×4 格/块）里最大块平均差，0..255
     int  detAdaptHot = 3;     // 运动结束后继续每帧提交的帧数（吸收尾影与抖动）
+    // 2.12.0（P1-1c）：16 个块怎么合并成一个数。
+    //   false = 取最大（2.11.x 默认，逐字节不变）
+    //   true  = 均方根 sqrt(Σm²/16)
+    // 「取最大」对**局部**微动极敏感：真人说话时脸上任何一小块动就把整帧判成动，
+    // 可人脸位置根本没变、检测结果完全没过期 —— 真素材实测判动 52.5%，
+    // 方案C 的收益因此从 −60% 掉到 −18%（PROGRESS §9.32）。换成 RMS 后
+    // 同一素材判动 10.2%，而真运动素材仍是 100%（p50 12.2，离阈值 6 有 2 倍余量）、
+    // 人脸进出的过渡帧判动率一字不变（峰值 41.7 对 102.9，余量 7 倍）。
+    // 阈值**不跟着改**：RMS 口径下 6 已经两头都对，扫过 5/6/7/8/10/12（calib_agg.py）。
+    bool detAdaptAggRms = false;
     // 软膝：|mid| ≤ lo 全增益，≥ hi 完全不加。
     // 8/22 是扫出来的：软膝放到 20/45 时大幅度带会涨到 105.9（= 边缘被加亮，
     // 也就是光晕）。收到 8/22 后稳定在 100.0 以内，边缘平均改动只有 0.26 灰阶。
@@ -1300,6 +1310,11 @@ public:
                 int v = atoi(dah);
                 if (v >= 0 && v <= 30) g_cfg.detAdaptHot = v;
             }
+            // 2.12.0（P1-1c）：16 块的合并口径。只认字面量 "rms"，其余一律按默认
+            // 的 "max" 处理 —— 打错字不该静默换掉判据，但也不能因此让插件不起作用，
+            // 所以「不识别 → 老行为」而不是报错。
+            const char* daa = getenv("BEAUTY_DET_ADAPT_AGG");
+            if (daa && *daa) g_cfg.detAdaptAggRms = (strcmp(daa, "rms") == 0);
             // 掩码边界羽化：BEAUTY_MASK_FEATHER=0 关闭（与 3.1.8 逐字节相同，A/B 用），
             // >0 固定像素；不设则按脸宽自适应（0.12 × 脸宽，对齐 wtnl-zhi 的默认值）。
             const char* mf = getenv("BEAUTY_MASK_FEATHER");
@@ -2556,7 +2571,16 @@ private:
         //     运动视频 4×4 块最大均值 ≥ 9.9（中位 16.9）
         //     静止+噪声            ≤ 3.8
         // 默认阈值 6 对两侧各留 1.6 倍余量。
+        //
+        // 2.12.0（P1-1c）：块内部照旧先取均值，**块与块之间**多了一种合并口径。
+        // 上面的标定把「运动」当成了「整幅画面在动」，而真实场景里最常见的是
+        // 「只有人脸那一块在动、位置不动」—— 取最大正好对这种情况最敏感，
+        // 于是说话的人每帧都判成动，检测一次次白提交。RMS 把「一块大动」摊到
+        // 16 块上，判据因此从「有没有局部动」变成「动的面积够不够大」，
+        // 与「检测结果会不会过期」这件事终于对上了（PROGRESS §9.32.7）。
         int best = 0;
+        int m[16];
+        int nb = 0;
         for (int by = 0; by < kGrid; by += 4) {
             for (int bx = 0; bx < kGrid; bx += 4) {
                 int sum = 0;
@@ -2565,9 +2589,30 @@ private:
                     for (int xx = 0; xx < 4; xx++)
                         sum += d16[base + xx];
                 }
-                const int m = sum >> 4;    // /16
-                if (m > best) best = m;
+                const int v = sum >> 4;    // /16
+                if (nb < 16) m[nb++] = v;
+                if (v > best) best = v;
             }
+        }
+        if (g_cfg.detAdaptAggRms) {
+            /* 均方根：best = sqrt(Σm²/16)。
+             * 用整数算，别引入 sqrt —— 判定值会进日志、还要和阈值做整数比较，
+             * 浮点在这里只会带来「同一份素材换台机器差 1」的麻烦。
+             * m ≤ 255，16 项和 ≤ 1,040,400，int 装得下。
+             * 开方用牛顿迭代向下取整后再四舍五入，尽量贴近 calib_agg.py 的
+             * 浮点结果（每帧只算一次，成本可忽略）。 */
+            int sq = 0;
+            for (int i = 0; i < nb; i++)
+                sq += m[i] * m[i];
+            sq /= (nb > 0) ? nb : 1;
+            int r = 0;
+            if (sq > 0) {
+                int x = sq, y = (x + 1) >> 1;
+                while (y < x) { x = y; y = (x + sq / x) >> 1; }
+                r = x;
+                if (sq - r * r > r) r++;    // 余数过半 → 进位
+            }
+            best = r;
         }
         motDiff_ = best;
         // 2.11.1：只统计「真的用 64×64 小图判过」的帧 —— 老路径不进这两个数，
@@ -4559,6 +4604,11 @@ void beautyCoreMotionStat(int* hotOut, int* callsOut) {
 
 uint64_t beautyCoreMaskSubmits() {
     return g_maskSubmits;
+}
+
+// 2.12.0（P1-1c）：块聚合口径，1 = RMS / 0 = 取最大。
+int beautyCoreMotionAggRms() {
+    return g_cfg.detAdaptAggRms ? 1 : 0;
 }
 
 // 3.1.40：无脸透传帧数（诊断用，移植自 CPU 版 v3.1.39）。

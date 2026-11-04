@@ -6193,6 +6193,11 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 						 std::to_string(f->prof_frames) +
 						 " 判动=" + std::to_string(mhot) + "/" +
 						 std::to_string(mcalls) +
+						 // 2.12.0（P1-1c）：口径必须可见。同一个
+						 // 「判动=3/180」在 max 与 rms 下含义完全不同，
+						 // 不打出来就没法判断这一次跑的是哪一档。
+						 " 聚合=" +
+						 (beautyCoreMotionAggRms() ? "rms" : "max") +
 						 " 提交=" + std::to_string(sub_win) +
 						 " 累计省 " +
 						 std::to_string(
