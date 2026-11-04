@@ -58,6 +58,10 @@ double g_gsharpen = 0.0;  // 面板「全局锐化」0..100
 double g_region[5] = {0, 0, 0, 0, 0};
 // 3.1.27 美形三项（0..100）。顺序：0 瘦脸 1 大眼 2 下巴
 double g_shape[3] = {0, 0, 0};
+// 2.13.1（P0-11 阶段 2）：输入旋转 0/90/180/270。离线台原先没法设这个值，
+// 于是「全帧路径不旋转」这个缺陷在离线侧完全测不到 —— 只能靠装机开 OBS。
+// 加它之后，offline_regress.py --rot 就能把两条路径放在同一份二进制上比。
+int g_inputRot = 0;
 
 }  // namespace
 
@@ -114,6 +118,7 @@ __declspec(dllexport) int __stdcall BeautyCoreRun(
     s.panel[P_THIN_FACE] = g_shape[0];
     s.panel[P_BIG_EYE] = g_shape[1];
     s.panel[P_CHIN] = g_shape[2];
+    s.input_rot = g_inputRot;   // 2.13.1：默认 0 = 与原离线基准逐字节一致
 
     IBeautyEngine& e = beautyEngine();
     if (strcmp(e.id(), "core") != 0) {
@@ -211,6 +216,19 @@ __declspec(dllexport) void __stdcall BeautyCoreSetSmooth(int radius, float sigma
 __declspec(dllexport) void __stdcall BeautyCoreSetTone(double whiten, double red) {
     g_whiten = whiten;
     g_red = red;
+}
+
+// 2.13.1（P0-11 阶段 2）：设置输入旋转（0/90/180/270，其余按 0）。
+__declspec(dllexport) void __stdcall BeautyCoreSetInputRot(int deg) {
+    g_inputRot = (deg == 90 || deg == 180 || deg == 270) ? deg : 0;
+}
+
+// 2.13.1：把最近一次 process 的掩码拷出来（0..255，w*h 字节）。
+// 为什么离线台要这个：验旋转**方向**靠比最终像素不够锐 —— 双三次重采样把差异
+// 抹平了（四组组合 maxdiff 全是 12）。掩码是旋转的直接产物，IoU 一比就分得开。
+__declspec(dllexport) int __stdcall BeautyCoreGetMask(unsigned char* outMask, int w, int h) {
+    if (!outMask || w <= 0 || h <= 0) return 0;
+    return beautyCoreCopyMask(outMask, w, h) ? 1 : 0;
 }
 
 // 锐化 / 全局锐化（0..100，与面板同尺度）。CoreEngine 0.6 起。

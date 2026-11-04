@@ -83,6 +83,77 @@ void letterboxRgb(const unsigned char* src, int sw, int sh, int stride,
     }
 }
 
+// 2.13.1（P0-11 阶段 2）：带输入旋转的 letterbox —— 把旋转做进重采样。
+//
+// 契约：产出的 dst 是「源图绕其自身中心旋转 +rot 后的整图」的 letterbox 结果，
+// 也就是检测模型看到的是**摆正了的人脸**；输出的 scale/ox/oy 与 letterboxRgb
+// 同义，只是基准换成旋转后尺寸 (rw,rh)。因此 decode 出来的框落在「旋转后整图」
+// 坐标系里，调用方必须再用 invRotateFace(..., rw, rh, sw, sh) 反变换回源坐标。
+//
+// 方向约定：这里逐字照抄 beauty_core.cpp 的 invRotatePoint() 的向量式 ——
+// 那个函数已被 2.10.0 的 GPU 缩略图路径验证过（躺放侧脸 footprint 0.24%→12.83%，
+// ir=270 方向正确）。两处共用同一组式子，"顺时针/逆时针"这种字面说法就不再是
+// 论据，谁也不用猜。
+//
+// 为什么不先物理旋转再 letterbox：4K 一帧 33 MB，转一份要多一次全帧读写，
+// 而旋转本质只是坐标变换 —— 放进采样循环等于零成本。
+void letterboxRgbRot(const unsigned char* src, int sw, int sh, int stride,
+                     unsigned char* dst, int dw, int dh, int rot,
+                     float& scale, int& ox, int& oy) {
+    const bool swap = (rot == 90 || rot == 270);
+    const int rw = swap ? sh : sw;      // 旋转后整图宽
+    const int rh = swap ? sw : sh;      // 旋转后整图高
+    scale = fminf((float)dw / rw, (float)dh / rh);
+    const int nw = (int)(rw * scale + 0.5f);
+    const int nh = (int)(rh * scale + 0.5f);
+    ox = (dw - nw) / 2;
+    oy = (dh - nh) / 2;
+    memset(dst, 0, (size_t)dw * dh * 3);
+
+    // 两个坐标系都以「像素中心」为原点，与 invRotatePoint 的 (W-1)*0.5 一致。
+    const float crx = (rw - 1) * 0.5f, cry = (rh - 1) * 0.5f;
+    const float csx = (sw - 1) * 0.5f, csy = (sh - 1) * 0.5f;
+
+    for (int y = 0; y < nh; y++) {
+        const float ry = (y + 0.5f) / scale - 0.5f;
+        unsigned char* o = dst + (size_t)(oy + y) * dw * 3 + (size_t)ox * 3;
+        for (int x = 0; x < nw; x++) {
+            const float rx = (x + 0.5f) / scale - 0.5f;
+            const float dx = rx - crx, dy = ry - cry;
+            // 旋转后坐标 → 源坐标（invRotatePoint 的逆映射，见函数头说明）
+            float sx, sy;
+            switch (rot) {
+            case 90:  sx =  dy; sy = -dx; break;
+            case 180: sx = -dx; sy = -dy; break;
+            case 270: sx = -dy; sy =  dx; break;
+            default:  sx =  dx; sy =  dy; break;
+            }
+            sx += csx;
+            sy += csy;
+            int x0 = (int)floorf(sx);
+            const float wx = sx - x0;
+            int y0 = (int)floorf(sy);
+            const float wy = sy - y0;
+            int x1 = x0 + 1, y1 = y0 + 1;
+            if (x0 < 0) x0 = 0;
+            if (x1 >= sw) x1 = sw - 1;
+            if (x0 >= sw) x0 = sw - 1;
+            if (y0 < 0) y0 = 0;
+            if (y1 >= sh) y1 = sh - 1;
+            if (y0 >= sh) y0 = sh - 1;
+            const unsigned char* r0 = src + (size_t)y0 * sw * stride;
+            const unsigned char* r1 = src + (size_t)y1 * sw * stride;
+            for (int k = 0; k < 3; k++) {
+                const float a = r0[(size_t)x0 * stride + k] * (1 - wx) +
+                                r0[(size_t)x1 * stride + k] * wx;
+                const float b = r1[(size_t)x0 * stride + k] * (1 - wx) +
+                                r1[(size_t)x1 * stride + k] * wx;
+                o[(size_t)x * 3 + k] = (unsigned char)(a * (1 - wy) + b * wy + 0.5f);
+            }
+        }
+    }
+}
+
 float iouOf(const FaceBox& a, const FaceBox& b) {
     const float ax2 = a.x + a.w, ay2 = a.y + a.h;
     const float bx2 = b.x + b.w, by2 = b.y + b.h;
@@ -141,7 +212,7 @@ bool FaceDetector::load(const char* modelPath, std::string& err) {
 
 bool FaceDetector::detect(const unsigned char* rgb, int w, int h,
                           std::vector<FaceBox>& faces, std::string& err,
-                          float conf, float nms, int stride) {
+                          float conf, float nms, int stride, int rotateDeg) {
     faces.clear();
     if (!model_) { err = "检测模型未加载"; return false; }
     if (!rgb || w <= 0 || h <= 0) { err = "输入无效"; return false; }
@@ -152,7 +223,14 @@ bool FaceDetector::detect(const unsigned char* rgb, int w, int h,
     resized_.resize((size_t)S * S * 3);
     float scale = 1.f;
     int ox = 0, oy = 0;
-    letterboxRgb(rgb, w, h, stride, &resized_[0], S, S, scale, ox, oy);
+    // 2.13.1（P0-11 阶段 2）：rot=0 走原函数（逐字节不变），≠0 走带旋转的重采样。
+    // 除 90/180/270 之外的取值一律按 0 处理，避免面板外的手改环境变量造出宽高错位。
+    const int rot = (rotateDeg == 90 || rotateDeg == 180 || rotateDeg == 270)
+                        ? rotateDeg : 0;
+    if (rot == 0)
+        letterboxRgb(rgb, w, h, stride, &resized_[0], S, S, scale, ox, oy);
+    else
+        letterboxRgbRot(rgb, w, h, stride, &resized_[0], S, S, rot, scale, ox, oy);
 
     input_.resize((size_t)3 * S * S);
     for (int y = 0; y < S; y++) {

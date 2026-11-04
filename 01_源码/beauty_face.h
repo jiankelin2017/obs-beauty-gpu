@@ -50,6 +50,12 @@ public:
     int inputSize() const { return inputSize_; }
 
     // src 是紧凑或带 stride 的图。检出的人脸框以**原图坐标**返回。
+    //
+    // rotateDeg（2.13.1 / P0-11 阶段 2）：先把源图绕自身中心旋转该角度再送进
+    // 模型，取值 0/90/180/270，其余值按 0 处理。rotation 发生在 letterbox 的
+    // 重采样里，**不额外分配旋转缓冲**（4K 一帧 33 MB，转一份要两次全帧读写）。
+    // ⚠ 开旋转时返回的坐标落在「旋转后整图」坐标系（尺寸 90/270 时宽高互换），
+    // 调用方必须用 invRotateFace 反变换回源坐标 —— 见 beauty_core.cpp 的同名说明。
     // conf / nms 是阈值：0.6 / 0.3 与 OpenCV 的默认一致。
     //
     // stride：每像素字节数。传 4 可以直接喂 OBS 的 RGBA 帧，**跳过「先转一份
@@ -62,7 +68,8 @@ public:
 
     bool detect(const unsigned char* src, int w, int h,
                 std::vector<FaceBox>& faces, std::string& err,
-                float conf = 0.6f, float nms = 0.3f, int stride = 3);
+                float conf = 0.6f, float nms = 0.3f, int stride = 3,
+                int rotateDeg = 0);
 
     double lastMs() const { return lastMs_; }
 

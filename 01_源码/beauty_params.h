@@ -580,7 +580,20 @@
 //          （`beauty_core.cpp` kMaskFeatherRatio），不是此前文档里的 0.12。
 //          262 px 的脸 → 21 px 羽化；240 px 的脸 → 19 px。这一条把 §9.33 里
 //          「超羽化 2.9%」的判据整体改严了（羽化带更窄 ⇒ 同样的偏移更容易超）。
-#define BEAUTY_BUILD_STR "2.13.0"
+// 2.13.1（GPU 分支，P0-11 阶段 2）：**输入旋转在「全帧回退路径」也生效**。
+//        · 缺陷（2.10.0 起存在）：旋转只发生在 `beauty_thumb_build()` 的 GPU 缩略图
+//          与 `buildMaskInto()` 的 `mapped` 分支。走全帧回读的帧（多脸 /
+//          `DETECT_SMALL=0` / `ASYNC_STAGE=1` / 镜像 / 上一帧未被链全认领）与
+//          「开了任一五官参数但 `GPU_REGION` 未开」时，`input_rot` 完全无效且
+//          无任何提示 —— 测试里正脸躺放 `ir=0/90/270` 三臂输出逐字节相同。
+//        · 修法：把旋转移进检测前的 letterbox 重采样（`letterboxRgbRot`），
+//          全帧路径不再需要一个 33 MB 的旋转副本；解出的几何仍在「旋转后整帧」
+//          坐标系，由 `buildMaskInto` 里的 `invRotateFace` 统一反变换回源坐标，
+//          与缩略图路径共用同一套式子。
+//        · 默认 `input_rot = 0` 时**逐字节不变**（`detect()` 走原 `letterboxRgb`
+//          分支），所以这次只升最右位。
+//        · 2.10.1 那条「旋转不会生效」的 WARN 随之删除 —— 留着就成了假警报。
+#define BEAUTY_BUILD_STR "2.13.1"
 
 // 面板参数顺序（滤镜属性页滑块的顺序）
 enum {

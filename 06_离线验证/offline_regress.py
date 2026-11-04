@@ -88,6 +88,10 @@ def load_dll():
     d.BeautyCoreSetClarityPanel.argtypes = [ctypes.c_double]
     d.BeautyCoreSetRegion.argtypes = [ctypes.c_int, ctypes.c_double]
     d.BeautyCoreSetShape.argtypes = [ctypes.c_int, ctypes.c_double]
+    # 2.13.1（P0-11 阶段 2）：输入旋转。老 dll 没有这个导出，允许缺席 ——
+    # 缺席时 apply_params 会跳过，其余用例照跑（只影响 --rot 用例）。
+    if hasattr(d, "BeautyCoreSetInputRot"):
+        d.BeautyCoreSetInputRot.argtypes = [ctypes.c_int]
     return d
 
 
@@ -104,6 +108,9 @@ def apply_params(d, a):
         d.BeautyCoreSetRegion(i, float(v))
     for i, v in enumerate((a.thin, a.bigeye, a.chin)):
         d.BeautyCoreSetShape(i, float(v))
+    rot = int(getattr(a, "rot", 0) or 0)
+    if rot and hasattr(d, "BeautyCoreSetInputRot"):
+        d.BeautyCoreSetInputRot(rot)
 
 
 def run_once(d, fin, fout, w, h, blur, warm):
@@ -352,6 +359,8 @@ def build_parser():
         sp.add_argument("--chin", type=float, default=0.0, help="下巴")
         sp.add_argument("--threads", type=int, default=1, help="线程数（默认 1，求可复现）")
         sp.add_argument("--roi", action="store_true", help="开启 ROI 裁剪（默认关）")
+        sp.add_argument("--rot", type=int, default=0, choices=[0, 90, 180, 270],
+                        help="输入旋转（2.13.1 起支持；离线默认 0，与旧基准一致）")
 
     sp = sub.add_parser("run", help="跑一遍并可对拍")
     add_common(sp)

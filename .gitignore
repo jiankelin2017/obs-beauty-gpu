@@ -29,6 +29,8 @@
 06_离线验证/*.dll
 06_离线验证/*.lib
 06_离线验证/*.exp
+# build_offline.ps1 的中间产物（每次重编逐次变化，入库只会制造无意义 diff）
+06_离线验证/obj_probe/
 
 # Python 字节码缓存
 __pycache__/

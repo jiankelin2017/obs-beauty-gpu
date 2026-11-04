@@ -2838,12 +2838,29 @@ private:
         // 直接喂 RGBA（stride=4）。原先要先摊一份全分辨率 RGB，1080p 下那是
         // 600 万字节的写入，而检测只吃 640x640 —— 这份中间缓冲是纯浪费。
         face_.setMaxFaces(detMaxFaces_);
+        // 2.13.1（P0-11 阶段 2）：全帧路径也要转 —— 旋转做进 letterbox 的重采样，
+        // 不额外分配全帧缓冲。`mapped`（缩略图）路径的图已由宿主 GPU 转过，
+        // 这里必须传 0，否则会转两次。
+        const int detRot = mapped ? 0 : inputRot_;
         if (!face_.detect(src, w, h, faces, ferr,
-                          detHighQ_ ? 0.45f : 0.6f, 0.3f, 4) ||
+                          detHighQ_ ? 0.45f : 0.6f, 0.3f, 4, detRot) ||
             faces.empty()) {
             msgOut = ferr;
             facesOut = 0;
             return false;
+        }
+        // 检测在「旋转后整图」上跑，所以几何此刻是旋转后坐标系，必须立刻反变换回
+        // 源坐标系。位置有两条硬约束：
+        //   · 必须在 estimateSkinCenter 之前 —— 那个函数拿 faces 去采 src 的真实像素，
+        //     src 是全帧原图未旋转，坐标差一次旋转就会把肤色椭圆中心采到别处；
+        //   · 必须在 fboxOut 赋值之前 —— 交出去的那份是全帧源坐标（宿主/五官段用）。
+        // 旋转后整图的宽高在 90/270 时要互换，与 invRotateFace 的 (Wr,Hr) 约定一致。
+        if (!mapped && inputRot_ != 0) {
+            const bool swap = (inputRot_ == 90 || inputRot_ == 270);
+            const int Wr = swap ? h : w;
+            const int Hr = swap ? w : h;
+            for (size_t i = 0; i < faces.size(); i++)
+                invRotateFace(faces[i], inputRot_, Wr, Hr, w, h);
         }
         facesOut = (int)faces.size();
         // 关键点要留给后续的「五官局部」五项用（亮眼/去黑眼圈/法令纹…都要位置）。
