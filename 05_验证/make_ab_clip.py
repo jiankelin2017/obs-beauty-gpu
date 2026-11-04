@@ -46,21 +46,34 @@ F0, F1 = 1421, 1661          # 8.0 s @30fps，见模块注释
 FPS = 30
 COLL_SRC = "beauty_real_cam_1080x1920"
 COLL_DST = "beauty_real_ab"
+CANVAS = (1080, 1920)        # 集合画布；默认与 SRC 同尺寸，--canvas 可覆盖
 
 # 同步标记：白 / 黑 / 纯红 / 纯绿（BGR）。四帧组合在真实画面里不可能出现，
 # 且用「每帧三通道的均值与方差」就能唯一识别，不依赖阈值调参。
-MARKS = [
-    np.full((1920, 1080, 3), 255, np.uint8),                      # 白
-    np.zeros((1920, 1080, 3), np.uint8),                          # 黑
-    np.dstack([np.zeros((1920, 1080), np.uint8)] * 2 +
-              [np.full((1920, 1080), 255, np.uint8)]),            # 红
-    np.dstack([np.zeros((1920, 1080), np.uint8),
-               np.full((1920, 1080), 255, np.uint8),
-               np.zeros((1920, 1080), np.uint8)]),                # 绿
-]
+#
+# 尺寸按画布生成（2026-11-04）：原来写死 1920×1080，换 720p 素材时靠
+# build_clip 里的 resize 兜底 —— 能跑，但「标记帧就是画布尺寸」这件事
+# 变得靠隐式兜底维持，读代码的人会以为标记永远是 1080p。显式生成更清楚。
+def make_marks(h, w):
+    return [
+        np.full((h, w, 3), 255, np.uint8),                       # 白
+        np.zeros((h, w, 3), np.uint8),                           # 黑
+        np.dstack([np.zeros((h, w), np.uint8)] * 2 +
+                  [np.full((h, w), 255, np.uint8)]),             # 红
+        np.dstack([np.zeros((h, w), np.uint8),
+                   np.full((h, w), 255, np.uint8),
+                   np.zeros((h, w), np.uint8)]),                 # 绿
+    ]
 
 
-def stamp_code(frame, n, bits=8):
+MARKS = make_marks(1920, 1080)
+
+# 帧号条码的格数。8 格只到 255 帧 —— 原设计 240 帧刚好够，换 480 帧（8 s
+# @60fps）就会溢出（实测 479 读成 223，且不报错，只是对不上）。按帧数自动选：
+BITS = 8
+
+
+def stamp_code(frame, n, bits=None):
     """在帧右下角贴 8 格条码，bit i 写在第 i 格（白=1 黑=0）。
 
     为什么需要帧号
@@ -77,6 +90,7 @@ def stamp_code(frame, n, bits=8):
 
     位置选右下角：离脸（画面中上）远，不进美颜作用区，也不干扰人眼判断。
     """
+    bits = BITS if bits is None else bits
     h, w = frame.shape[:2]
     cw = 18
     y0, y1 = h - 52, h - 10
@@ -90,8 +104,9 @@ def stamp_code(frame, n, bits=8):
     return frame
 
 
-def read_code(frame, bits=8):
+def read_code(frame, bits=None):
     """从录到的帧读条码，返回帧号；读不准（灰）返回 -1。"""
+    bits = BITS if bits is None else bits
     h, w = frame.shape[:2]
     cw = 18
     y0, y1 = h - 52, h - 10
@@ -118,11 +133,17 @@ def scenes_dir():
 
 
 def build_clip():
+    global MARKS
     if not os.path.isfile(SRC):
         sys.exit("源素材不存在：%s" % SRC)
     cap = cv2.VideoCapture(SRC)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if (w, h) != CANVAS:
+        sys.exit("素材 %dx%d 与画布 %dx%d 不一致 —— 不一致会被 OBS 缩放/裁切，"
+                 "对齐与像素统计都会失真。请让 --canvas 与素材同尺寸。"
+                 % (w, h, CANVAS[0], CANVAS[1]))
+    MARKS = make_marks(h, w)
     cap.set(cv2.CAP_PROP_POS_FRAMES, F0)
 
     tmp = DST + ".part.avi"
@@ -209,11 +230,35 @@ def build_collection():
     # 找不到就会静默落到上一次用的集合上（实测拿到的是 image_source，画面静止、
     # 帧间差 0）—— 这个症状很像「素材没播」，很容易误诊。
     d["name"] = COLL_DST
+    # 画布必须跟着素材走（2026-11-04）：模板是 1080×1920 竖屏，换 1280×720 横屏
+    # 素材后若不改这里，OBS 会按竖屏画布缩放/裁切 —— §9.40.4 那个「模板残留旧画布」
+    # 的坑在别处踩过两次，这里显式写全（resolution / cx,cy / 每项的 scale_ref）。
+    d["resolution"] = {"x": CANVAS[0], "y": CANVAS[1]}
+    for s in d.get("sources", []):
+        if s.get("id") != "scene":
+            continue
+        st = s.get("settings") or {}
+        st["custom_size"] = True
+        st["cx"] = float(CANVAS[0])
+        st["cy"] = float(CANVAS[1])
+        for it in st.get("items", []):
+            it["scale_ref"] = {"x": float(CANVAS[0]), "y": float(CANVAS[1])}
+            it["scale"] = {"x": 1.0, "y": 1.0}
+            it["scale_rel"] = {"x": 1.0, "y": 1.0}
+            it["pos"] = {"x": 0.0, "y": 0.0}
+            # ⚠ 必须是 (0,0)，不能抄模板的 (-1,-1)：模板画布是 1080x1920，
+            # OBS 会把 pos_rel 按画布换算成绝对 pos —— 实测 1280x720 下算成
+            # pos.x=280，画面右移 280 px 被裁（左侧黑边、内容只剩 1000 宽），
+            # 而录制本身一切正常（帧率时长都对），只有对着画面看才发现。
+            # 三组对照实验（pos_rel=0 / bounds 缩放 / pos_rel=1）都能填满。
+            it["pos_rel"] = {"x": 0.0, "y": 0.0}
+            it["align"] = 5
     if os.path.exists(dst) and not os.path.exists(dst + ".bak"):
         shutil.copy2(dst, dst + ".bak")
     with open(dst, "w", encoding="utf-8") as fh:
         json.dump(d, fh, ensure_ascii=False, indent=4)
-    print("集合：%s（替换 %d 处媒体路径）" % (dst, hit))
+    print("集合：%s（替换 %d 处媒体路径，画布 %dx%d）"
+          % (dst, hit, CANVAS[0], CANVAS[1]))
 
 
 def check():
@@ -230,12 +275,46 @@ def check():
 
 
 def main():
+    global SRC, DST, F0, F1, FPS, COLL_SRC, COLL_DST, CANVAS, BITS
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只核对，不重造")
+    ap.add_argument("--src", default=SRC, help="源素材（默认 cam_real_1080x1920.mp4）")
+    ap.add_argument("--start", type=int, default=F0, help="起始帧")
+    ap.add_argument("--end", type=int, default=F1, help="结束帧（不含）")
+    ap.add_argument("--fps", type=int, default=FPS, help="输出帧率，须与素材实际帧率一致")
+    ap.add_argument("--out", default=DST, help="输出素材路径")
+    ap.add_argument("--coll-src", default=COLL_SRC, help="模板集合名")
+    ap.add_argument("--coll-dst", default=COLL_DST, help="目标集合名")
+    ap.add_argument("--canvas", default="",
+                    help="画布 WxH（默认跟随素材；须与素材同尺寸，否则会被缩放/裁切）")
     a = ap.parse_args()
+
+    # 必须 abspath：集合里的 local_file 是**绝对路径**，给相对路径 OBS 会按
+    # 自己的工作目录去找，日志只留一行 `MP: Failed to open media`，画面全黑
+    # 但录制正常（帧率、时长都对），不查日志很难定位。
+    SRC = os.path.abspath(a.src)
+    DST = os.path.abspath(a.out)
+    F0, F1 = a.start, a.end
+    FPS = a.fps
+    n_content = max(1, F1 - F0)
+    BITS = max(8, int(np.ceil(np.log2(n_content + 1))))
+    COLL_SRC = a.coll_src
+    COLL_DST = a.coll_dst
+    if a.canvas:
+        cw, ch = [int(x) for x in a.canvas.lower().split("x")]
+        CANVAS = (cw, ch)
+    else:
+        cap = cv2.VideoCapture(SRC)
+        if cap.isOpened():
+            CANVAS = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                      int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        cap.release()
+
     if a.check:
         check()
         return
+    print("素材段：%s 帧 [%d, %d)，输出 %d fps，画布 %dx%d，条码 %d 格"
+          % (os.path.basename(SRC), F0, F1, FPS, CANVAS[0], CANVAS[1], BITS))
     build_clip()
     build_collection()
 

@@ -234,7 +234,61 @@ def canvas_restore(bak):
         os.remove(bak)
 
 
-def start_obs(collection, extra_env=None, canvas=None):
+def fps_set(fps):
+    """把输出帧率改成 fps，返回原文件备份路径（与 canvas_set 共用同一份备份）。
+
+    为什么需要（2026-11-04，P2-5）：`basic.ini` 默认 `FPSType=2 / FPSCommon=30`。
+    录 60 fps 素材而 OBS 只在 30 fps 渲染，等于抽帧再重复 —— 闪烁法靠的
+    「随时间变化」的信号会先被这一步毁掉，量出来的差异不是美颜造成的。
+    """
+    f = _profile_ini()
+    if not f:
+        print("!! 找不到 basic.ini，帧率未同步")
+        return None
+    bak = f + ".bak_verify_canvas"
+    if not os.path.isfile(bak):
+        shutil.copy2(f, bak)
+    with open(f, "rb") as fh:
+        data = fh.read()
+    import re
+    # FPSType=2 是「常用 FPS 值」模式，四项一起写才一致。
+    for key, val in (("FPSType", 2), ("FPSCommon", fps), ("FPSInt", fps),
+                     ("FPSNum", fps), ("FPSDen", 1)):
+        data = re.sub((r"(?m)^" + key + r"=\d+").encode(),
+                      ("%s=%d" % (key, val)).encode(), data)
+    with open(f, "wb") as fh:
+        fh.write(data)
+    return bak
+
+
+def rec_set(encoder):
+    """临时把录制编码器换成 encoder（返回同一份 basic.ini 备份路径）。
+
+    为什么需要（2026-11-04，P2-5 60 fps 格）：`[AdvOut] RecQuality=Lossless`
+    对 NVENC **无效** —— NVENC 没有无损模式，OBS 会照 CBR 跑（实测日志
+    `rate_control: CBR, bitrate: 10000`，profile 还是 high/4:2:0）。有损录制下
+    同配置两次录制的差异就到了 **p50 6.6 灰阶**（与要测的信号同量级），
+    噪声底直接压在判别门限上。只有 x264 能真无损（Lossless → CRF 0）。
+    """
+    f = _profile_ini()
+    if not f:
+        print("!! 找不到 basic.ini，编码器未同步")
+        return None
+    bak = f + ".bak_verify_canvas"
+    if not os.path.isfile(bak):
+        shutil.copy2(f, bak)
+    with open(f, "rb") as fh:
+        data = fh.read()
+    import re
+    data = re.sub((r"(?m)^RecEncoder=.*$").encode(),
+                  ("RecEncoder=%s" % encoder).encode(), data)
+    with open(f, "wb") as fh:
+        fh.write(data)
+    return bak
+
+
+def start_obs(collection, extra_env=None, canvas=None, fps=None,
+              rec_encoder=None):
     global _CANVAS_BAK
     if obs_running():
         sys.exit("obs64 已在运行，先关掉（或跑 close_obs）")
@@ -258,6 +312,16 @@ def start_obs(collection, extra_env=None, canvas=None):
     if canvas:
         _CANVAS_BAK = canvas_set(*canvas)
         print("画布同步为 %dx%d（退出后恢复）" % canvas)
+    if fps:
+        bak_fps = fps_set(fps)
+        if bak_fps and not _CANVAS_BAK:
+            _CANVAS_BAK = bak_fps
+        print("帧率同步为 %d fps（退出后恢复）" % fps)
+    if rec_encoder:
+        bak_enc = rec_set(rec_encoder)
+        if bak_enc and not _CANVAS_BAK:
+            _CANVAS_BAK = bak_enc
+        print("录制编码器同步为 %s（退出后恢复）" % rec_encoder)
     snap = log_dir_snapshot()
     p = subprocess.Popen([OBS_EXE, "--collection", collection,
                           "--disable-shutdown-check"],

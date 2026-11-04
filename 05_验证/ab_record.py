@@ -42,6 +42,8 @@ from mask_off_probe import CFGS  # noqa: E402
 
 COLL = "beauty_real_ab"
 CANVAS = (1080, 1920)
+FPS = None          # None = 沿用 basic.ini（30）；P2-5 的 60 fps 格要显式给
+REC_ENCODER = None  # None = 沿用 basic.ini（nvenc）；"obs_x264" = 真无损
 OUT = os.path.join(HERE, "out", "ab")
 
 ARMS = {
@@ -73,6 +75,35 @@ ARMS = {
 }
 
 
+def fit_item(c, canvas):
+    """把播放源强制铺满画布（不能依赖集合文件里的几何）。
+
+    为什么（2026-11-04，P2-5 换 1280x720 时踩到）：集合是从 1080x1920 竖屏模板
+    复制来的，OBS 会按自己的基准尺寸把 `pos_rel` / `scale_ref` 换算成绝对
+    `pos` / `scale`。实测 1280x720 下变成「素材放大 2 倍、只显示左上 1/4、
+    落在画布右下」（pos=640,360 / scale=2），而**录制本身完全正常** ——
+    帧率、时长、码率都对，只有对着画面看才发现，日志里一个字都没有。
+
+    这里用 SCALE_STRETCH 直接钉到画布：16:9 素材进 16:9 画布不会变形，
+    也不依赖 OBS 对源尺寸的判断。
+    """
+    for it in c.scene_items("Main"):
+        if it.get("sourceName") != "still":
+            continue
+        c.set_item_transform("Main", it["sceneItemId"], {
+            "alignment": 5,
+            "boundsType": "OBS_BOUNDS_STRETCH",
+            "boundsAlignment": 5,
+            "boundsWidth": float(canvas[0]),
+            "boundsHeight": float(canvas[1]),
+            "positionX": 0.0,
+            "positionY": 0.0,
+            "rotation": 0.0,
+            "cropLeft": 0, "cropTop": 0, "cropRight": 0, "cropBottom": 0,
+        })
+        print("  播放源已铺满画布 %dx%d" % canvas)
+
+
 def record_once(arm, cfg_name, seconds, tag):
     """起一轮 OBS、下参数、录一段、关掉，返回录制文件路径与日志路径。"""
     if not V.close_obs():
@@ -80,7 +111,8 @@ def record_once(arm, cfg_name, seconds, tag):
 
     env = dict(ARMS[arm])
     env["BEAUTY_PROFILE"] = "1"
-    proc, snap = V.start_obs(COLL, extra_env=env, canvas=CANVAS)
+    proc, snap = V.start_obs(COLL, extra_env=env, canvas=CANVAS,
+                             fps=FPS, rec_encoder=REC_ENCODER)
     rec_path = None
     try:
         c = obsctl.wait_ready(wait=120)
@@ -99,6 +131,11 @@ def record_once(arm, cfg_name, seconds, tag):
                 if attempt == 11:
                     raise
                 time.sleep(1.0)
+
+        try:
+            fit_item(c, CANVAS)
+        except Exception as e:
+            print("  !! 铺满画布失败（画面可能被裁）：%s" % e)
 
         # 录制目录直接指到 out/ab，省得去猜默认路径
         os.makedirs(OUT, exist_ok=True)
@@ -151,6 +188,7 @@ def relocate(rec_path, dst):
 
 
 def main(argv=None):
+    global COLL, CANVAS, FPS, REC_ENCODER
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="combo", choices=tuple(CFGS))
     ap.add_argument("--arms", nargs="*", default=["max", "rms", "rms4"],
@@ -158,7 +196,23 @@ def main(argv=None):
     ap.add_argument("--seconds", type=float, default=13.0,
                     help="每臂录制时长；素材 8.13 s 循环，>9 s 才保证覆盖一整圈")
     ap.add_argument("--tag", default="", help="输出文件名后缀")
+    ap.add_argument("--coll", default=COLL, help="场景集合名")
+    ap.add_argument("--canvas", default="",
+                    help="画布 WxH（默认沿用 1080x1920）")
+    ap.add_argument("--fps", type=int, default=0,
+                    help="输出帧率；0 = 沿用 basic.ini。必须与素材帧率一致，"
+                         "否则会抽帧/重帧，闪烁法的时变信号直接失真")
+    ap.add_argument("--lossless", action="store_true",
+                    help="改用 x264 无损录制（NVENC 没有无损模式，"
+                         "有损下噪声底会到 p50 6.6 灰阶，与信号同量级）")
     a = ap.parse_args(argv)
+
+    COLL = a.coll
+    FPS = a.fps or None
+    REC_ENCODER = "obs_x264" if a.lossless else None
+    if a.canvas:
+        cw, ch = [int(x) for x in a.canvas.lower().split("x")]
+        CANVAS = (cw, ch)
 
     os.makedirs(OUT, exist_ok=True)
     meta = []

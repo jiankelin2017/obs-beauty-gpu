@@ -37,7 +37,8 @@ py -3 05_验证\verify_smooth_compiles.py
 | **块聚合口径（2.12.0 / P1-1c）** | **`calib_agg.py`**：一次解码同时算四种块聚合（`max` / `top4` / `rms` / `median`）的判动率，`--sweep` 追加阈值 5/6/7/8/10/12 下的判动率 —— 判断「换口径要不要跟着换阈值」就看它；**`face_box_drift.py`**：全片逐帧 YuNet，量「间隔 k 帧的两份检测框」位移、尺寸变化、IoU，并给出掩码羽化宽度（**0.08 × 脸宽**，2.13.0 据源码更正）作标尺；**`mask_lag_sim.py`**：复现 `detectPeriod`+`detectDue` 状态机 → 每帧掩码年龄 → 落到框序列 → 「掩码错多少像素」与「超羽化帧占比」，`--stills 8 6 4` 可一次扫多档周期、`--json` 落逐帧数据。三支都是离线，不启 OBS | 否（`face_box_drift` 要 onnx） |
 | **掩码偏移值多少灰阶（2.13.0）** | **`make_still_real.py`**：从真实素材里挑一帧「单脸 + 离边 ≥90 px + 脸最大」存 PNG（`assets/real_1080x1920.png`，配集合 `beauty_still_real`，`make_static_collection.py real` 建）；**`mask_off_probe.py --cfg blur\|combo\|strong`**：用 `BEAUTY_DET_OFFSET=dx,dy` 把掩码整体平移 d 像素，静态抓图相减 → 「≥1/2/4/8 灰阶各占多少面积、改动区平均/最大灰阶」，`d=0` 重复跑做阴性对照；**`mask_cost.py --cfg X --lag out/masklag_curve.json`**：把逐帧偏移喂进上面的曲线 → 「平均每帧脸上多大面积差几个灰阶」，并按 `detAdaptStill` 分档 | 是（要 OBS + `BEAUTY_DET_OFFSET`） |
 | **人眼 A/B（9.35，2.13.0）** | **`make_ab_clip.py`**：造 A/B 素材 —— 从 `assets/cam_real_1080x1920.mp4` 取最坏段 `[1421,1661)`，前置黑/红/绿三连同步锚，并在**每帧右下角烧 8 位帧号条码**（`stamp_code` / `read_code`，白=1 黑=0，灰=不可靠返回 −1）；**`ab_record.py --cfg combo --arms max rms rms4`**：起 OBS 逐臂录（无损 I444，见下）；**`ab_match.py --a A.mp4 --b B.mp4`**：**按帧号条码配对**（不是按时间，避开两臂起点差 2.5 帧与各自的重复/跳帧），输出 ≥4/≥8 灰阶面积、单帧最大差、均值差，并报告各臂时间线的重复/跳帧；**`ab_make.py`**：出 `ab_side`/`ab_face`/`ab_flicker`/`ab_slow`/`ab_brow`/`ab_diff_x20` 六支片，可直接给人眼判；**`ab_keys.py`**：抽最差/中位/最静关键帧图；**`ab_ladder.py`**：可见度标尺 —— 按实测 σ 在真帧上叠 0/半幅/实幅/2 倍/4 倍高斯鼓包，1:1 与 2 倍横排，把「差几个灰阶」换成「多大才看得见」。`ab_align*.py` 是三种失败的对齐尝试（**已废弃，只留作记录**：单帧匹配/序列互相关/DP，DP 会因匹配区静止给出残差 0.055 的假象） | 录制：是；其余：否 |
-| 录制前要改的 profile（人眼 A/B 专用） | `basic.ini`：`ColorFormat=NV12→I444`、`ColorRange=Partial→Full`、`RecEncoder=none→obs_nvenc_h264_tex` + `RecQuality=Lossless`。备份 `basic.ini.bak_i444`。**同臂两次逐像素差为 0** 是这套设置的验收线，改回有损编码前先复测噪声底 | — |
+| 录制前要改的 profile（人眼 A/B 专用） | `basic.ini`：`ColorFormat=NV12→I444`、`ColorRange=Partial→Full`。备份 `basic.ini.bak_i444`。**编码器不能靠 `basic.ini`**（2026-11-04 更正，§9.42.1）：`RecEncoder` / `RecQuality=Lossless` / `RecBitrate` 对 NVENC **都不生效**，实际参数落在 `basic/profiles/未命名/recordEncoder.json`（改成 `{"rate_control":"CRF","crf":0}` 后底噪才从 p50 **6.6** 降到 **0.00**，备份 `.bak_cbr`）。现成做法是给 `ab_record.py` 加 `--lossless`（走 `obs_x264`），**不要手改 profile**。**同臂两次逐像素差为 0** 是这套设置的验收线，改回有损编码前先复测噪声底 | — |
+| **帧率对照 / 60 fps 格（9.42）** | **`ab_pair_amp.py`**：通用「按帧号配对 + 量带幅度」（`--crop` 限区域、`--strict` 剔时序歧义、`amp_*.json` 同时落 `per_frame` 与 `codes`，后者用来把「超门限」换算成「看第几秒」）；**`make_ab_clip.py`** 已参数化（`--src/--start/--end/--fps/--canvas`），条码位宽按帧数自适应（480 帧内容 → **9 格**，8 格会溢出）；**`ab_record.py --coll/--canvas/--fps/--lossless`** 逐臂录；**`ab_flicker_60fps.py`**：出闪烁片 —— 60 fps **每 6 帧**切才与 30 fps 每 3 帧的 100 ms 等时，`--fmt ffv1`（mkv，写盘 0 灰阶差）/ `x264`（mp4，2 灰阶），`--from-amp/--thr/--pad/--loop` 只循环超门限片段，写盘后自动抽检编码保真。**不要再试 `cv2.VideoWriter` + FFV1 + mp4**：fourcc 与容器分开传、错组合只在运行时失败 | 录制：是；其余：否 |
 | **帧节拍归因（9.35.7）** | **`pace_probe.py`**：量录制里源帧的真重复/跳帧。**两个口径必须分开**：真重复 = 码值相同 **且** 相邻帧像素差 < 0.2；码值相同但像素差 46–86 的是**条码误读**（`max` 臂 8 处全是这类）。归因臂在 `ab_record.py` 的 `ARMS` 里：`fix4`/`fix8`（`BEAUTY_MASK_EVERY=N` 会**自动关掉自适应**，把节奏钉死）、`rms30`（still=30）、`rms1`/`max64`（阈值对调，证明抖动跟 `dper` 走而不是跟 `agg` 走）。结论：重复率 ≈ 1/提交间隔，间隔为 1 时归零 | 录制：是 |
 | **闪烁 JND 标尺（9.35.8）** | **`ab_jnd.py`**：把「看不看得出」换成「从第几档看得见」。同位置同形状的高斯鼓包（σ 由 FWHM 63 px 反推）按 0/6/9/12/15/18/24/36 灰阶逐档闪（5 Hz，每档 3 s），1:1 裁切不缩放。**第 0 档是阴性对照**（两臂完全相同），它若也「看见闪烁」则整片作废。段长 4.5 s，所以第 n 档的闪烁起点是 `4.5×(n−1)+0.5` 秒。**`ab_amp.py`**：把标尺档位与实测差异放到同一把尺上（校验标尺片 + 对三对录制逐帧算带幅度） | 否 |
 | **幅度口径（务必统一，否则是两把尺子）** | 带幅度 = **逐像素取通道最大差 → 7×7 摊平 → 区域峰值**。同一对帧用灰度差会小 40%（12.76 vs 8.92），因为 `rms` 的掩码位移带动**色度**：一个通道涨、另一个跌，灰度加权后互相抵消。标尺上的鼓包是**三通道同加**的纯亮度变化，其通道最大 = 灰度差，所以只有通道最大口径能与标尺对齐。另注意：`ab_ladder`/`ab_jnd` 的「实幅」取的是**最差帧**，全序列中位数只有 7.04 | — |
@@ -198,9 +199,10 @@ py -3 05_验证\verify_smooth_compiles.py
   **可用区间**：遮挡段 `85–87s`、`99–105s`、`107–115s`（1080p 那条，来自手持书本/包装盒真实挡脸）；
   720p60 那条几乎全程单脸、可直接当 60 fps 输入。
   **它填的是 §9.37.6 的「遮挡未验」与 P2-5 的「60 fps 缺口」**；**超小脸与真侧脸它补不了**
-  （1080p 那条小脸只占 0.5%）。两项后来都另走一条路收口（`PROGRESS §9.41`）：
+  （1080p 那条小脸只占 0.5%）。三项后来都另走一条路收口（`PROGRESS §9.41` / `§9.42`）：
   超小脸改**离线缩放静图**（`make_tiny_collection.py`，不需要真人），侧脸 90° **判为输入域外**
-  （该姿态下 YuNet 先失效，到不了五官段）。
+  （该姿态下 YuNet 先失效，到不了五官段），60 fps 格用这条 720p60 素材做成
+  `beauty_real_ab720p60` 集合跑完对照（`§9.42`：**同一素材 30 fps 换 60 fps，代价 p50 8.86→0.00**）。
   > 与 `face_front_*.png` 的区别：那是合成的正面大脸（脸占画面高约 50%），这是**真实主持人**、
   > 脸宽只占画面 5–10%。所以它的掩码覆盖率天然只有 1–3%，**拿它跑 `verify_region_equiv.py` 时
   > E2 的 1% 阈值会贴边** —— 不是判据变严，而是素材里脸本来就小，读数要连着覆盖率一起看。
