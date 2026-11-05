@@ -1,7 +1,7 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.3
+version: 0.1.4
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -59,7 +59,61 @@ status: Active
 | [`archive/changelog-src-sharpen-threshold-20261105.md`](archive/changelog-src-sharpen-threshold-20261105.md) | `04_文档/修复_锐化阈值被覆盖_20261105.md` | 结论已并入；正文冻结 | `CHANGELOG.md` |
 | [`archive/conclusion-seg-occlusion-20261105.md`](archive/conclusion-seg-occlusion-20261105.md) | `04_文档/结论_分割对手遮脸无效_20261105.md` | 实测结论稿，已改写为 ADR；原文保留合成素材数据与三个待决策方向 | `adr/adr-seg-not-for-occlusion.md` |
 
-归档区另有：`05_验证/out/logs/*.md` 25 篇过程日志、`_回档备份_20261104_2249/` 快照（批 5 迁入）。
+归档区另有：25 篇验收过程日志（下表）与 2.16.1 回档快照的 4 篇文档（下表）。
+
+### 2.1 过程日志归档映射（25 篇 · 批 5）
+
+`05_验证/out/logs/*.md` 已按 `log-YYYYMMDD-<主题>.md` 统一命名迁入 `archive/`，**正文冻结、仅加废弃头**。
+其中 **20 篇原本已被 Git 跟踪**（迁移记为删除 + 归档新增），**5 篇为首次纳入仓库**；
+7 篇 T10-b 同主题报告用时间戳区分。原路径 `out/logs/` 已失效，`out/logs/` 仍是脚本输出目录。
+
+| 原文件名 | 归档件 |
+|---|---|
+| `P0-10_spot_edge_20261103.md` | [`log-20261103-p0-10-spot-edge.md`](archive/log-20261103-p0-10-spot-edge.md) |
+| `P0-1_slope_20261103.md` | [`log-20261103-p0-1-slope.md`](archive/log-20261103-p0-1-slope.md) |
+| `P0-2_region4k_20261103.md` | [`log-20261103-p0-2-region4k.md`](archive/log-20261103-p0-2-region4k.md) |
+| `P0-7_region_20261103.md` | [`log-20261103-p0-7-region.md`](archive/log-20261103-p0-7-region.md) |
+| `P0-7_samemask_20261103.md` | [`log-20261103-p0-7-samemask.md`](archive/log-20261103-p0-7-samemask.md) |
+| `P0-8_4k_S0recure_20261103.md` | [`log-20261103-p0-8-4k-s0recure.md`](archive/log-20261103-p0-8-4k-s0recure.md) |
+| `P0-8_fix_20261103.md` | [`log-20261103-p0-8-fix.md`](archive/log-20261103-p0-8-fix.md) |
+| `P0-9_geomonly_gate_20261103.md` | [`log-20261103-p0-9-geomonly-gate.md`](archive/log-20261103-p0-9-geomonly-gate.md) |
+| `S0_rebind_20261103.md` | [`log-20261103-s0-rebind.md`](archive/log-20261103-s0-rebind.md) |
+| `S7_adaptive_20261103.md` | [`log-20261103-s7-adaptive.md`](archive/log-20261103-s7-adaptive.md) |
+| `T10b_region_equiv_20261104_120733.md` | [`log-20261104-t10b-region-equiv-120733.md`](archive/log-20261104-t10b-region-equiv-120733.md) |
+| `T10b_region_equiv_20261104_121203.md` | [`log-20261104-t10b-region-equiv-121203.md`](archive/log-20261104-t10b-region-equiv-121203.md) |
+| `T10b_region_equiv_20261104_125849.md` | [`log-20261104-t10b-region-equiv-125849.md`](archive/log-20261104-t10b-region-equiv-125849.md) |
+| `T10b_region_equiv_超小脸_20261104_125752.md` | [`log-20261104-t10b-region-equiv-tinyface-125752.md`](archive/log-20261104-t10b-region-equiv-tinyface-125752.md) |
+| `T10b_region_equiv_超小脸_20261104_130509.md` | [`log-20261104-t10b-region-equiv-tinyface-130509.md`](archive/log-20261104-t10b-region-equiv-tinyface-130509.md) |
+| `T10b_region_equiv_遮挡_20261104_124733.md` | [`log-20261104-t10b-region-equiv-occlusion-124733.md`](archive/log-20261104-t10b-region-equiv-occlusion-124733.md) |
+| `T10b_region_equiv_遮挡_20261104_124750.md` | [`log-20261104-t10b-region-equiv-occlusion-124750.md`](archive/log-20261104-t10b-region-equiv-occlusion-124750.md) |
+| `cam_live_20261103.md` | [`log-20261103-cam-live.md`](archive/log-20261103-cam-live.md) |
+| `camera_degraded_20261103.md` | [`log-20261103-camera-degraded.md`](archive/log-20261103-camera-degraded.md) |
+| `front_asset_20261103.md` | [`log-20261103-front-asset.md`](archive/log-20261103-front-asset.md) |
+| `input_rot_2.10.0_20261104.md` | [`log-20261104-input-rot-2.10.0.md`](archive/log-20261104-input-rot-2.10.0.md) |
+| `material_capture_20261104_122241.md` | [`log-20261104-material-capture-122241.md`](archive/log-20261104-material-capture-122241.md) |
+| `region_geomonly_20261103.md` | [`log-20261103-region-geomonly.md`](archive/log-20261103-region-geomonly.md) |
+| `soak4k_30min_20261103.md` | [`log-20261103-soak4k-30min.md`](archive/log-20261103-soak4k-30min.md) |
+| `soak4k_s3_30min_20261103.md` | [`log-20261103-soak4k-s3-30min.md`](archive/log-20261103-soak4k-s3-30min.md) |
+
+### 2.2 回档快照文档（4 篇 · 批 5）
+
+`_回档备份_20261104_2249/` 的 4 篇 `.md` 已迁入 `archive/backup-20261104_2249/`，正文冻结。
+**该快照其余 14 个源码 / dll / `Setup.exe` 文件仍在原目录、未移动、未纳入仓库**；
+需完整还原 18 文件快照时，把 4 篇归档件复制回原目录对应位置。
+
+| 原位置 | 归档件 |
+|---|---|
+| `_回档备份_20261104_2249/PROGRESS.md` | [`backup-20261104_2249/backup-progress-20261104.md`](archive/backup-20261104_2249/backup-progress-20261104.md) |
+| `_回档备份_20261104_2249/README.md` | [`backup-20261104_2249/backup-readme-20261104.md`](archive/backup-20261104_2249/backup-readme-20261104.md) |
+| `_回档备份_20261104_2249/04_文档/开关总表.md` | [`backup-20261104_2249/backup-switches-20261104.md`](archive/backup-20261104_2249/backup-switches-20261104.md) |
+| `_回档备份_20261104_2249/04_文档/开发流程与优化计划.md` | [`backup-20261104_2249/backup-devplan-20261104.md`](archive/backup-20261104_2249/backup-devplan-20261104.md) |
+
+### 2.3 不纳入文档体系的运行时产物
+
+按 `.gitignore` 保持原位、不入库：`05_验证/out/logs/` 下 **27 篇 `.txt`、13 篇 `.json`、20 张 `.png`**，
+以及回档快照里其余 14 个二进制 / 源码文件。脚本新产生的报告一律属运行时产物，**不进文档体系**；
+归档件只是历史快照，结论以 `README.md` / `CHANGELOG.md` / `guides/` 为准。
+`archive/` 整棵子树排除于 `check_release.py` 语料扫描（避免未入表内部旋钮制造假 FAIL）。
 
 ## 3. `PROGRESS §9.x` 统一映射（B1）
 
@@ -107,7 +161,7 @@ status: Active
 | 2 | G3/G9 参考与工具 | **已落地**（commit `8deeaac`） |
 | 3 | G4/G5/G6 设计稿 | **已落地**（单独 commit） |
 | 4 | G7/G8 决策与变更 | **已落地**（单独 commit） |
-| 5 | G10 过程日志与回档快照归档 | 待执行 |
+| 5 | G10 过程日志与回档快照归档 | **已落地**（单独 commit） |
 | 6 | 防腐化机制建议 | 待输出 |
 
 ## 6. 维护规则（摘要）
@@ -124,3 +178,5 @@ status: Active
   「**Draft · 未接线，不可作为当前实现依据**」，并写明适用条件与失效说明。
 - `adr/` 命名 `adr-<主题>.md`，**不带日期**，一事一篇。归纳性而非原始决策的 ADR
   必须在头部标注「归纳、待人工确认」，不得冒充已接受决策。
+- 过程日志按 `log-YYYYMMDD-<主题>.md` 归档，同主题多批次须带时间戳；
+  `05_验证/out/logs/` 是脚本输出目录，新报告属运行时产物、不进 `docs/`。

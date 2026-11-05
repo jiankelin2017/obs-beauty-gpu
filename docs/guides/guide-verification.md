@@ -1,7 +1,7 @@
 ---
 doc_type: guides
 title: 验证工具与 21 条坑
-version: 0.1.0
+version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -68,11 +68,11 @@ py -3 05_验证\verify_smooth_compiles.py
 | **遮挡格集合（2.14.0 后补）** | **`make_occ_collection.py`**：从 `beauty_rot_live`（1920×1080、源尺寸 = 画布、已挂 Beauty 滤镜）复制出 `beauty_real_cam_occ1080`，把 `image_source` 换成 `ffmpeg_source` 循环播放剪好的遮挡片段。**照抄会踩的坑**：模板里 scene 的 `custom_size` `cx/cy` 残留 **1080/1920**（它被 `V.start_obs(canvas=...)` 改过画布），不改就会把 1920×1080 的画面按竖屏裁切 —— 必须同步改成 1920/1080，并把 `pos_rel` 设 `(-1,-1)`。素材 `assets/capture/occ_1080p_86-120s.mp4`（原片 86–120 s，34 s，中脸 45.7% / 遮挡 54.3%），剪法与逐秒分布见 `PROGRESS §9.40` | 否 |
 
 | 五官正确性对拍 | **`verify_region_samemask.py`（首选，2.8.3）**：插件内自检，同一帧、同一份掩码（geomOnly 帧读回 GPU 生产掩码当基准），`--samples/--delay/--only/--gpu-region`；`--only` 自 T10-b（2026-11-04）起含 **`threed`**（立体），并新增 `--strength` 覆盖五官强度（不给 = 沿用历史口径 eye/pouch/naso 50、threed 60、spot 40）。**默认口径不变，否则与 §9.20/§9.26 的数据不可比**；`verify_region_geomonly.py`（旧的截图对拍，**已证伪，只留作记录**） | 是 |
-| **五官等价判据（T10-b）** | **`verify_region_equiv.py`（T10-b，2026-11-04）**：把 `verify_region_samemask.py` 的自检跑成**矩阵**并逐格判 PASS/FAIL，一次跑完 **17 格**（720p/4K × 立体/亮眼/眼袋/法令纹/祛斑/五族全开 × 强度 50/100 + 真人竖屏 6 帧 + **遮挡段 6 帧** + **超小脸三档**），末尾自动验「多脸回退」（`face_4k.png` 4 脸素材，`GPU_REGION=0/1` 两臂程序截图必须逐字节相同）。判据 E1–E5 见脚本头部，**超小脸格的 E2 下限按 `MIN_COV` 单独放宽**（掩码覆盖本来就只有 0.4%，按 1% 判会误杀自己，`§9.41.4`）；`--quick` 只跑立体+全开，`--dry-run` 不起 OBS，**`--match 遮挡` / `--match 超小脸` 只补某一批**（此时不跑多脸回退，报告文件名带后缀）。结果写 `out/logs/T10b_region_equiv[_<匹配词>]_<时间戳>.md`；配套 `make_occ_collection.py` 造遮挡格集合、`make_tiny_collection.py` 造超小脸集合（截图缩放 + pad，不需要真人） | 是 |
+| **五官等价判据（T10-b）** | **`verify_region_equiv.py`（T10-b，2026-11-04）**：把 `verify_region_samemask.py` 的自检跑成**矩阵**并逐格判 PASS/FAIL，一次跑完 **17 格**（720p/4K × 立体/亮眼/眼袋/法令纹/祛斑/五族全开 × 强度 50/100 + 真人竖屏 6 帧 + **遮挡段 6 帧** + **超小脸三档**），末尾自动验「多脸回退」（`face_4k.png` 4 脸素材，`GPU_REGION=0/1` 两臂程序截图必须逐字节相同）。判据 E1–E5 见脚本头部，**超小脸格的 E2 下限按 `MIN_COV` 单独放宽**（掩码覆盖本来就只有 0.4%，按 1% 判会误杀自己，`§9.41.4`）；`--quick` 只跑立体+全开，`--dry-run` 不起 OBS，**`--match 遮挡` / `--match 超小脸` 只补某一批**（此时不跑多脸回退，报告文件名带后缀）。结果写 `out/logs/T10b_region_equiv[_<匹配词>]_<时间戳>.md`（脚本输出命名；历史 7 篇同主题报告已归档，见 [`../INDEX.md`](../INDEX.md) §2.1）；配套 `make_occ_collection.py` 造遮挡格集合、`make_tiny_collection.py` 造超小脸集合（截图缩放 + pad，不需要真人） | 是 |
 | **开关两臂验证（2.14.0）** | **`verify_switch_arm.py`**：只回答一个问题 ——「环境变量到底有没有把开关拨到预期那一侧」。起 OBS 两次（**不设** / **显式设关闭值**），只匹配启动日志里那条一次性状态行，**不抓画面**（画面等价属各自的等价矩阵）。默认参数就是 2.14.0 的 `GPU_REGION`：A 不设 → 「GPU 生产链」、B `=0` → 「CPU 老路」。换别的开关用 `--switch/--off-value/--expect-on/--expect-off`；`--attach` 复用已在跑的 OBS（只验当前一侧）。补上《开关总表》回退原则第 3 条「开关本身也是被验收对象」一直缺的那件工具 | 是 |
-| 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `out/logs/P0-8_4k_S0recure_20261103.md`，帧类型对比见 `out/logs/P0-9_geomonly_gate_20261103.md` | 是 |
+| 祛斑正确性对拍 | **`verify_spot_pixels.py`（2.9.0）**：同一帧内容取「滤镜开 / 关」两张源截图逐像素比，只开祛斑一项。`--level` 是面板刻度 0..100（**0 档必须 0 像素**，作阴性对照）；`--probe N` 额外做 N 次时序采样并打印极值比（>1.2 即判帧间不稳）；`--env K=V`（可重复）开对照臂，例如 `--env BEAUTY_DETECT_SMALL=0 --env BEAUTY_MASK_GEOM_ONLY=0` 走有掩码帧。720p/4K 双档判据见 `docs/archive/log-20261103-p0-8-4k-s0recure.md`，帧类型对比见 `docs/archive/log-20261103-p0-9-geomonly-gate.md` | 是 |
 | GPU 祛斑边界差离线复算 | **`analyze_spot_edge.py`（2.9.1）**：P0-10 用。从 `BEAUTY_M1_DUMP_DIR` 落盘的原图 + 掩码离线复算 CPU（截断窗口）与 GPU（clamp 重复）两种盒均值实现，验证「差异不随 k 变化、贴在 ROI 底边 2 像素带」这一结构性特征。复算结果（177 px / maxdiff 4 / 平均偏差 2.23 / bbox 一致）与插件内实测逐项对上。属诊断工具，**不进装机** | 否 |
-| 输入旋转验收 | **2.10.0 实测过的方法**：判据不是「像素差多少」而是**效果落在哪里** —— `footprint = |输出 − 输入源图| > 0`，用「躺下就检不到」的 **3/4 侧脸**做阴性对照（正放 vs 躺放 + `input_rot=0/90/270`），比 footprint 面积与 IoU。实测：正放 14.30%、躺放 `ir=0` **0.24%**、`ir=90` **12.83%**、`ir=270` 0.23%。回归仍用 `verify_s1_correct.py capture` 六配置（`input_rot=0` 必须与上一版 `maxdiff=0`）。记录见 `out/logs/input_rot_2.10.0_20261104.md` | 是 |
+| 输入旋转验收 | **2.10.0 实测过的方法**：判据不是「像素差多少」而是**效果落在哪里** —— `footprint = |输出 − 输入源图| > 0`，用「躺下就检不到」的 **3/4 侧脸**做阴性对照（正放 vs 躺放 + `input_rot=0/90/270`），比 footprint 面积与 IoU。实测：正放 14.30%、躺放 `ir=0` **0.24%**、`ir=90` **12.83%**、`ir=270` 0.23%。回归仍用 `verify_s1_correct.py capture` 六配置（`input_rot=0` 必须与上一版 `maxdiff=0`）。记录见 `docs/archive/log-20261104-input-rot-2.10.0.md` | 是 |
 | **输入旋转实机验收（2.13.1）** | **`rot_live_check.py`**：起 OBS、给采集源挂滤镜、自动切 `ir=0/90/180/270` 四臂，取 perf 行的「有脸 %」判「旋转有没有进全帧检测路径」。**判据是臂间差距，不是绝对值**：正放臂 ≈100%、三个旋转臂 ≈0 即 PASS（2.13.0 及以前四臂会给同一个数）。三个坑：① 「掩码 %」在只开五官时恒为 0（`gonly=180`，纯几何掩码），不能当判据；② 真人低头/抬头会让同一臂内摆动 35 个百分点；③ 实机 footprint 必须用 `>2` 阈值，否则传感器噪声让它恒为 96%。`--attach` 可复用已开的 OBS。记录见 `PROGRESS §9.36` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
 | **发布一致性** | **`check_release.py`（2.11.0，3.0.1 起 12 条）**：不需要 OBS、不需要画面，**12 条 PASS**（3.0.0 及以前是 9 条）—— ① 版本单源（`BEAUTY_BUILD_STR` 只许一处定义）；② **在 dll 二进制里搜版本字符串**（ASCII + UTF-16LE，撞版本号当场暴露）；③ 装机 dll == 构建 dll；④ `07_安装包` 载荷 == 构建 dll；⑤ 源码 / 安装包 / 装机 / solo **四份 6 个 `.hlsl` 逐字节相同**（多一个文件也算 FAIL）；⑥ 开关表 ⊆ 源码 `getenv()`，且「源码有、表里没有、别的文档提到」= 0。**3.0.1 新增 3 条 Setup.exe 断言**：安装路径由 `%PROGRAMDATA%` 派生、Setup.exe 内含当前版本串、内嵌 dll + 6 shader 与磁盘 payload 逐字节相同（修「装了等于没装」）。`--strict` 把 WARN 也算失败（发布前用），`--no-installed` 只查仓库。**打完 `Setup.exe` 之后跑**，当前 `--strict` 为 **12 PASS / 0 WARN / 0 FAIL**；见 `PROGRESS §9.30` | 否 |
@@ -152,7 +152,7 @@ py -3 05_验证\verify_smooth_compiles.py
    ≥8 的像素固定在同两点；关掉 geomOnly（`BEAUTY_MASK_GEOM_ONLY=0`）差异反而变大。
    要判五官算法，用 `verify_region_samemask.py`（同一个自检，2.8.3 起支持 geomOnly 帧）：
    它读回 GPU 本帧的生产掩码当 CPU 基准，比的是「同一份掩码 + 两种算法」。
-   720p / 4K 各 5 样本 maxdiff 全 ≤1。详见 `out/logs/P0-7_samemask_20261103.md`。
+   720p / 4K 各 5 样本 maxdiff 全 ≤1。详见 `docs/archive/log-20261103-p0-7-samemask.md`。
 11. **参数要在起 OBS 之前写进集合 JSON，不能等起来再下发**。自检是「第一个满足条件的帧就
    取样」，而 OBS 从启动到 WebSocket 可用要 2~4 s —— 等 `apply_load` 到达，样本早取完了。
    症状是「参数明明改了，日志里却是旧值」：`--only spot` 把另外三项置 0，日志仍是
@@ -267,4 +267,15 @@ py -3 05_验证\verify_smooth_compiles.py
 - **运动素材的场景集合**：`beauty_motion720`（`motion_720p.mp4` 循环，1280×720），用
   `py -3 05_验证\make_motion_collection.py` 重建。它是 S7 这类「按运动自适应」改动的唯一
   验证手段 —— 静态素材看不出任何滞后，只能证明「不动时一致」。
-- **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。长跑一结束就把日志复制到 `out/logs/`（该目录已存在，存量见其下 `*.md` 报告），再启动下一个 OBS 实例。**该目录下 25 篇过程报告将在治理批 5 迁入 `docs/archive/`**，届时按 [`../INDEX.md`](../INDEX.md) §2 检索。
+- **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。长跑一结束就把日志复制到 `out/logs/`（该目录仍在，现只剩 `.txt` / `.json` / `.png` 运行时产物），再启动下一个 OBS 实例。**原存于该目录下的 25 篇过程报告已在治理批 5 迁入 `docs/archive/log-YYYYMMDD-<主题>.md`**，按 [`../INDEX.md`](../INDEX.md) §2.1 检索旧名 → 新名映射；`out/logs/` 仍是脚本输出目录，新报告不入库。
+
+## 附：过程日志归档（治理批 5）
+
+> **结论**：`05_验证/out/logs/*.md` 的 25 篇验收过程日志已于 2026-11-05 归档为
+> `docs/archive/log-YYYYMMDD-<主题>.md`，旧名 → 新名映射见 [`../INDEX.md`](../INDEX.md) §2.1。
+> 归档件**正文冻结**，只加废弃头，不作为当前结论依据；本文表格里的数字是已转录的结论。
+>
+> `out/logs/` 仍是脚本输出目录，但新报告与同目录下的 27 篇 `.txt` / 13 篇 `.json` / 20 张 `.png`
+> 均属运行时产物，保持 `.gitignore`，**不进文档体系、不入库**。
+> 回档快照 `_回档备份_20261104_2249/` 的 4 篇文档另见 [`../INDEX.md`](../INDEX.md) §2.2，
+> 其余 14 个二进制 / 源码文件仍在原目录。

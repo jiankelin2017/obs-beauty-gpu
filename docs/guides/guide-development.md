@@ -1,7 +1,7 @@
 ---
 doc_type: guides
 title: 开发流程与优化计划
-version: 0.1.3
+version: 0.1.4
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -196,7 +196,7 @@ supersedes: 04_文档/开发流程与优化计划.md
 |---|---|---|---|---|---|---|---|
 | **P0-1** ✅ | S5 斜率判定 | 探针已在装机 DLL；S5 只减 draw/RT 切换 | `py -3 05_验证/slope_smooth.py --rounds 3` | **已判：像素项占 83–87%，走「斜率≈0」分支 → 砍 S5**（`PROGRESS §9.12.2`） | 不设即默认 | 10 min | 是 |
 | **P0-2** ✅ | 五官翻默认的**稳定性关**（`T10-b` 的第一关，非整项） | `GPU_REGION` 当时默认关，5.6× 拿不到 | 4K + 五官参数长跑 30 min ×2 | **已判**：稳定性 60 min / 65160 帧零异常。当时性能 54–58 ms 的根因后来查明（§9.17），已在 2.8.1 修掉，现 **2.10 ms**；像素在 2.9.1（P0-10）与 §9.37 收敛到 1 灰阶，**2.14.0 已翻默认开** | `BEAUTY_GPU_REGION=0` | 1 h | 是 |
-| **P0-3** ✅ | 装机体↔基线复绑 | 装机 DLL(00:41) 晚于验收数据(00:11) | `s0_lock.py --rounds 2 --seconds 30` + `gate.py --skip-transfer --cmp` | **已过**：720p Δ引擎 0.01、4K 0.02，ALL PASS；MD5 `BA5363F3…` 写入 `05_验证/out/logs/S0_rebind_20261103.md`（`PROGRESS §9.12.1`） | 无 | 20 min | 是 |
+| **P0-3** ✅ | 装机体↔基线复绑 | 装机 DLL(00:41) 晚于验收数据(00:11) | `s0_lock.py --rounds 2 --seconds 30` + `gate.py --skip-transfer --cmp` | **已过**：720p Δ引擎 0.01、4K 0.02，ALL PASS；MD5 `BA5363F3…` 写入 `docs/archive/log-20261103-s0-rebind.md`（`PROGRESS §9.12.1`） | 无 | 20 min | 是 |
 | **P0-4** ✅ | 装机脚本收口（**只两项**，已完成 2.7.1） | ① 装完的逐文件校验只打印 `MISMATCH` 不 throw；② solo 目录硬编码 `D:\obs_beauty_gpu\shaders`（`7_install_gpu.ps1` 第 79 行） | ① `-not $ok` 即 `throw`；② 改成 `$env:BEAUTY_SOLO_SHADER_DIR` **优先**、未设时回退硬编码；目录不存在则跳过（提示，不报错） | **已验收**：env 覆盖 / 漂移拦截 / 缺目录跳过 / 未设回退 / 空串回退五例，加逐文件校验通过与被篡改两例，全部符合预期（`c4bdc19`） | 无 | 0.5 h | 否 |
 | **P0-5** | 开关表口径维护 | 已补到 **47 条**（曾漏 `SMOOTH_PASSES`、`SPOT_DEBUG`、`WARP`、`FACE_MODEL`；2.11.0 一次扫出 7 条、新增 `MOTION_GPU`，2.11.1 再加 `MOT_DUMP`，2.12.0 加 `DET_ADAPT_AGG`，2.13.0 加 `DET_OFFSET`），口径为 `源码 ∩ (文档 ∪ 工具)` | 保持：新增开关同批进表；改源码后跑 `05_验证/check_release.py`（**自动双向比对**，不再靠人眼） | 表内 47 条逐条能在源码 `getenv()` 找到；「源码有、表里没有、但别的文档提到」= FAIL | 无 | 0.2 h | 否 |
 | **P0-6** ✅ | 五官段的连带代价（原写“耦合缺陷”，两次改判） | 真根因不是“没有 GPU 版本”，而是 `beauty_region_chain()` 要求 `job.mask` 非空，而 geomOnly 帧该指针恒空 → 五官链每帧放弃 → `region_blocks` 断前缀 → 细节/美形落 CPU + 整帧回读（§9.17.1） | **已修（2.8.1）**：判据改成「有没有掩码纹理」`(!job.mask && !f->mask_skin_use)`；多脸仍放弃 | **达标**：4K + 五官往返 54.02–57.64 → **2.10 ms**，`S/T/R/W` 全满、`tsm` 恢复（§9.17.3） | `BEAUTY_GPU_REGION=0` | 已完成 | 是 |
@@ -301,3 +301,4 @@ supersedes: 04_文档/开发流程与优化计划.md
 | [`../design/design-mask-gpu.md`](../design/design-mask-gpu.md) 等 7 篇 | 分段设计稿（掩码 / 五官 / 输入旋转 / 运动判定 / 遮挡掩码 Draft / SDK 移植 Draft / 整帧美白）；逐篇路径见 [`../INDEX.md`](../INDEX.md) §1 | 改对应代码之前 |
 | [`../reference/reference-baseline.md`](../reference/reference-baseline.md) | 基线测量规程（历史参考） | 跑诊断 / 读日志 / 复算 |
 | [`../adr/adr-multi-instance-slots.md`](../adr/adr-multi-instance-slots.md) 等 4 篇 | 架构决策（多实例引擎槽 / ProgramData 安装路径 / 分割不用于遮挡 / CPU-GPU 共用 `faceGeom`）；逐篇路径见 [`../INDEX.md`](../INDEX.md) §1 | 改动相关架构之前 |
+| [`../INDEX.md`](../INDEX.md) §2.1 / §2.2 | 25 篇过程日志与 4 篇回档快照的归档映射 | 查某轮验收日志原文 |
