@@ -1,7 +1,7 @@
 ---
 doc_type: guides
 title: 开发流程与优化计划
-version: 0.1.1
+version: 0.1.2
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -298,5 +298,5 @@ supersedes: 04_文档/开发流程与优化计划.md
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 用户可见变更 | 判断某版改了什么、怎么回退 |
 | [`../reference/reference-switches.md`](../reference/reference-switches.md) | 开关字典 | 查默认值 / 回退 |
 | [`../archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) | 证据总账（已归档，按 `§9.x` 检索） | 查某轮实测数字、踩坑经过 |
-| `../../04_文档/方案A_*设计.md` | 分段设计稿（批 3 迁入 `../design/`） | 改对应代码之前 |
+| [`../design/design-mask-gpu.md`](../design/design-mask-gpu.md) 等 7 篇 | 分段设计稿（掩码 / 五官 / 输入旋转 / 运动判定 / 遮挡掩码 Draft / SDK 移植 Draft / 整帧美白）；逐篇路径见 [`../INDEX.md`](../INDEX.md) §1 | 改对应代码之前 |
 | [`../reference/reference-baseline.md`](../reference/reference-baseline.md) | 基线测量规程（历史参考） | 跑诊断 / 读日志 / 复算 |

@@ -1,7 +1,7 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.1
+version: 0.1.2
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -28,8 +28,16 @@ status: Active
 | 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
 | 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
 | 基线测量规程（历史） | [`reference/reference-baseline.md`](reference/reference-baseline.md) | reference | Active（历史参考） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/Phase0_基线测量规程.md` |
+| 掩码上 GPU 设计 | [`design/design-mask-gpu.md`](design/design-mask-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案A_5b2_掩码上GPU设计.md` |
+| 五官段 GPU 设计 | [`design/design-region-gpu.md`](design/design-region-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案A_五官GPU设计.md` |
+| 输入旋转 | [`design/design-input-rotation.md`](design/design-input-rotation.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案B_输入旋转开发计划.md` |
+| 运动判定搬 GPU | [`design/design-motion-gpu.md`](design/design-motion-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案C_运动判定搬GPU设计.md` |
+| 遮挡感知掩码（Draft） | [`design/design-occlusion-mask.md`](design/design-occlusion-mask.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案D_遮挡感知掩码设计.md` |
+| SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
+| 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
 
-> 批 2 起上表全部为 Active；`05_验证/`、`06_离线验证/` 下的脚本与数据仍在原目录，文档只是归位。
+> 批 2 起上表全部为 Active；批 3 起 `design/` 7 篇纳入总表，其中方案 D / E 是
+> **Draft · 未接线**，不可作为当前实现依据。`05_验证/`、`06_离线验证/` 下的脚本与数据仍在原目录，文档只是归位。
 
 ## 2. archive 索引
 
@@ -37,6 +45,7 @@ status: Active
 |---|---|---|---|
 | [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md) | 根 `PROGRESS.md` | 6263 行逐轮证据总账 / 流水账，正文冻结 | `README.md` / `CHANGELOG.md` |
 | [`archive/index-20261105.md`](archive/index-20261105.md) | `04_文档/README.md` | 严重失实：写 2.14.1、47 条开关、25 项清单（实际 3.0.1 / 63 条） | 本表 |
+| [`archive/plan-gpu-port-20261105.md`](archive/plan-gpu-port-20261105.md) | `04_文档/方案A_GPU移植开发计划.md` | GPU 移植立项规划书，进度数字为写作当时快照；正文冻结、7 条旧链接失效 | `guides/guide-development.md` / 本表 |
 
 归档区另有：`05_验证/out/logs/*.md` 25 篇过程日志、`_回档备份_20261104_2249/` 快照（批 5 迁入）。
 
@@ -83,8 +92,8 @@ status: Active
 | 批 | 聚类 | 状态 |
 |---|---|---|
 | 1 | G1/G2 骨架 + 入口 | **已落地**（commit `bb4dfba`） |
-| 2 | G3/G9 参考与工具 | **已落地**（单独 commit） |
-| 3 | G4/G5/G6 设计稿 | 待执行 |
+| 2 | G3/G9 参考与工具 | **已落地**（commit `8deeaac`） |
+| 3 | G4/G5/G6 设计稿 | **已落地**（单独 commit） |
 | 4 | G7/G8 决策与变更 | 待执行 |
 | 5 | G10 过程日志与回档快照归档 | 待执行 |
 | 6 | 防腐化机制建议 | 待输出 |
@@ -99,3 +108,5 @@ status: Active
 - 新文档只能放规定位置；改「当前结论」必须同步本表与 `CHANGELOG.md`。
 - `05_验证/check_release.py` 第 6 项的语料扫描包含 `docs/` 但**排除 `docs/archive/`**
   （归档日志含未入表内部旋钮，纳入会制造假 FAIL）。
+- `design/` 中的 Draft 稿不扩 `status` 枚举：仍写 `Active`，但文首必须醒目标注
+  「**Draft · 未接线，不可作为当前实现依据**」，并写明适用条件与失效说明。

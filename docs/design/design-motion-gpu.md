@@ -1,7 +1,26 @@
+---
+doc_type: design
+title: 方案C：运动判定搬 GPU、检测输入只在提交帧回读（2.11.0）
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 04_文档/方案C_运动判定搬GPU设计.md
+---
+
 # 方案C：运动判定搬 GPU、检测输入只在提交帧回读（2.11.0）
 
+> **结论**：运动判定搬 GPU 已实现并验收，**默认关**，`BEAUTY_MOTION_GPU=1` 开启；
+> 配对实测 720p 往返 0.73 → 0.47 ms、4K 2.22 → 1.85 ms，六配置 `maxdiff=0`。
+> **适用条件**：仅 GPU 版；默认关闭，不影响 3.0.1 默认路径。
+> **失效说明**：上述性能数字是 2.11.0 写作当时实测，**3.0.1 未重测**；
+> §10 文件清单与「47 条开关」是历史快照（当前 63 条，以开关总表为准）；
+> 旧路径按 [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索。
+
 > **状态**：✅ 已实现并验收（默认关，`BEAUTY_MOTION_GPU=1` 开启）
-> **证据**：[`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) §9.29 ｜ **开关**：[`docs/reference/reference-switches.md`](../docs/reference/reference-switches.md)
+> **证据**：[`archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) §9.29 ｜ **开关**：[`reference/reference-switches.md`](../reference/reference-switches.md)
 > **一句话**：S7 之后静止时检测 8 帧才提交一次，但那张 1.6 MB 的缩略图**每帧都回读**；
 > 本方案把运动判定挪到 GPU 上的一张小图上（64×64 / 16 KB）做完，**只在提交帧才回读大图**。
 > 配对实测 720p 往返 **0.73 → 0.47 ms（−36%）**、4K **2.22 → 1.85 ms（−17%）**，六配置 `maxdiff=0`。
@@ -154,6 +173,10 @@ MD5 链：`63BA248C`（首版）→ `401CC17D`（异步化）→ `D7201CCA`（�
    本节只改「检测多勤」，两者不要混。
 
 ## 10. 文件清单
+
+> **历史清单（2026-11-05 文档治理）**：本表是 2.11.0 当时的改动快照；
+> `04_文档/开关总表.md` / `PROGRESS.md` 等旧路径按 [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索，
+> 请勿按它跳转；开关条数以当前 [`../reference/reference-switches.md`](../reference/reference-switches.md) 为准。
 
 | 文件 | 改动 |
 |---|---|

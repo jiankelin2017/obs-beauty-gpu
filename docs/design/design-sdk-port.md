@@ -1,10 +1,31 @@
+---
+doc_type: design
+title: 方案 E：SDK 更优设计向 GPU 版的移植（复刻）开发方案
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 04_文档/方案E_SDK更优设计移植开发方案.md
+---
+
 # 方案 E：SDK 更优设计向 GPU 版的移植（复刻）开发方案
+
+> **Draft · 未接线，不可作为当前实现依据**：本文是 SDK 更优设计向 GPU 版移植的**开发方案稿**，
+> 正文（含 P0-1 实测更新）描述的是拟议 / 探针实现，与 3.0.1 的实际代码不对应；
+> 当前实现以 [`../README.md`](../README.md) 与 `01_源码` 为准。
+> **结论**：方案未接线；仅 P0-1 动态轴改造做过离线探针实测（产物 `bisenet_face_dyn.onnx`）。
+> **适用条件**：仅 GPU 版；`BEAUTY_SEG=1` 的分割影子层仍是进程级全局，**只支持单实例**。
+> **失效说明**：正文里的 SDK 逆向材料、素材与旧文档名均为写作当时路径，按
+> [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索；`结论_分割对手遮脸无效_20261105.md`
+> 将在批 4 处理，不以本行作为跳转依据。
 
 > 版本：E-0.1（设计稿，未接线）
 > 日期：2026-11-05
 > **适用范围：仅 GPU 版 `obs-beauty.dll`**（源码 `D:\插件\OBS美颜GPU版\01_源码`，着色器 `01_源码\shaders\*.hlsl`）。CPU 版 `D:\插件\OBS美颜源码` 冻结，本方案不涉及。
 > 证据来源：`D:\插件\OBS美颜源码\参考文件\01_逆向分析_第三方SDK\`（`fuai.dll` 伪 C + GL 运行时 `glGetShaderSource` 逐字 dump + Frida uniform 真值）
-> 前置文档：`方案D_遮挡感知掩码设计.md`、`开关总表.md`
+> 前置文档：[`design-occlusion-mask.md`](design-occlusion-mask.md)、[`../reference/reference-switches.md`](../reference/reference-switches.md)
 
 > ## ⚠ 2026-11-05 P0-1 实测更新（以下三处推翻了 v0.1 的假设，以本节为准）
 >
@@ -57,7 +78,7 @@
 >
 > **⑧ 性能现实**：512 输入、插件自带 ORT 1.20.1、4 线程 = **95 ms/次**（1 线程 276 ms、8 线程 57 ms）。因此 `BEAUTY_SEG_EVERY` 默认改为 **12**（30 fps ≈ 400 ms 一次，约占 1/4 核），`BEAUTY_SEG_NONSKIN` 默认改为 **1.0**（R 单独用会磨头发：头发 R=0.60、背景 R=0.01，而 B 在头发 0.64/背景 0.98 上很准）。
 >
-> **⑨ 验收（已做）**：720p 真脸静图端到端跑通，日志三帧 `seg#1..3 102~114ms crop=1 uv=(0.230,0.000,0.562,1.000)`，OBS 不崩；离线复现三种口径统计一致 —— 脸 R=0.87 / 背景 R=0.01 / 衣服 R=0.005 / 头发 R=0.60。证据图与复跑方法见 `06_离线验证/segtest/README.md`。
+> **⑨ 验收（已做）**：720p 真脸静图端到端跑通，日志三帧 `seg#1..3 102~114ms crop=1 uv=(0.230,0.000,0.562,1.000)`，OBS 不崩；离线复现三种口径统计一致 —— 脸 R=0.87 / 背景 R=0.01 / 衣服 R=0.005 / 头发 R=0.60。证据图与复跑方法见 [`../reference/reference-skinseg-probe.md`](../reference/reference-skinseg-probe.md)。
 >
 > 复核脚本：`06_离线验证/onnx_probe/seg_class_probe.py`（四组口径对照）、`seg_class_verify.py`（单图逐类核对，可带 `--box`）。
 >

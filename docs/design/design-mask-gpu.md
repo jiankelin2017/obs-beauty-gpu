@@ -1,4 +1,23 @@
+---
+doc_type: design
+title: 方案 A · 5b-2 设计：把皮肤掩码搬上 GPU
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 04_文档/方案A_5b2_掩码上GPU设计.md
+---
+
 # 方案 A · 5b-2 设计：把皮肤掩码搬上 GPU
+
+> **结论**：掩码切片已全部落地并转默认；显存帧环 `BEAUTY_GPU_FRAME_RING` 不设即开、只认 `=0` 关闭。
+> 本文回答「搬什么、怎么保证 CPU/GPU 算得一样、分几步落地」，实施进度见 §10。
+> **适用条件**：仅 GPU 版 `obs-beauty.dll`；当前插件版本 3.0.1。
+> **失效说明**：正文的 `3.1.6x` / `2.4.0` 等版本号是写作当时的历史快照；性能数字见
+> [`../README.md`](../README.md) §2，统一标注「**2.14.x 基线实测，3.0.1 未重测**」。
+> 正文里的旧路径按 [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索，请勿按字面跳转。
 
 > 状态：**已全部落地**。切片 1（`mask.hlsl` + 静态门禁，3.1.64 起）→ 切片 2（M1 掩码对拍）
 > → 切片 3（GPU 掩码进生产链，3.1.65 opt-in / 3.1.66 转默认）→ 切片 4（显存帧环，3.1.67 opt-in /
@@ -7,7 +26,7 @@
 > 本文只回答三件事：**搬什么、怎么保证算得一样、分几步落地**。实施进度见 §10。
 > 现状：**掩码切片全部完成并转默认**；帧环在 3.1.72 的 4K 驱动崩溃后曾改回 opt-in
 > （3.1.73），**2.4.0（S2）已重新翻默认开**（`BEAUTY_GPU_FRAME_RING` 不设即开、只认 `=0`），
-> 4K 30 min / 54180 帧零异常背书，见 [`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) §9.3.1。
+> 4K 30 min / 54180 帧零异常背书，见 [`archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) §9.3.1。
 
 ---
 

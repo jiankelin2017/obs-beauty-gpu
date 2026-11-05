@@ -1,4 +1,24 @@
+---
+doc_type: design
+title: 复刻 SDK：美白（色彩三段）改成整帧色彩变换，不再乘皮肤掩码
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 04_文档/复刻SDK_美白整帧色彩变换_20261105.md
+---
+
 # 复刻 SDK：美白（色彩三段）改成整帧色彩变换，不再乘皮肤掩码
+
+> **结论**：美白（色彩三段）改为**整帧色彩变换、不再乘皮肤掩码**；
+> 默认 `BEAUTY_TONE_GLOBAL=1`（= SDK 行为），`=0` 回退旧的「掩码内施加」。
+> 离线回归 4 条 golden 重采基准后全绿；GPU / CPU 等价 444,528 采样 0 偏差。
+> **适用条件**：仅 GPU 版；当前插件版本 3.0.1。
+> **失效说明**：§四 / §五 的性能数字与文末装机 dll md5 是 **2026-11-05 当时实测 / 当时装机记录**，
+> **3.0.1 未重测**；当前版本与 md5 一律以 [`../README.md`](../README.md) 与发布闸门为准。
+> 正文引用的 SDK 逆向原文路径按 [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索。
 
 > 日期：2026-11-05
 > 起因：用户指出「歪头时变的是**美白**边界，不是磨皮边界」，要求直接复刻 SDK 的逻辑
@@ -118,9 +138,9 @@ float sk = (toneGlobal > 0.5f) ? 1.0f : m * (1.0f / 255.0f);
 
 ```powershell
 cd 06_离线验证
-$env:BEAUTY_TONE_GLOBAL="1"; python offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --whiten 100 --threads 8 --save _a.raw
-$env:BEAUTY_TONE_GLOBAL="0"; python offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --whiten 100 --threads 8 --save _b.raw
-python offline_regress.py check            # 默认 = 整帧模式，四条应全绿
+$env:BEAUTY_TONE_GLOBAL="1"; py -3.12 offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --whiten 100 --threads 8 --save _a.raw
+$env:BEAUTY_TONE_GLOBAL="0"; py -3.12 offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --whiten 100 --threads 8 --save _b.raw
+py -3.12 offline_regress.py check            # 默认 = 整帧模式，四条应全绿
 ```
 
 装机：`obs-beauty.dll` **614,912 B / md5 694043BF61D30DC920A0BF0F7E0511AA**（2026-11-05 09:0x 装机）。

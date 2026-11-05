@@ -1,9 +1,29 @@
+---
+doc_type: design
+title: 方案 D：遮挡感知皮肤掩码（复刻思路 + 实现逻辑）
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 04_文档/方案D_遮挡感知掩码设计.md
+---
+
 # 方案 D：遮挡感知皮肤掩码（复刻思路 + 实现逻辑）
+
+> **Draft · 未接线，不可作为当前实现依据**：本文是遮挡感知皮肤掩码的**设计稿**，
+> 正文描述的是拟议实现，与 3.0.1 的实际代码不对应；当前实现一律以
+> [`../README.md`](../README.md) 与 `01_源码` 为准。
+> **结论**：提出用分割 / 遮挡信息改造皮肤掩码；截至 2026-11-05 **未接线、未验收**。
+> **适用条件**：仅 GPU 版设计稿；CPU 版冻结。
+> **失效说明**：正文引用的 SDK 逆向材料、素材路径与旧文档名均为写作当时路径，
+> 按 [`../INDEX.md`](../INDEX.md) §3 / §4 映射检索。
 
 > 版本：D-0.1（设计稿，未接线）
 > 依据：obs-beauty v2.16.1 反编译结论 + 本机源码 `01_源码` + 实测素材
 > `05_验证/out/live_edge/2026-11-05 05-45-51.mp4`（1080×1920 / 30fps / 67s）
-> 前置文档：`方案A_5b2_掩码上GPU设计.md`、`开关总表.md`
+> 前置文档：[`design-mask-gpu.md`](design-mask-gpu.md)、[`../reference/reference-switches.md`](../reference/reference-switches.md)
 
 > **范围锁定（2026-11-05）**：本方案及此后所有优化**只作用于 GPU 版**——产物 `obs-beauty.dll`，
 > 源码 `D:\插件\OBS美颜GPU版\01_源码`，着色器 `01_源码/shaders/*.hlsl`（mask/tone/smooth/detail/region/warp 六个）。
