@@ -1,7 +1,7 @@
 # 方案C：运动判定搬 GPU、检测输入只在提交帧回读（2.11.0）
 
 > **状态**：✅ 已实现并验收（默认关，`BEAUTY_MOTION_GPU=1` 开启）
-> **证据**：[`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) §9.29 ｜ **开关**：[`开关总表.md`](开关总表.md)
+> **证据**：[`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) §9.29 ｜ **开关**：[`docs/reference/reference-switches.md`](../docs/reference/reference-switches.md)
 > **一句话**：S7 之后静止时检测 8 帧才提交一次，但那张 1.6 MB 的缩略图**每帧都回读**；
 > 本方案把运动判定挪到 GPU 上的一张小图上（64×64 / 16 KB）做完，**只在提交帧才回读大图**。
 > 配对实测 720p 往返 **0.73 → 0.47 ms（−36%）**、4K **2.22 → 1.85 ms（−17%）**，六配置 `maxdiff=0`。

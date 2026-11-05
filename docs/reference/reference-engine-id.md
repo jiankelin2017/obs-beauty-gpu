@@ -1,10 +1,10 @@
 ---
 doc_type: reference
 title: 引擎 core 与 gpu 是什么关系
-version: 0.1.0
+version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: 56dc178
+repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
 supersedes: 根 GPU_CPU_对比报告.md
@@ -64,5 +64,5 @@ findstr /C:"hlsl 已加载" /C:"引擎资源已预热" /C:"段区间钩子已启
 ```
 
 判定标准、门禁口径与「哪些数字能横比」见
-[`../guides/guide-verification.md`](../guides/guide-verification.md)（批 2 迁移，当前 `05_验证/README.md`）
+[`../guides/guide-verification.md`](../guides/guide-verification.md)
 与 [`../README.md`](../README.md) §5；全库总表见 [`../INDEX.md`](../INDEX.md)。

@@ -1,10 +1,10 @@
 ---
 doc_type: README
 title: OBS 美颜 GPU 版 · 现状入口
-version: 0.1.0
+version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: 56dc178
+repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
 supersedes: 04_文档/README.md（已归档）
@@ -57,7 +57,7 @@ supersedes: 04_文档/README.md（已归档）
 | 性能妥协 | `DET_ADAPT_AGG=rms` 的代价越过人眼 JND（+6 灰阶档） | **默认 `max`，不翻**；要开就成套开 `rms + DET_ADAPT_STILL=4` |
 | 立项否决 | 「边界带闪烁」立项不成立（仿真片高估了它） | 静态真机输入下掩码 ΔD 全 0.00；勿把「检测框时域残差」当成闪烁根因 |
 | 工程 | 二进制不入库，当前装机是哪一版只能靠 MD5 与日志确认；UI 是独立 dll（版本轴不同步）；CPU 分支与 UI 源码不在本仓库部署 | 改 UI 要另建一份 dll |
-| 工具坑 | `--collection` 静默打偏、面板单位 0..100、参数须起 OBS 前写、OBS 退出改写集合、收益只认配对、长跑日志轮转、合成人像色度过低 `faces=0` | 逐条展开见 `guides/guide-verification.md`（批 2 迁移） |
+| 工具坑 | `--collection` 静默打偏、面板单位 0..100、参数须起 OBS 前写、OBS 退出改写集合、收益只认配对、长跑日志轮转、合成人像色度过低 `faces=0` | 逐条展开见 [`guides/guide-verification.md`](guides/guide-verification.md) |
 
 > 原根 `README.md` 的 N 编号有重复（N6 / N7 各出现两次），此处改为按主题分组；
 > **旧 N1–N24 → 新章节的完整映射见 [`INDEX.md`](INDEX.md) §4**，避免历史引用断链。

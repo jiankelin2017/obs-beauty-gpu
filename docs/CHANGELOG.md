@@ -1,10 +1,10 @@
 ---
 doc_type: CHANGELOG
 title: 用户可见变更
-version: 0.1.0
+version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: 56dc178
+repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
 ---

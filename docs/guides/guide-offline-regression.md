@@ -1,8 +1,25 @@
+---
+doc_type: guides
+title: 离线 CPU 引擎回归台
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 06_离线验证/README.md
+---
+
 # 06_离线验证 —— 不启动 OBS 的 CPU 引擎回归台
+
+> **结论**：`core_probe.dll` + `offline_regress.py` + **4 条 golden 基准**
+> （`blur100 / mixed / sharp / region`），喂一张裸 RGBA8 帧跑真正的 `CoreEngine` 并逐字节对拍。
+> 改 CPU 引擎前后必跑 `py -3.12 06_离线验证/offline_regress.py check`；本机 `python` 是
+> Microsoft Store 别名，命令一律用 `py -3.12`。
 
 ## 这是什么
 
-`core_probe.dll` + `offline_regress.py` + 两份黄金基准。喂一张裸 RGBA8 帧、给一组
+`core_probe.dll` + `offline_regress.py` + **4 条黄金基准**（`blur100 / mixed / sharp / region`，见 `manifest.json`）。喂一张裸 RGBA8 帧、给一组
 面板参数，跑**真正的 CoreEngine**（和 OBS 里跑的是同一份 `beauty_core.cpp`），
 把输出写到文件，再逐字节对拍。
 
@@ -32,19 +49,19 @@ CPU 侧引擎（`beauty_core` / `beauty_smooth` / `beauty_warp` / `beauty_region
 powershell -ExecutionPolicy Bypass -File build_offline.ps1
 
 # 回归门禁：把所有黄金基准跑一遍
-python offline_regress.py check
+py -3.12 offline_regress.py check
 
 # 自检：确定性 + 零参数直通
-python offline_regress.py selftest --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100
+py -3.12 offline_regress.py selftest --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100
 
 # 手动跑一组参数并看结果
-python offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100 --save out.raw
+py -3.12 offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100 --save out.raw
 
 # 改了 CPU 代码之后，确认到底动了哪些像素
-python offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100 --check goldens/g_blur100.raw
+py -3.12 offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 720 --blur 100 --check goldens/g_blur100.raw
 
 # PNG 转裸 RGBA8（换素材时用）
-python offline_regress.py from-png my.png in.raw --w 1280 --h 720
+py -3.12 offline_regress.py from-png my.png in.raw --w 1280 --h 720
 ```
 
 `--update` 会重采基准。**只在确认「CPU 输出变化正是这次想改的」之后才用**，
@@ -65,7 +82,7 @@ python offline_regress.py from-png my.png in.raw --w 1280 --h 720
 | `sharp` | 磨皮 50 + 脸内锐化 60 + 全局锐化 30 | **细节回填的四档权重**（fwF/fwG/mwF/mwG） |
 | `region` | 磨皮 100 + 五官五项各 30 | **五官三族**（椭圆增益 / 法令纹 / 祛斑） |
 
-> `sharp` 是 3.1.52 才加的。此前两个用例都没开锐化，`detailRefill` 一直没有基准可对 ——
+> **历史证据（保留原貌，不代表 3.0.1 新增）**：`sharp` 是 3.1.52 才加的。此前两个用例都没开锐化，`detailRefill` 一直没有基准可对 ——
 > 3.1.52 要改细节段（GPU 化），先把基准补上。**它的 golden 是 3.1.52 采的**，
 > 也就是说它保护的是「3.1.52 之后不再变」，不能反过来证明 3.1.52 没改 CPU 输出；
 > 后者由 `blur100` / `mixed` 两条（golden 早于改动、`maxdiff=0`）证明。
@@ -89,7 +106,7 @@ python offline_regress.py from-png my.png in.raw --w 1280 --h 720
 ## 分项耗时测量（`_bench_warp.py`）
 
 ```bash
-python _bench_warp.py --repeat 12
+py -3.12 _bench_warp.py --repeat 12
 ```
 
 用它量单段 CPU 耗时。**不要用「改档位前后总耗时相减」的差值法**：整帧在 8~23 ms 之间

@@ -1,4 +1,21 @@
+---
+doc_type: guides
+title: 验证工具与 21 条坑
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: bb4dfba
+maintainer: Jian
+status: Active
+supersedes: 05_验证/README.md
+---
+
 # 05_验证 —— 门禁与采集脚本
+
+> **结论**：`05_验证/` 的脚本分两类 —— **离线对拍**（不启 OBS）与**采集 / 长跑**（启 OBS）；
+> 跑之前先看 §三 的 21 条坑，否则很容易把工具误判当成产品回归。脚本仍留在仓库 `05_验证/`，
+> 本文只是文档归位，命令里的路径不变。本机 `python` 是 Microsoft Store 别名，一律用 `py -3.12`。
+> 文中 `PROGRESS §9.x` 按 [`../INDEX.md`](../INDEX.md) §3 统一映射检索（B1）。
 
 > 本目录的脚本用于**离线对拍**与**装机后验收**。依赖见同目录 `requirements.txt`。
 
@@ -12,7 +29,7 @@ py -3 05_验证\verify_smooth_compiles.py
 
 第一条装依赖，第二条自检（能打印 `deps ok: <版本>` 即为成功），第三条是不需要 OBS 的着色器编译对拍，跑通即说明环境可用。
 
-`py -3` 指 Python 3.9+ 的启动器形式（Windows 官方安装包自带）。若机器上只有 `python` 没有 `py`，把命令里的 `py -3` 换成 `python`，其余不变。
+`py -3` 指 Python 3.9+ 的启动器形式（Windows 官方安装包自带）。**本机 `python` 是 Microsoft Store 别名，不可用**；发布闸门与离线回归一律用 `py -3.12`（见 [`../README.md`](../README.md) §4）。本文其余 `py -3` 命令保持原样，换机时按本机解释器调整。
 
 `websocket-client` 是 `obsctl.py` 访问 obs-websocket v5 的客户端；只有需要**起停 OBS、改滤镜、截图**的脚本才会用到它。纯离线对拍（`verify_*_compiles.py`）不需要它，也不需要 OBS。
 
@@ -58,7 +75,7 @@ py -3 05_验证\verify_smooth_compiles.py
 | 输入旋转验收 | **2.10.0 实测过的方法**：判据不是「像素差多少」而是**效果落在哪里** —— `footprint = |输出 − 输入源图| > 0`，用「躺下就检不到」的 **3/4 侧脸**做阴性对照（正放 vs 躺放 + `input_rot=0/90/270`），比 footprint 面积与 IoU。实测：正放 14.30%、躺放 `ir=0` **0.24%**、`ir=90` **12.83%**、`ir=270` 0.23%。回归仍用 `verify_s1_correct.py capture` 六配置（`input_rot=0` 必须与上一版 `maxdiff=0`）。记录见 `out/logs/input_rot_2.10.0_20261104.md` | 是 |
 | **输入旋转实机验收（2.13.1）** | **`rot_live_check.py`**：起 OBS、给采集源挂滤镜、自动切 `ir=0/90/180/270` 四臂，取 perf 行的「有脸 %」判「旋转有没有进全帧检测路径」。**判据是臂间差距，不是绝对值**：正放臂 ≈100%、三个旋转臂 ≈0 即 PASS（2.13.0 及以前四臂会给同一个数）。三个坑：① 「掩码 %」在只开五官时恒为 0（`gonly=180`，纯几何掩码），不能当判据；② 真人低头/抬头会让同一臂内摆动 35 个百分点；③ 实机 footprint 必须用 `>2` 阈值，否则传感器噪声让它恒为 96%。`--attach` 可复用已开的 OBS。记录见 `PROGRESS §9.36` | 是 |
 | 采集前置检查 | `gpu_guard.py`（显卡是否干净，被 `start_obs()` 自动调用） | 否 |
-| **发布一致性** | **`check_release.py`（2.11.0）**：不需要 OBS、不需要画面，六项九条判定 —— ① 版本单源（`BEAUTY_BUILD_STR` 只许一处定义）；② **在 dll 二进制里搜版本字符串**（ASCII + UTF-16LE，撞版本号当场暴露）；③ 装机 dll == 构建 dll；④ `07_安装包` 载荷 == 构建 dll；⑤ 源码 / 安装包 / 装机 / solo **四份 6 个 `.hlsl` 逐字节相同**（多一个文件也算 FAIL）；⑥ 开关表 ⊆ 源码 `getenv()`，且「源码有、表里没有、别的文档提到」= 0。`--strict` 把 WARN 也算失败（发布前用），`--no-installed` 只查仓库。**打完 `Setup.exe` 之后跑**，见 `PROGRESS §9.30` | 否 |
+| **发布一致性** | **`check_release.py`（2.11.0，3.0.1 起 12 条）**：不需要 OBS、不需要画面，**12 条 PASS**（3.0.0 及以前是 9 条）—— ① 版本单源（`BEAUTY_BUILD_STR` 只许一处定义）；② **在 dll 二进制里搜版本字符串**（ASCII + UTF-16LE，撞版本号当场暴露）；③ 装机 dll == 构建 dll；④ `07_安装包` 载荷 == 构建 dll；⑤ 源码 / 安装包 / 装机 / solo **四份 6 个 `.hlsl` 逐字节相同**（多一个文件也算 FAIL）；⑥ 开关表 ⊆ 源码 `getenv()`，且「源码有、表里没有、别的文档提到」= 0。**3.0.1 新增 3 条 Setup.exe 断言**：安装路径由 `%PROGRAMDATA%` 派生、Setup.exe 内含当前版本串、内嵌 dll + 6 shader 与磁盘 payload 逐字节相同（修「装了等于没装」）。`--strict` 把 WARN 也算失败（发布前用），`--no-installed` 只查仓库。**打完 `Setup.exe` 之后跑**，当前 `--strict` 为 **12 PASS / 0 WARN / 0 FAIL**；见 `PROGRESS §9.30` | 否 |
 
 > `cpu_probe.py` 按 `GetProcessTimes` 采 `obs64.exe` 的 CPU 时间换算出核数，用来量「省不省 CPU」这类
 > 不体现在帧耗时里的改动（S7 的全部立论就在这里）。用法：
@@ -250,4 +267,4 @@ py -3 05_验证\verify_smooth_compiles.py
 - **运动素材的场景集合**：`beauty_motion720`（`motion_720p.mp4` 循环，1280×720），用
   `py -3 05_验证\make_motion_collection.py` 重建。它是 S7 这类「按运动自适应」改动的唯一
   验证手段 —— 静态素材看不出任何滞后，只能证明「不动时一致」。
-- **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。长跑一结束就把日志复制到 `out/logs/`（该目录已存在，存量见其下 `*.md` 报告），再启动下一个 OBS 实例。
+- **长跑日志要自己留**：OBS 只保留最近 **10** 个日志，跑完十几轮 A/B 就会把长跑那份轮转掉。长跑一结束就把日志复制到 `out/logs/`（该目录已存在，存量见其下 `*.md` 报告），再启动下一个 OBS 实例。**该目录下 25 篇过程报告将在治理批 5 迁入 `docs/archive/`**，届时按 [`../INDEX.md`](../INDEX.md) §2 检索。

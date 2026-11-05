@@ -1,10 +1,10 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.0
+version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: 56dc178
+repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
 ---
@@ -23,14 +23,13 @@ status: Active
 | 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active（骨架） | 3.0.1 | Jian | 2026-11-05 | 批 4 并入 7 篇 `修复_*` |
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
-| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active（元数据待批 2 补） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开关总表.md` |
-| 验证工具与坑 | `guides/guide-verification.md` | guides | 待迁移（批 2） | 3.0.1 | Jian | — | 当前 `05_验证/README.md` |
-| 离线回归 | `guides/guide-offline-regression.md` | guides | 待迁移（批 2） | 3.0.1 | Jian | — | 当前 `06_离线验证/README.md` |
-| 分割探针 | `reference/reference-skinseg-probe.md` | reference | 待迁移（批 2） | 3.0.1 | Jian | — | 当前 `06_离线验证/segtest/README.md` |
-| 基线测量规程 | `reference/reference-baseline.md` | reference | 待迁移（批 2） | 3.0.1 | Jian | — | 当前 `04_文档/Phase0_基线测量规程.md` |
+| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开关总表.md` |
+| 验证工具与坑 | [`guides/guide-verification.md`](guides/guide-verification.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `05_验证/README.md` |
+| 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
+| 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
+| 基线测量规程（历史） | [`reference/reference-baseline.md`](reference/reference-baseline.md) | reference | Active（历史参考） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/Phase0_基线测量规程.md` |
 
-> 批 1 期间 `README.md` 中指向 `guides/guide-verification.md`、`guides/guide-offline-regression.md` 的
-> 链接尚未生效（批 2 迁移后自动接通）；上表「当前」列给出过渡期的实际位置。
+> 批 2 起上表全部为 Active；`05_验证/`、`06_离线验证/` 下的脚本与数据仍在原目录，文档只是归位。
 
 ## 2. archive 索引
 
@@ -77,14 +76,14 @@ status: Active
 | N14 | §3.3 边界带闪烁立项不成立 | `README.md` §3「立项否决」 |
 | N15 | §3.3 工具不校验 dll 版本 | **已修（闸门）** → `CHANGELOG.md` |
 | N16 / N17 | §3.3 UI 独立 dll / CPU 与 UI 源码不在本仓库 | `README.md` §3「工程」 |
-| N18–N24 | §3.4 验证工具 7 条坑 | `README.md` §3「工具坑」；逐条展开见 `guides/guide-verification.md`（批 2） |
+| N18–N24 | §3.4 验证工具 7 条坑 | `README.md` §3「工具坑」；逐条展开见 [`guides/guide-verification.md`](guides/guide-verification.md) |
 
 ## 5. 治理批次进度
 
 | 批 | 聚类 | 状态 |
 |---|---|---|
-| 1 | G1/G2 骨架 + 入口 | **已落地** |
-| 2 | G3/G9 参考与工具 | 待执行 |
+| 1 | G1/G2 骨架 + 入口 | **已落地**（commit `bb4dfba`） |
+| 2 | G3/G9 参考与工具 | **已落地**（单独 commit） |
 | 3 | G4/G5/G6 设计稿 | 待执行 |
 | 4 | G7/G8 决策与变更 | 待执行 |
 | 5 | G10 过程日志与回档快照归档 | 待执行 |
