@@ -110,6 +110,14 @@ public:
     // 只有 CoreEngine 覆写它；LegacyEngine / GpuEngine 之外保持默认即可编译。
     virtual bool detectDue() { return true; }
 
+    // 2.15.0：本帧**实际**使用的输入旋转（0/90/180/270）。
+    //
+    // 与面板的 input_rot 不是一回事：面板那一档是用户的声明，这里的是引擎验证过的
+    // 结论。当声明的那一档检不到脸而「不旋转」能检出时，引擎会退回 0 并把结果记在
+    // 这里 —— 宿主据此决定**要不要再转缩略图**（转错的缩略图会让检测整段失效）。
+    // 默认 0 = 「不知道，宿主按面板值办」。
+    virtual int effectiveRot() const { return 0; }
+
     // 诊断：把**当前正在用的**皮肤掩码拷出（w*h 字节，0..255）。
     // 默认没有掩码 → 返回 false。
     //
@@ -282,6 +290,18 @@ int beautyCoreAlignStat(uint64_t* used, uint64_t* total);
 // 所以调用是 O(1)，**不需要扫描掩码**，放在每帧渲染路径上也不会增加功耗。
 void beautyCoreMaskStat(int* pixelsOut, int* facesOut);
 
+// 2.15.0：本帧**实际**使用的输入旋转（0/90/180/270），见 IBeautyEngine::effectiveRot。
+//
+// 宿主在**构建检测缩略图之前**读它：缩略图是按面板的 input_rot 转的，一旦引擎判定
+// 那一档检不到脸（退回 0），继续按错的方向转缩略图只会让检测永远失败。宿主看到这里
+// 返回的值与面板值不一致时，应当停用缩略图路径、改走全帧（全帧路径自带旋转重采样）。
+int beautyCoreEffectiveRot();
+
+// 2.15.1：掩码几何的当前生效配置（`shape=… roll=… feather=… neck=…`）。
+// 宿主启动时打一行，排查「能看到长方形遮罩」时先看它 —— shape 是环境变量
+// `BEAUTY_MASK_SHAPE` 可覆盖的，面板上看不出来。
+const char* beautyCoreMaskConfig();
+
 // ROI 包围盒面积占比（3.1.48，只读诊断）
 //
 // 返回本帧磨皮包围盒面积 / 整帧面积，0..1；**-1 表示本帧无包围盒**（无掩码或
@@ -388,7 +408,9 @@ bool beautyCoreSmoothCpu(const unsigned char* src, unsigned char* dst, int w, in
 //   3) 回调运行在渲染线程的 GS 上下文里，宿主可以直接建纹理、开 texrender。
 //
 // 线程约束：只在渲染线程、且在该帧的 gs_texrender 已 end 之后被调用。
-// 一个进程只挂一个钩子（与 beauty_set_log_fn 同样的单例约定）。
+// 3.0.0：钩子按引擎 slot 各存一份（见 beauty_core.cpp 的 SlotState），注册 /
+// 摘除作用于 beautyCoreBindSlot() 绑定的当前槽；宿主须在每帧入口先绑定自己的
+// f->slot，否则会写进别的实例的上下文。
 typedef bool (*BeautySmoothHook)(void* user,
                                  const unsigned char* src, unsigned char* dst,
                                  int w, int h,
@@ -492,7 +514,8 @@ struct BeautyWarpFace {
     float eyeR;                   // 大眼作用半径（已夹到 [0.10fw, 0.35fw]）
     float eyeAmp;                 // 大眼满档中心放大系数（p.eye × 0.55）
     float thinYc, thinSig, thinK; // 瘦脸：垂直高斯中心/sigma/满档外移
-    float chinYm, chinSpan, chinK;// 下巴：压缩起点/跨度/满档压缩
+    float chinYm, chinSpan;       // 下巴作用起点 / 跨度
+    float chinK, chinKH;          // 下巴：中线拉长 / 两侧内收（3.1.64）
     int   roi[4];                 // x0,y0,x1,y1（已钳到画面内）
     unsigned flags;               // BEAUTY_WARP_F_*
 };
@@ -520,7 +543,18 @@ struct BeautyMaskFace {
     // 后者会伸进脸框区域，所以两条分支不能共用同一个下界。
     int   nx0, nyLo, nx1, nyHi;
     float cx, cy, a, b;           // 脸椭圆：中心 + 半轴
-    float neckA, neckB, neckCy;   // 脖子椭圆：A、B、cyN(=y1)
+    // 2.15.0（掩码跟脸转）：几何绕脸心转 −θ，θ = 两眼连线角度。
+    //   rc/rs = cosθ/sinθ（正立人脸 = 1/0，此时下面每个式子都退化成原式）；
+    //   lw/lh = 脸在**局部轴**上的宽/高（θ=0 时恒等于 f.w/f.h；θ=90 时互换，
+    //           因为躺着的脸，它画面里的宽其实是脸高）。
+    // a/b 已经是局部轴上的半轴（含 kFaceBoxGrow），x0..y1 是旋转后的轴对齐外接框，
+    // 所以宿主只要把 rc/rs 传进去，着色器就能逐像素复刻同一条边界。
+    float rc, rs;
+    float lw, lh;
+    float neckA, neckB, neckCy;   // 脖子椭圆：A、B、中心 y
+    // 2.15.0：脖子椭圆的中心 x。θ=0 时恒等于 cx；θ≠0 时脖子中心会沿脸的「竖」
+    // 方向偏出去，宿主必须用它而不是 cx（着色器里 dx 是**相对脖子中心**取的）。
+    float neckCx;
     // 眼睛保护椭圆（只画眼，不画嘴 —— 与参考实现结构一致）。
     // CPU 只在 kpsSane() 通过时才画；不通过时整张保护掩码是全 0。
     int   hasEyes;
@@ -552,6 +586,9 @@ struct BeautyMaskDiag {
 // 把每张脸的三组椭圆原样塞进 job。
 struct BeautyRegionEllipse {
     float cx, cy, rx, ry, rot, gain, shade, feather;  // 相对脸框的归一化值
+    // 0 = 旧式平顶羽化（feather 生效）；>0 = 钟形衰减（见 beauty_region.h）。
+    // 默认 0，所以没写这个字段的聚合初始化仍是旧行为。
+    float dome;
 };
 
 struct BeautyRegionGeom {
@@ -722,3 +759,23 @@ bool beautyCoreWarpCpu(const unsigned char* src, unsigned char* dst, int w, int 
 // ---------------------------------------------------------------------------
 IBeautyEngine& beautyEngine();
 const char* beautyEngineId();
+
+// ---------------------------------------------------------------------------
+// 3.0.0 多实例槽位 API
+// ---------------------------------------------------------------------------
+// 一个 OBS 进程里可以同时给多个 source 挂 obs_beauty_filter。引擎上下文
+// （帧号 / 掩码轨迹 / 肤色 EMA / 钩子 user / 异步检测 worker）按 slot 各存一份，
+// beautyCoreBindSlot() 把**当前线程**绑到某个 slot；t_slot 是 thread_local，
+// 所以 create / update / render / destroy 各自的入口都必须显式绑定一次。
+//
+//   create  : slot = beautyCoreAcquireSlot(err)，内部已完成绑定 + ensureReady
+//   render  : beautyCoreBindSlot(f->slot) 之后才能调任何 beautyEngine() / setter
+//   destroy : beautyCoreBindSlot(f->slot) → releaseSlot → beautyCoreReleaseSlot
+//   卸载    : beautyCoreReleaseAllEngines() 逐个 release 所有建过的引擎
+//
+// 单实例场景 slot 恒为 0，与 2.16.1 单例路径逐字节等价。槽上限 8，耗尽返回 -1。
+int  beautyCoreAcquireSlot(std::string& err);
+void beautyCoreBindSlot(int slot);
+void beautyCoreReleaseSlot(int slot);
+int  beautyCoreActiveSlots();
+void beautyCoreReleaseAllEngines();

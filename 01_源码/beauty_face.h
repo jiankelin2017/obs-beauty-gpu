@@ -89,4 +89,7 @@ private:
     double lastMs_ = 0.0;
 };
 
+
 }  // namespace beautycore
+
+

@@ -11,6 +11,7 @@
 //     与 golden_capture.cpp 的 BeautyDumpMask 同一格式，可直接互相比较。
 
 #include "beauty_core.h"
+#include "beauty_seg.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -332,6 +333,58 @@ __declspec(dllexport) int __stdcall BeautyCoreMask(
            100.0 * (double)px / (double)((size_t)width * (size_t)height),
            e.lastFaces());
     return 0;
+}
+
+// 把最近一次分割结果落盘（离线验证用；不进插件 DLL）。
+//
+// 格式（小端，共 32 字节头 + 1 MB 像素）：
+//   int32 w, int32 h, int32 cropped, int32 ms, float uv[4]
+//   随后 w*h*4 字节 RGBA：R 皮肤 / G 五官 / B 非肤 / A 皮肤
+//
+// 存在的理由：分割以前只在 async worker 里跑，而离线台强制同步检测，于是
+// 「BEAUTY_SEG=1 在真实引擎链路里到底会不会跑、裁到哪、uv 对不对」只能靠装机
+// 看日志。有了这个导出，整条链路（buildMaskInto → 取最优脸 → skinsegRun →
+// 发布 → 拷贝）都能在桌面上跑，且不依赖 OBS。
+__declspec(dllexport) int __stdcall BeautyCoreSegDump(
+    const char* outPath, char* msgBuf, int msgCap) {
+    if (msgBuf && msgCap > 0) msgBuf[0] = 0;
+    if (!outPath || !*outPath) {
+        setMsg(msgBuf, msgCap, "bad args");
+        return 2;
+    }
+    beautycore::SegFrame fr{};
+    if (!beautyCoreCopySeg(&fr) || !fr.ok) {
+        setMsg(msgBuf, msgCap, "no seg result (%s)", beautyCoreSegError());
+        return 3;
+    }
+    const std::string outA = utf8ToAcp(outPath);
+    FILE* f = nullptr;
+    if (fopen_s(&f, outA.c_str(), "wb") != 0 || !f) {
+        setMsg(msgBuf, msgCap, "cannot open output: %s", outA.c_str());
+        return 4;
+    }
+    int hdr[4] = {beautycore::SegFrame::W, beautycore::SegFrame::H,
+                  (int)fr.cropped, (int)fr.ms};
+    fwrite(hdr, sizeof(int), 4, f);
+    fwrite(fr.uv, sizeof(float), 4, f);
+    fwrite(fr.rgba, 1, (size_t)beautycore::SegFrame::W * beautycore::SegFrame::H * 4, f);
+    fclose(f);
+    setMsg(msgBuf, msgCap, "OK %dx%d crop=%d ms=%u uv=(%.3f,%.3f,%.3f,%.3f)",
+           beautycore::SegFrame::W, beautycore::SegFrame::H, (int)fr.cropped,
+           (unsigned)fr.ms, fr.uv[0], fr.uv[1], fr.uv[2], fr.uv[3]);
+    return 0;
+}
+
+// 分割是否真的启动（模型加载成功）。离线台用它区分「没开」「开了但模型没加载」。
+__declspec(dllexport) int __stdcall BeautyCoreSegInit(void) {
+    return beautyCoreSegInit();
+}
+
+// 分割的失败原因。导出出来是为了让探针能把「为什么没启动」打出来 ——
+// 否则只能看到一句「分割未启动」，模型路径错、尺寸不符、ORT 版本不匹配
+// 三种原因长得一模一样。调用方应立即拷贝，指针只在下一次调用前有效。
+__declspec(dllexport) const char *__stdcall BeautyCoreSegError(void) {
+    return beautyCoreSegError();
 }
 
 }  // extern "C"

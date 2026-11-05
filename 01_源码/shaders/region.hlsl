@@ -12,7 +12,7 @@
 // RGBA32F 纹理**，shader 循环采样它。
 //   · 没有数组声明，方言风险归零；
 //   · 顺序天然保持（k 递增），与 CPU 的 `for k` 完全一致；
-//   · 每个椭圆 3 个 texel：A=(cx,cy,rx,ry) B=(cosT,sinT,gain,feather) C=(shade,_,_,_)
+//   · 每个椭圆 3 个 texel：A=(cx,cy,rx,ry) B=(cosT,sinT,gain,feather) C=(shade,dome,_,_)
 //   · 全部是**绝对像素坐标**（CPU 已经做过 faceX + e.cx*faceW），shader 不算几何。
 //
 // == 为什么必须单趟 ======================================================
@@ -136,8 +136,20 @@ float4 PS_Region(vert_out vert_in) : TARGET
         float d2 = u * u + t2 * t2;
         if (d2 >= 1.0) continue;
         float d = sqrt(d2);
-        // 软边：内圈满强度（d < feather），外圈 smoothstep 归零
-        float fall = 1.0 - smoothStep(B.w, 1.0, d);   // B.w = feather
+        // 软边：两种形状，与 beauty_region.cpp 逐字对应
+        //   C.y > 0  → 钟形（中心 1、边缘 0、两端导数为 0，没有平台拐点）
+        //   C.y == 0 → 旧式内圈满强度、外圈 smoothstep 归零（B.w = feather）
+        float fall;
+        if (C.y > 0.0)
+        {
+            float t = d;
+            float v = 1.0 - t * t * (3.0 - 2.0 * t);   // = 1 - smoothStep(0,1,d)
+            fall = (C.y == 1.0) ? v : pow(max(v, 0.0), C.y);
+        }
+        else
+        {
+            fall = 1.0 - smoothStep(B.w, 1.0, d);      // B.w = feather
+        }
         float g = B.z * fall;                          // B.z = gain
         // shade 越大越只提亮暗部（眼白/牙齿/高光不该继续提亮）
         if (C.x > 0.0)

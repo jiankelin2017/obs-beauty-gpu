@@ -93,10 +93,14 @@ def shader_at(tbl, i0, f, ch, v):
     b = shader_ch(tbl, i0 + 1, ch, v)
     return a + (b - a) * f
 
-def shader_tone(r, g, b, mask, clarity, whiten, rosy):
-    if mask == 0:
-        return (int(round(r)), int(round(g)), int(round(b)))  # 非皮肤原样（近似，仅用于非0比对）
-    sk = mask / 255.0
+def shader_tone(r, g, b, mask, clarity, whiten, rosy, glob=False):
+    # glob=True 复刻 SDK：整帧施加，完全不看掩码（toneGlobal=1）。
+    if glob:
+        sk = 1.0
+    else:
+        if mask == 0:
+            return (int(round(r)), int(round(g)), int(round(b)))  # 非皮肤原样（近似，仅用于非0比对）
+        sk = mask / 255.0
     lc_i0, lc_f = lvl5(clarity)
     lw_i0, lw_f = lvl5(whiten)
     if clarity > 0.0:
@@ -127,10 +131,13 @@ def cpu_at(t3, i0, f, ch, v):
     b = lut17(t3[i0 + 1][ch], v)
     return a + (b - a) * f
 
-def cpu_tone(r, g, b, mask, clarity, whiten, rosy):
-    if mask == 0:
-        return (int(round(r)), int(round(g)), int(round(b)))
-    sk = mask / 255.0
+def cpu_tone(r, g, b, mask, clarity, whiten, rosy, glob=False):
+    if glob:
+        sk = 1.0
+    else:
+        if mask == 0:
+            return (int(round(r)), int(round(g)), int(round(b)))
+        sk = mask / 255.0
     lc_i0, lc_f = lvl5(clarity)
     lw_i0, lw_f = lvl5(whiten)
     if clarity > 0.0:
@@ -160,13 +167,15 @@ for r in grid:
         for b in grid:
             for mv in masks:
                 for (cl, wh, ro) in settings:
-                    c = cpu_tone(float(r), float(g), float(b), mv, cl, wh, ro)
-                    s = shader_tone(float(r), float(g), float(b), mv, cl, wh, ro)
-                    samples += 1
-                    if c != s:
-                        mism += 1
-                        if mism <= 10:
-                            print("    偏差:", (r,g,b,mv,cl,wh,ro), "CPU=", c, "SHADER=", s)
+                    for glob in (False, True):
+                        c = cpu_tone(float(r), float(g), float(b), mv, cl, wh, ro, glob)
+                        s = shader_tone(float(r), float(g), float(b), mv, cl, wh, ro, glob)
+                        samples += 1
+                        if c != s:
+                            mism += 1
+                            if mism <= 10:
+                                print("    偏差:", (r,g,b,mv,cl,wh,ro,"global" if glob else "mask"),
+                                      "CPU=", c, "SHADER=", s)
 print("[2] 索引重建 + [3] CPU vs 着色器等价: 采样 %d, 偏差 %d -> %s" %
       (samples, mism, "PASS" if mism == 0 else "FAIL"))
 

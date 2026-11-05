@@ -167,7 +167,8 @@ $sources = @(
     "beauty_pool.cpp",
     "beauty_region.cpp",
     "beauty_smooth.cpp",
-    "beauty_warp.cpp"
+    "beauty_warp.cpp",
+    "beauty_skinseg.cpp"
 )
 
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null

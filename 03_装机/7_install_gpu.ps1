@@ -148,6 +148,25 @@ Copy-Item $dllSrc $dllDst -Force
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 foreach ($f in $hlsl) { Copy-Item $f.FullName (Join-Path $dataDir $f.Name) -Force }
 
+# 2.15.1: legacy data dirs. Older installs left shader copies under
+#   <plug>\bin\64bit\data\shaders, <plug>\bin\data\shaders,
+#   <plug>\data\obs-plugins\<module>\shaders
+# and obs_module_file() may resolve to any of them depending on the layout.
+# A stale copy there is invisible until the DLL needs a NEW shader uniform: then
+# the effect fails to load ("缺少参数 faceRot"), the GPU mask chain silently
+# disappears for the whole session.  Sync every existing copy so "which one OBS
+# picked" stops mattering.
+$legacyData = @(
+    (Join-Path $plugRoot "bin\64bit\data\shaders"),
+    (Join-Path $plugRoot "bin\data\shaders"),
+    (Join-Path $plugRoot "data\obs-plugins\obs-beauty\shaders")
+)
+foreach ($ld in $legacyData) {
+    if (-not (Test-Path $ld)) { continue }
+    foreach ($f in $hlsl) { Copy-Item $f.FullName (Join-Path $ld $f.Name) -Force }
+    Write-Output "shaders  : synced legacy copy $ld"
+}
+
 # --- verify ---------------------------------------------------------------
 $d1 = Get-FileHash $dllSrc -Algorithm MD5
 $d2 = Get-FileHash $dllDst -Algorithm MD5

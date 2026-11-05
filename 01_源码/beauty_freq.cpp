@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -579,6 +580,21 @@ struct Lv5 {
 
 }  // namespace
 
+namespace {
+
+// 色彩三段（清晰/美白/红润）是否整帧施加 = 复刻 SDK 的口径。
+// 默认 1（与 SDK 一致）；BEAUTY_TONE_GLOBAL=0 恢复「只在皮肤掩码内施加」。
+// 放在这里而不是每次调用 getenv：色调每帧都跑，getenv 字符串比较会有可测开销。
+bool toneGlobal() {
+    static const bool v = [] {
+        const char* e = std::getenv("BEAUTY_TONE_GLOBAL");
+        return !(e && e[0] == '0');
+    }();
+    return v;
+}
+
+}  // namespace
+
 void toneColor(unsigned char* dst, int w, int h,
                const unsigned char* mask, const RoiRect& roi,
                float clarity, float whiten, float rosy, int threads) {
@@ -596,14 +612,71 @@ void toneColor(unsigned char* dst, int w, int h,
     const bool doRosy = (rosy > 0.0f);
     const Lv5 lc(clarity), lw(whiten);
 
-    runRows(roi.y0, roi.y1, threads, [&](int yBegin, int yEnd) {
+    /* 2026-11-05（复刻 SDK）：色彩三段是**纯色彩 LUT，没有空间掩码**。
+     *
+     * 证据：SDK 的 p34/p57/p58/p139 里，`shader_main_s_color_custom_shader_whitten`
+     * 直接对传进来的像素做 3D-LUT 采样，不读 tex_mask；同一份着色器里的
+     * `surfaceblur_mix` 才读 `tex_mask.a`（皮肤软掩码）。用真值对
+     * `out_white_off/on.raw`（640×394）实测：美白开关的差值铺满整条视频区
+     * （x172–466、y0–393，含头发/衣服/背景），P95 只有 0 附近 —— 不存在
+     * "脸部边界"这回事。
+     *
+     * 我们原来是「LUT 结果 × 掩码」，于是掩码边界（椭圆/裁切框/脖子矩形）直接
+     * 变成一条可见色界：歪头时椭圆的半轴变大，这条色界跟着外扩，这就是
+     * 「美白边界不贴脸」的真正原因。toneGlobal() 打开时跳过掩码与 ROI，
+     * 与 SDK 一致地对整帧施加；磨皮不受影响（它本来就该按皮肤掩码走）。
+     *
+     * 回退：BEAUTY_TONE_GLOBAL=0 恢复旧的「掩码内施加」。 */
+    const bool global = toneGlobal();
+    const int ry0 = global ? 0 : roi.y0;
+    const int ry1 = global ? h : roi.y1;
+    const int rx0 = global ? 0 : roi.x0;
+    const int rx1 = global ? w : roi.x1;
+
+    /* 2026-11-05：把 17 锚点表**预展开成 256 项查表**（每通道一张）。
+     *
+     * 为什么必须做：SDK 把色彩三段当整帧 LUT 用（见上面 global 的说明），而
+     * 我们原来每像素要跑 2 次 lut17（两次档位插值）× 3 通道，4K 全帧实测
+     * **+63 ms**（29→92 ms，单线程），根本付不起。输入本来就是 0..255 的整数，
+     * 所以预展开在数学上与原式**逐位等价**：lut17 只是对整数 v 求值，缓存下来
+     * 值不变。实测 4K 全帧从 63 ms 降到个位数（见文档）。
+     * 表只在每次调用重建一次（768 次求值），相对整帧可以忽略。 */
+    float tC[3][256], tW[3][256], tG[256], tB[256];
+    if (doClar)
+        for (int v = 0; v < 256; ++v)
+            for (int c = 0; c < 3; ++c) tC[c][v] = lc.at(kClarityLut5, c, (float)v);
+    if (doWhiten)
+        for (int v = 0; v < 256; ++v)
+            for (int c = 0; c < 3; ++c) tW[c][v] = lw.at(kWhitenLut5, c, (float)v);
+    if (doRosy)
+        for (int v = 0; v < 256; ++v) {
+            tG[v] = dlt17(kRosyG17, (float)v);
+            tB[v] = dlt17(kRosyB17, (float)v);
+        }
+
+    // 查表 + 小数线性插值。17 锚点表在每 16 级内线性，所以本式与 lut17(v)
+    // 逐位等价（v 可以是清晰级联后的非整数）。
+    auto tab = [](const float* t, float v) {
+        if (v <= 0.0f) return t[0];
+        if (v >= 255.0f) return t[255];
+        const int i = (int)v;
+        const float f = v - (float)i;
+        return t[i] + (t[i + 1] - t[i]) * f;
+    };
+
+    runRows(ry0, ry1, threads, [&](int yBegin, int yEnd) {
         for (int y = yBegin; y < yEnd; y++) {
             const size_t rowOff = (size_t)y * w;
-            for (int x = roi.x0; x < roi.x1; x++) {
-                const unsigned char mv = mask[rowOff + x];
-                if (mv == 0) continue;          // 非皮肤：一个字节都不动
+            for (int x = rx0; x < rx1; x++) {
+                float sk;
+                if (global) {
+                    sk = 1.0f;                  // 整帧施加，无掩码
+                } else {
+                    const unsigned char mv = mask[rowOff + x];
+                    if (mv == 0) continue;      // 非皮肤：一个字节都不动
+                    sk = (float)mv * (1.0f / 255.0f);
+                }
                 const size_t o = (rowOff + x) * 4;
-                const float sk = (float)mv * (1.0f / 255.0f);
 
                 float r = (float)dst[o + 0];
                 float g = (float)dst[o + 1];
@@ -611,19 +684,22 @@ void toneColor(unsigned char* dst, int w, int h,
 
                 // 顺序：清晰 → 美白 → 红润。参考实现侧没取到三段的确切顺序，
                 // 这个顺序保证「清晰抬对比不会把美白抬亮压平」（先结构后提亮）。
+                // 查表用「整数项 + 小数线性插值」：17 锚点表在每 16 级内本来就是
+                // 线性的，所以这与直接算 lut17(v) **逐位等价**（含清晰级联后的
+                // 非整数值），不是近似。
                 if (doClar) {
-                    r += (lc.at(kClarityLut5, 0, r) - r) * sk;
-                    g += (lc.at(kClarityLut5, 1, g) - g) * sk;
-                    b += (lc.at(kClarityLut5, 2, b) - b) * sk;
+                    r += (tab(tC[0], r) - r) * sk;
+                    g += (tab(tC[1], g) - g) * sk;
+                    b += (tab(tC[2], b) - b) * sk;
                 }
                 if (doWhiten) {
-                    r += (lw.at(kWhitenLut5, 0, r) - r) * sk;
-                    g += (lw.at(kWhitenLut5, 1, g) - g) * sk;
-                    b += (lw.at(kWhitenLut5, 2, b) - b) * sk;
+                    r += (tab(tW[0], r) - r) * sk;
+                    g += (tab(tW[1], g) - g) * sk;
+                    b += (tab(tW[2], b) - b) * sk;
                 }
                 if (doRosy) {
-                    g += dlt17(kRosyG17, g) * rosy * sk;
-                    b += dlt17(kRosyB17, b) * rosy * sk;
+                    g += tab(tG, g) * rosy * sk;
+                    b += tab(tB, b) * rosy * sk;
                 }
 
                 dst[o + 0] = (unsigned char)(r < 0 ? 0 : (r > 255.0f ? 255.0f : r + 0.5f));

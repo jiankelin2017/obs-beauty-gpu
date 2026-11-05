@@ -9,9 +9,11 @@
 // 实现的行为」，不随插件发布。插件的编译单元里不再有任何参考实现二进制名。
 
 #include "beauty_core.h"
+#include "beauty_seg.h"    /* 方案 E / P0：整帧分割影子层 */
 #include "beauty_face.h"
 #include "beauty_freq.h"
 #include "beauty_guide.h"
+#include "beauty_log.h"
 #include "beauty_onnx.h"
 #include "beauty_pool.h"
 #include "beauty_region.h"
@@ -39,8 +41,10 @@
 // 定义在文件顶部是因为 CoreEngine::process 在 1500 行附近就要用它，而对外
 // 的 beautyCoreSetSmoothHook() 放在文件末尾的诊断区。
 //
-// 存成文件级静态量而不是 CoreEngine 成员：宿主只有一个（OBS 插件），而且
-// 引擎实现可能被换掉，钩子挂在「接口」上比挂在某个实现上更稳。
+// 3.0.0：原注释写「宿主只有一个（OBS 插件）」—— 实机证明一个 OBS 场景可以
+// 同时给多个 source 挂滤镜。这一批名字仍在文件顶部定义（兼容保留、不再被
+// 引用），但 1050 行之后的引用已由宏重定向到 g_slots[t_slot]，按引擎槽各存
+// 一份；配置类全局（g_cfg 等）仍进程级共享。详见 1040 行起的多实例说明。
 static BeautySmoothHook g_smoothHook = nullptr;
 static void* g_smoothUser = nullptr;
 static long long g_smoothHookHit = 0;    // 钩子真的接管了的帧数
@@ -54,6 +58,43 @@ static void* g_chainUser = nullptr;
 static long long g_chainHit = 0;
 static long long g_chainCall = 0;
 static unsigned long long g_chainSeg[5] = {0, 0, 0, 0, 0};
+
+// ---- 方案 E / P0：分割影子层的工作区与节流计数 --------------------------
+// 1 MB（512×512×4）放全局而不是 worker 栈上（默认 1 MB 栈，放两份会挤爆）。
+// 只在 BEAUTY_SEG=1 时被触碰；默认路径一行都不执行。
+static beautycore::SegFrame g_segWork;
+static int g_segTick = 0;
+static int g_segEvery = 0;      // 0 = 首次使用时从环境变量取
+
+// 跑一次分割。**两条路径共用这一份**：以前只有 async worker 里调，于是
+// BEAUTY_ASYNC_DETECT=0（离线台、以及任何走同步检测的配置）下 BEAUTY_SEG=1
+// 根本不执行 —— 分割结果永远是空的，而 segMix 一旦非 0 就会把整张掩码乘成 0，
+// 表现为「开了分割美颜直接没了」。抽出来两边一起调，节流也只有一个计数器。
+static void runSegIfDue(const unsigned char* src, int w, int h,
+                        int geomW, int geomH, float mapScale, int mapOx, int mapOy,
+                        const std::vector<beautycore::FaceBox>& boxes) {
+    if (!beautycore::skinsegEnabled()) return;
+    if (g_segEvery <= 0) {
+        // 默认 12 帧：512 输入在 4 线程下约 95 ms/次、256 输入约 45 ms/次
+        // （实测），30 fps 下每 12 帧≈400 ms，占用约 1/4 个核；调小会直接把
+        // worker 压满，掩码更新被拖慢。
+        const char* ev = std::getenv("BEAUTY_SEG_EVERY");
+        int n = ev ? std::atoi(ev) : 12;
+        g_segEvery = (n > 0 && n < 600) ? n : 12;
+    }
+    if (++g_segTick < g_segEvery) return;
+    g_segTick = 0;
+    // 取本帧最高分人脸做裁切框；没有就传空 → 内部退回整帧。
+    const beautycore::FaceBox* bestFace = nullptr;
+    for (const auto& fb : boxes)
+        if (fb.w > 0.5f && fb.h > 0.5f)
+            if (!bestFace || fb.score > bestFace->score) bestFace = &fb;
+    // 计时与发布都在 skinsegRun 内完成（发布时 ms 必须已填好）。
+    // 注意两套坐标：像素是缩略图（w×h），人脸框是全帧几何（geomW/H），
+    // 换算靠 mapScale/mapOx/mapOy —— 漏传就会裁到错误的位置（2026-11-05 踩过）。
+    (void)beautycore::skinsegRun(src, w, h, geomW, geomH, mapScale, mapOx, mapOy,
+                                 bestFace, &g_segWork);
+}
 
 // 认领是否构成「执行顺序上的前缀」。
 //
@@ -620,10 +661,21 @@ struct SmoothCfg {
     int regNasoLrRadius = 4;         // LR = 半径 4 的邻域最大亮度（双瓣拟合值）
     float regNasoGateLo = 19.1526f;   // 暗差 < gateLo → 不起作用
     float regNasoGateHi = 29.8535f;   // 暗差 > gateHi → 完全起作用
-    // 祛斑痘：拉回量 = k × 偏离局部均值的幅度。0.25 是拿「参考实现的 dY p5/p95
-    // = -3.6/+3.5」反推的；0.55 时 core 是 -11/+7，暗斑被打得太狠，痘印会
-    // 变成一块块发亮的补丁。再大就会把毛孔一起抹平（那成了第二次磨皮）。
-    float regSpotK = 0.25f;
+    // 祛斑痘：拉回量 = k × 偏离局部均值的幅度。
+    //
+    // 3.1.64（2026-11-05，用户定方案 A）：0.25 → 0.75。理由与代价：
+    //   · 0.25 是「参考实现的 dY p5/p95 = -3.6/+3.5」反推出来的，但那个幅度
+    //     对应的是**合成的、对比度很高的**斑点图；真人 720p 摄像头上痘印的
+    //     dev 中位只有 1~2 灰阶，乘 0.25 后 0.25~0.5，lroundf 之后多数是 0
+    //     —— 满档实测只有 1.30% 像素变化、maxdiff 7，滑块观感等于没有。
+    //   · 实测 k=0.5/0.8/1.0 的满档 maxdiff 分别是 15/24/24，0.75 落在
+    //     「肉眼可辨」这一档。
+    //   · 代价（历史实测，必须记住）：k=0.55 时 core 的 dY 到 -11/+7，暗斑
+    //     被打得太狠，痘印会变成一块块**发亮的补丁**。因此 0.75 只在
+    //     「dev 判据仍然是双向 ±」的前提下成立；若发现补丁，先回到 0.5 或
+    //     改判据（只压 dev<0），不要继续往上加。
+    //   · BEAUTY_REG_SPOT 可逐帧覆盖，装机后要 A/B 就用它，别改源码重编。
+    float regSpotK = 0.75f;
     int regSpotRadius = 2;          // 5×5 窗口。2~4 是斑点尺度，再大就吃到结构
     float regSpotThrLo = 1.4f;      // 小于它算皮肤细纹理，不动
     float regSpotThrHi = 30.0f;     // 大于它算真边缘（睫毛/鼻孔/唇线），不动
@@ -852,7 +904,37 @@ int g_detOffY = 0;
 //   1 = 脸用椭圆
 //   2 = 脖子用椭圆
 //   3 = 两者都用椭圆
-int g_maskShape = 0;
+//
+// 2.15.0 起默认 3（椭圆）。理由不是审美：**矩形边是直的**，而人脸相对画面
+// 一歪（歪头、或源本身被转了 90°）那条直边就横切在皮肤上，用户看到的正是
+// 「长方形美白遮罩」。椭圆边界处处是曲线，配合 g_maskRoll 的转角，边界
+// 始终贴着脸自身轮廓 —— 两件事必须一起做，只开椭圆也救不了 90° 躺着的脸
+// （那时脸框的宽高是互换的，轴对齐椭圆的半轴长度整好差一个身位）。
+int g_maskShape = 3;
+
+// 2.15.0：掩码几何跟随人脸滚转角（见 faceRoll()）。
+//
+// 0 = 关闭，几何永远轴对齐（2.14.1 及以前的行为，逐字节一致，用于 A/B 与
+//     回归对拍）；1 = 跟随。默认 1。
+int g_maskRoll = 1;
+
+// 2.15.3：掩码几何的时间平滑系数（0..255 的 α，按 1/256 解释）。
+//
+// 为什么需要它：检测每跑一次，框中心抖 1~3 px、滚转角抖 1~3°。单帧看不出来，
+// 但脸一大（怼镜头）或歪着头，这点抖动摊到掩码边界上就是「抽风闪」。
+// 90/256 ≈ 0.35 是折中：抖动量降到约 0.45 倍，同时肉眼看不到跟手变慢
+// （大跳会直接采纳，见 emaMaskFace，所以快动不拖影）。
+// 0 = 关闭（逐字节回到 2.15.2 的掩码几何），可用 BEAUTY_MASK_EMA 覆盖。
+int g_maskEma = 90;
+
+// 2.15.3：掩码几何时间平滑的状态（见 emaMaskFace），按「脸的序号」存。
+// 放文件作用域而不是函数内 static：MSVC 不接受「函数内 static + 局部类型」。
+struct MaskGeomTrack {
+    float cx = 0.0f, cy = 0.0f, w = 0.0f, h = 0.0f;
+    float rc = 1.0f, rs = 0.0f;
+    bool valid = false;
+};
+MaskGeomTrack g_maskTrack[BEAUTY_WARP_MAX_FACES];
 
 // 2.6.0（S4a）：只出几何、不画全帧 CPU 掩码。
 //
@@ -956,6 +1038,125 @@ bool  g_skinAdaptValid = false;   // 上一帧是否取得有效中心（EMA 初
 // 写进 g_skinCb/g_skinCr 时置位，渲染线程在 video_render 里取走并打一行。
 // panel 只在 init 调 beautyCoreSkinInfo()、没有周期性 re-log，这是补的出口。
 std::atomic<bool> g_skinAnnounce{false};
+
+// ===========================================================================
+// 3.0.0 —— 多实例隔离：按 slot 的引擎上下文
+// ---------------------------------------------------------------------------
+// 背景（2026-11-05 实机）：场景里同时挂两个机位的美颜滤镜时，主机位人物
+// 不停闪烁、侧机位磨皮/美白/清晰全无效果。根因是上面这一批文件级全局
+// （钩子 user、帧号、缩略图指针、肤色 EMA、掩码几何轨迹、诊断计数）与
+// beautyEngine() 单例都只有一份，两个滤镜实例交替写同一份状态。
+//
+// 做法：
+//   * 帧级 / 时域状态收进 SlotState，按 slot 各存一份；
+//   * 渲染线程与每个引擎自己的异步 worker 用 thread_local 的 t_slot 选中
+//     自己那一份 —— 不同 slot 是数组的不同元素，天然无数据竞争；
+//   * 引擎实例也按 slot 惰性创建（见 beautyEngine()）；
+//   * 配置类全局（g_cfg / g_maskShape / g_skinRu / g_neck / g_featherRamp ...）
+//     由环境变量在启动时定、所有实例取值相同，保持进程级共享：272 处
+//     g_cfg 引用一行都不用改，也避免把「配置」误当成「帧状态」。
+//
+// 这条宏必须放在**所有原全局定义之后**：前面的定义保留不动（它们退化成
+// 未被使用的兼容声明，零风险），后面的引用一律重定向到当前线程的槽。
+// 单实例时 t_slot 恒为 0、g_engines[0] 就是原来那个单例，行为逐字节不变。
+//
+// 边界：方案 E 分割影子层（g_segWork / g_segTick / g_segEvery）默认关，
+// 仍是进程级；启用 BEAUTY_SEG=1 时只支持单实例。
+// ===========================================================================
+struct SlotState {
+    BeautySmoothHook smoothHook = nullptr;
+    void*            smoothUser = nullptr;
+    long long        smoothHookHit = 0;
+    long long        smoothHookCall = 0;
+    BeautyChainHook  chainHook = nullptr;
+    void*            chainUser = nullptr;
+    long long        chainHit = 0;
+    long long        chainCall = 0;
+    unsigned long long chainSeg[5] = {};
+
+    unsigned long long maskSubmits = 0;
+    int  detPeriod = 0;
+    int  detDiff = 0;
+    int  motHot = 0;
+    int  motCalls = 0;
+    unsigned long long noFaceFrames = 0;
+    unsigned long long alignUsed = 0;
+    unsigned long long alignTotal = 0;
+    unsigned long long frameTag = 0;
+
+    const unsigned char* thumbPx = nullptr;
+    int   thumbW = 0, thumbH = 0;
+    int   thumbFullW = 0, thumbFullH = 0;
+    float thumbScale = 0.0f;
+    int   thumbOx = 0, thumbOy = 0;
+    const unsigned char* motPx = nullptr;
+    int   motW = 0, motH = 0;
+    bool  duePending = false;
+    bool  dueValue = false;
+    bool  noPixFrame = false;
+
+    float skinCb = -0.065f;
+    float skinCr = 0.095f;
+    bool  skinAdaptValid = false;
+    MaskGeomTrack maskTrack[BEAUTY_WARP_MAX_FACES] = {};
+    bool  maskGeomOnly = false;
+};
+
+static const int kMaxEngineSlots = 8;
+static SlotState g_slots[kMaxEngineSlots];
+static thread_local int t_slot = 0;
+// 3.0.1：beautyEngine() 对非法 t_slot 做了 clamp，但下面这批宏原来直接
+// g_slots[t_slot] 索引。写入点目前都合法，可一旦有新线程忘了 bind（或未来
+// 有人写入 -1）就是越界写。统一收敛到一个内联函数，与 beautyEngine() 同口径。
+static inline int slotIndex() {
+    return (t_slot >= 0 && t_slot < kMaxEngineSlots) ? t_slot : 0;
+}
+static IBeautyEngine* g_engines[kMaxEngineSlots] = {};
+// beautyEngine() 每帧会被调用多次：原子指针做无锁快路径，只有「该槽第一次
+// 建引擎」才进互斥。g_engines[] 保留原始指针供 release / 诊断遍历；写都在
+// g_engineMutex 内，热路径读一律走原子，避免对共享指针产生数据竞争。
+static std::atomic<IBeautyEngine*> g_engineAtomic[kMaxEngineSlots]{};
+static std::mutex g_engineMutex;
+static bool g_slotOwned[kMaxEngineSlots] = {};
+static std::mutex g_slotMutex;
+
+#define g_smoothHook      g_slots[slotIndex()].smoothHook
+#define g_smoothUser      g_slots[slotIndex()].smoothUser
+#define g_smoothHookHit   g_slots[slotIndex()].smoothHookHit
+#define g_smoothHookCall  g_slots[slotIndex()].smoothHookCall
+#define g_chainHook       g_slots[slotIndex()].chainHook
+#define g_chainUser       g_slots[slotIndex()].chainUser
+#define g_chainHit        g_slots[slotIndex()].chainHit
+#define g_chainCall       g_slots[slotIndex()].chainCall
+#define g_chainSeg        g_slots[slotIndex()].chainSeg
+#define g_maskSubmits     g_slots[slotIndex()].maskSubmits
+#define g_detPeriod       g_slots[slotIndex()].detPeriod
+#define g_detDiff         g_slots[slotIndex()].detDiff
+#define g_motHot          g_slots[slotIndex()].motHot
+#define g_motCalls        g_slots[slotIndex()].motCalls
+#define g_noFaceFrames    g_slots[slotIndex()].noFaceFrames
+#define g_alignUsed       g_slots[slotIndex()].alignUsed
+#define g_alignTotal      g_slots[slotIndex()].alignTotal
+#define g_frameTag        g_slots[slotIndex()].frameTag
+#define g_thumbPx         g_slots[slotIndex()].thumbPx
+#define g_thumbW          g_slots[slotIndex()].thumbW
+#define g_thumbH          g_slots[slotIndex()].thumbH
+#define g_thumbFullW      g_slots[slotIndex()].thumbFullW
+#define g_thumbFullH      g_slots[slotIndex()].thumbFullH
+#define g_thumbScale      g_slots[slotIndex()].thumbScale
+#define g_thumbOx         g_slots[slotIndex()].thumbOx
+#define g_thumbOy         g_slots[slotIndex()].thumbOy
+#define g_motPx           g_slots[slotIndex()].motPx
+#define g_motW            g_slots[slotIndex()].motW
+#define g_motH            g_slots[slotIndex()].motH
+#define g_duePending      g_slots[slotIndex()].duePending
+#define g_dueValue        g_slots[slotIndex()].dueValue
+#define g_noPixFrame      g_slots[slotIndex()].noPixFrame
+#define g_skinCb          g_slots[slotIndex()].skinCb
+#define g_skinCr          g_slots[slotIndex()].skinCr
+#define g_skinAdaptValid  g_slots[slotIndex()].skinAdaptValid
+#define g_maskTrack       g_slots[slotIndex()].maskTrack
+#define g_maskGeomOnly    g_slots[slotIndex()].maskGeomOnly
 
 // 为什么 EMA 默认必须是 1.0：任何 <1 的系数都会让中心携带历史，同一张图
 // 重复处理（ROI 对拍、多次 BeautyCoreRun）得到不同掩码 —— verify_roi 实测
@@ -1338,6 +1539,15 @@ public:
             // 掩码几何：BEAUTY_MASK_SHAPE=0 退回矩形（3.1.19 行为），3 = 脸+脖子都用椭圆。
             const char* msh = getenv("BEAUTY_MASK_SHAPE");
             if (msh && *msh) g_maskShape = atoi(msh);
+            // 2.15.0：BEAUTY_MASK_ROLL=0 关闭「掩码跟脸转」（回到 2.14.1 的轴对齐几何）。
+            const char* mrl = getenv("BEAUTY_MASK_ROLL");
+            if (mrl && *mrl) g_maskRoll = (mrl[0] != '0');
+            // 2.15.3：掩码几何时间平滑系数（0 = 关，1..255 = α×256）。
+            const char* mema = getenv("BEAUTY_MASK_EMA");
+            if (mema && *mema) {
+                const int v = atoi(mema);
+                g_maskEma = (v <= 0) ? 0 : (v > 255 ? 255 : v);
+            }
             // 2.13.0：检测几何平移（只诊断）。格式 "dx,dy"，解析失败按 0。
             const char* dof = getenv("BEAUTY_DET_OFFSET");
             if (dof && *dof) {
@@ -1483,7 +1693,13 @@ public:
         if (!ensureReady(err)) return -1;
         return 0;
     }
-    void releaseSlot(int) override {}
+    // 3.0.1：旧实现是空的，于是 destroy() 里调 releaseSlot() 什么也没停。
+    // worker 会在滤镜销毁后继续跑（占一个线程 + 一份 YuNet 模型），而且它是
+    // 唯一会在宿主线程之外读写 g_slots[slot] 的人：beautyCoreReleaseSlot()
+    // 紧接着整块清空 SlotState 就构成数据竞争。这里先 join 掉 worker；
+    // 引擎对象 / 模型刻意保留，槽复用仍能省掉 ~2 秒预热，重启 worker
+    // 由 startAsyncIfNeeded() 负责（asyncStarted_ 已被置回 false）。
+    void releaseSlot(int) override { stopAsync(); }
     // 面板「识别模式 / 人物个数」的真正落点（3.1.75）。
     // 之前这里是空实现 —— UI 有下拉、引擎不存值，属于「看着能调、实际没用」。
     // 语义（写死在这里，面板文案照此）：
@@ -1518,6 +1734,13 @@ public:
         // 2.10.0 方案 B：把本帧输入旋转存进成员，供 updateMask/buildMaskInto 的
         // 检测几何反变换使用（渲染与输出尺寸不变，只动几何）。
         inputRot_ = ((s.input_rot % 360) + 360) % 360;
+        // 2.15.0：面板值一变就重新信任它（清掉上次「自动退回 0°」的结论），
+        // 否则用户把 90 改成 270 之后引擎还按 0 跑，看起来像开关失灵。
+        if (inputRot_ != cfgRot_) {
+            cfgRot_ = inputRot_;
+            effRot_.store(inputRot_, std::memory_order_relaxed);
+            rotFallbackLogged_ = false;
+        }
 
         double blur = s.panel[P_BLUR];
         if (blur < 0) blur = 0;
@@ -1571,6 +1794,28 @@ public:
         // 3.1.19 之前这里要求 `t > 0`，于是「只开清晰、磨皮为 0」的画面零变化，
         // 离线矩阵直接判「欠 100%」。这条前提已删除。
         const bool wantClarity = (s.panel[P_CLARITY] > 0.0);
+        /* 2.16.1：本帧钩子不会跑（磨皮=0）却又要色彩层 → 必须让引擎自己画掩码。
+         * 见 buildMaskInto 里 geomOnly 的注释。
+         *
+         * 3.1.65（2026-11-05）：补 **wantFaceDetail**。
+         *
+         * 原判据只列了 wantTone / wantClarity，漏掉「磨皮=0 的纯锐化」这一档，
+         * 而同一条链对它是致命的：
+         *   ① 段区间钩子只在 `t > 0`（磨皮>0）时被调用 —— 纯锐化时 GPU 掩码
+         *      链一帧都不跑，没人替 CPU 画掩码；
+         *   ② 可 geomOnly 仍然成立（`!forceCpuMask_ && mapped && 单脸 …`），
+         *      于是 CPU 也一个像素都不画；
+         *   ③ 结果 skin 纹理整张是空的，detail.hlsl 里 `m = 0`，
+         *      `fwF = m·dFine` 恒 0 —— **脸内锐化整段失效**，
+         *      只剩 `fwG = (1−0)·dGFine` 的全局项。
+         *
+         * 这与 2.16.1 修「美白完全没效果」是同一个坑，只是那次只修了色彩层。
+         * 实测（真实 GPU 链，同一张脸，面板 100）：
+         *   · 磨皮=0 + 锐化=100  → 与关滤镜**逐字节相同**（0 px，md5 一致）
+         *   · 磨皮=100 + 锐化=100 → 叠加 52 777 px、max 63（有效）
+         * 用户报的「锐化拉满没效果」就是第一行。 */
+        forceCpuMask_ = ((t <= 0.0f) &&
+                         (wantTone || wantClarity || wantFaceDetail));
         // 五官局部五项：全部要求「有掩码 + 有脸」，所以也算掩码需求方。
         // 与参考实现一致地**不**以磨皮为前提（这是妆容层，磨皮关掉也该生效）。
         const bool wantRegion = (s.panel[P_THREED] > 0.0 ||
@@ -1807,7 +2052,19 @@ public:
             // 基准回填用自己的一套细频阈值（默认 0.8，比锐化那套的 3.0 低得多）：
             // 磨皮要还的就是「小幅值细频」，而锐化要防的是「噪点被放大」，
             // 两者的取舍正好相反，所以不能共用一个阈值。
-            dp.thrFine = wantBlurRefill ? g_cfg.blurRefillThr : g_cfg.detailThrFine;
+            //
+            // 3.1.63（2026-11-05）：这一行以前**无条件**覆盖上面纯锐化分支设的
+            // `dp.thrFine = faceSharpThrFine`（默认 0），把「磨皮=0 时的独立锐化」
+            // 又按回 3.0 —— |hf|<3 的细频全被 softThrF 削掉，于是面板拉满只剩
+            // 0.40% 像素变化（实测 720p 脸区 3724 px / diff 中位 2），滑块观感
+            // 等于没有。3.1.35 加纯锐化分支时漏了这一行，属于隐藏的旧 BUG。
+            // 三种模式互斥：t<=0 是纯锐化，wantBlurRefill 只在 t 超过阈值时成立，
+            // 其余才是普通「回填被磨掉的高频」。
+            const bool pureSharpen = (t <= 0.0f && wantFaceDetail && haveMask);
+            dp.thrFine = pureSharpen
+                             ? g_cfg.faceSharpThrFine
+                             : (wantBlurRefill ? g_cfg.blurRefillThr
+                                               : g_cfg.detailThrFine);
 
             // 有全局档就整帧跑（掩码只决定「用哪一档权重」）；否则只跑掩码包围盒。
             if (wantGlobalDetail) {
@@ -2056,6 +2313,7 @@ public:
                                 d.chinYm = wg.chinYm;
                                 d.chinSpan = wg.chinSpan;
                                 d.chinK = wg.chinK;
+                                d.chinKH = wg.chinKH;
                                 d.roi[0] = wg.roi[0];
                                 d.roi[1] = wg.roi[1];
                                 d.roi[2] = wg.roi[2];
@@ -2310,6 +2568,8 @@ public:
     }
 
     int lastFaces() const override { return lastFaces_; }
+    // 2.15.0：本帧实际用的输入方向（见 IBeautyEngine::effectiveRot）。
+    int effectiveRot() const override { return effRot_.load(std::memory_order_relaxed); }
     bool regionActive() const override { return faceOk_; }
     double lastCoreMs() const override { return lastMs_; }
     void lastSegMs(double* out6) const override
@@ -2751,6 +3011,9 @@ private:
         maskHold_ = 0;
         maskValid_ = true;
         faceErr_ = msg;
+        // 方案 E / P0：同步路径也要跑分割。漏了这一句，BEAUTY_ASYNC_DETECT=0
+        // （离线台、以及任何降级到同步检测的配置）下 BEAUTY_SEG=1 就是纯摆设。
+        runSegIfDue(dsrc, dw, dh, gW, gH, mScale, mOx, mOy, faces_);
         return true;
     }
 
@@ -2805,7 +3068,104 @@ private:
         }
     }
 
-    bool buildMaskInto(const unsigned char* src, int w, int h,
+    // 2.15.0：改写「本帧有效输入方向」。只在值真的变了时写，避免每帧无谓的
+    // 原子写 + 宿主侧缓存失效。
+    void setEffRot(int v) {
+        if (effRot_.load(std::memory_order_relaxed) != v)
+            effRot_.store(v, std::memory_order_relaxed);
+    }
+
+    // 2.15.0（掩码跟脸转）：由两眼关键点求「脸的滚转角」，输出 cos/sin。
+    //
+    // 为什么需要它：掩码的外边界是**几何裁剪**（椭圆/矩形 + 羽化），而几何一直是
+    // 「画面轴对齐」的。脸一歪（歪头，或者源本身被转了 90°），那条轴对齐的边界就
+    // 横切在皮肤上 —— 用户看到的正是「长方形美白遮罩」。
+    //
+    // θ 取自 YuNet 的两眼连线（kps[0..1] 右眼、kps[2..3] 左眼）。这个角度**已经包含
+    // 「源被旋转」这件事**：invRotateFace 之后关键点就在源坐标系里，躺着的脸算出来
+    // 自然是 ±90°，于是 90° 场景下脸框的宽高互换也一并被吸收（见 lw/lh）。
+    //
+    // 死角 2°：正立人脸的关键点连线有 0.3~1.5° 噪声，不做死角的话四条黄金基准会
+    // 因为这点噪声产生全帧差异，回归门禁就废了；2° 以内边界贴不贴脸肉眼也看不出。
+    //
+    // 返回 false = 按正立处理（c=1, s=0），此时下游每个式子都退化成原式。
+    static bool faceRoll(const beautycore::FaceBox& f, float& c, float& s,
+                        int inputRot) {
+        c = 1.0f;
+        s = 0.0f;
+        if (!kpsSane(f)) return false;      // 关键点不可信：宁可不动
+        const float ex = f.kps[2] - f.kps[0], ey = f.kps[3] - f.kps[1];
+        const float e2 = ex * ex + ey * ey;
+        if (!(e2 > 4.0f)) return false;                 // 两眼重合：方向无意义
+        const float th = atan2f(ey, ex);
+        if (fabsf(th) < 0.034906585f) return false;      // < 2°
+        /* 2.16.0：**方向的自洽性检查**。
+         *
+         * 一只眼被手/头发挡住时，YuNet 仍会给出 5 个点，但那只眼的点可能落到手上 ——
+         * `kpsSane` 只查「点是否在脸框附近」，查不出这种"位置合理、方向全错"的角度。
+         * 判据：真正转过 90° 的脸，它的**检测框必然是横的**（宽 > 高）；脸框还是竖的
+         * （高 > 1.25×宽）却算出 30° 以上的滚转角，只可能是关键点坏了 → 按正立处理。
+         *
+         * 用户 2026-11-04 20:4x 的原话正是这条：「两只眼都在画面里就没事，手遮住
+         * 一只眼，遮住的那只手上全是美白遮罩」—— 掩码被一个错角度转到了手上。 */
+        if (inputRot == 0 && f.h > f.w * 1.25f && fabsf(sinf(th)) > 0.5f)
+            return false;
+        c = cosf(th);
+        s = sinf(th);
+        return true;
+    }
+
+    // 2.15.3（掩码几何时间平滑）：检测每跑一次，框中心会抖 1~3 px、滚转角会抖
+    // 1~3°，单帧看不出来，但脸一大、或者歪着头，这点抖动摊到掩码边界上就是
+    // 用户说的「抽风闪」。这里对**掩码用的**几何做一阶 EMA：
+    //
+    //   · 只在掩码这一侧平滑（`fboxOut` 早在循环之前就交出去了，五官/美形不动）
+    //   · 大跳直接采纳（中心位移 > 8% 脸宽，或宽高变化 > 15%）—— 换人、快动时
+    //     不能拖影，宁可跳一下
+    //   · 静止画面每帧框完全一样，EMA 是恒等变换 → 黄金基准逐字节不变
+    //
+    // 为什么放在引擎而不是宿主：掩码几何的唯一来源就是这里，宿主只负责照抄；
+    // 放到宿主就是第二份状态，两边一定会分叉。
+
+    static void emaMaskFace(beautycore::FaceBox& sf, float& rc, float& rs, size_t idx) {
+        if (idx >= (size_t)BEAUTY_WARP_MAX_FACES) return;
+        MaskGeomTrack& t = g_maskTrack[idx];
+        const float cx = sf.x + sf.w * 0.5f, cy = sf.y + sf.h * 0.5f;
+        const float a = (float)g_maskEma / 256.0f;
+        bool snap = !t.valid;
+        if (!snap) {
+            if (fabsf(cx - t.cx) > 0.08f * sf.w) snap = true;
+            if (fabsf(cy - t.cy) > 0.08f * sf.w) snap = true;
+            if (fabsf(sf.w - t.w) > 0.15f * sf.w) snap = true;
+            if (fabsf(sf.h - t.h) > 0.15f * sf.h) snap = true;
+        }
+        if (snap) {
+            t.cx = cx; t.cy = cy; t.w = sf.w; t.h = sf.h;
+            t.rc = rc; t.rs = rs; t.valid = true;
+            return;
+        }
+        t.cx += (cx - t.cx) * a;
+        t.cy += (cy - t.cy) * a;
+        t.w += (sf.w - t.w) * a;
+        t.h += (sf.h - t.h) * a;
+        t.rc += (rc - t.rc) * a;
+        t.rs += (rs - t.rs) * a;
+        const float n = sqrtf(t.rc * t.rc + t.rs * t.rs);
+        if (n > 1.0e-4f) {
+            rc = t.rc / n;
+            rs = t.rs / n;
+        } else {
+            rc = 1.0f;
+            rs = 0.0f;
+        }
+        t.rc = rc;
+        t.rs = rs;
+        sf.x = t.cx - t.w * 0.5f;
+        sf.y = t.cy - t.h * 0.5f;
+        sf.w = t.w;
+        sf.h = t.h;
+    }
+bool buildMaskInto(const unsigned char* src, int w, int h,
                        std::vector<unsigned char>& maskOut,
                        std::vector<unsigned char>& protectOut,
                        beautycore::RoiRect& boundsOut,
@@ -2841,26 +3201,52 @@ private:
         // 2.13.1（P0-11 阶段 2）：全帧路径也要转 —— 旋转做进 letterbox 的重采样，
         // 不额外分配全帧缓冲。`mapped`（缩略图）路径的图已由宿主 GPU 转过，
         // 这里必须传 0，否则会转两次。
-        const int detRot = mapped ? 0 : inputRot_;
-        if (!face_.detect(src, w, h, faces, ferr,
-                          detHighQ_ ? 0.45f : 0.6f, 0.3f, 4, detRot) ||
-            faces.empty()) {
+        const float detConf = detHighQ_ ? 0.45f : 0.6f;
+        const int effRot = effRot_.load(std::memory_order_relaxed);
+        const int detRot = mapped ? 0 : effRot;
+        bool detOk = face_.detect(src, w, h, faces, ferr, detConf, 0.3f, 4, detRot) &&
+                     !faces.empty();
+        /* 2.15.0：输入方向选错时（源正立、面板却填了 90°），YuNet 在躺倒的脸上
+         * 一个框都出不来 —— 掩码为空 → 磨皮/美白**整段静默失效**，用户只看到
+         * 「美颜没反应」。这里退一步再试一次「不旋转」：能检出就说明这一档方向与源
+         * 不匹配，于是把本帧有效方向改成 0，并让宿主下一帧起别再转缩略图
+         * （beautyCoreEffectiveRot）。
+         * 只在「已经检不到」时多跑一次推理，正常帧一分钱不花。 */
+        if (!detOk && !mapped && detRot != 0) {
+            std::string e2;
+            if (face_.detect(src, w, h, faces, e2, detConf, 0.3f, 4, 0) &&
+                !faces.empty()) {
+                detOk = true;
+                ferr = e2;
+                setEffRot(0);
+                if (!rotFallbackLogged_) {
+                    rotFallbackLogged_ = true;
+                    NALOG(BEAUTY_LOG_WARNING,
+                          "[美颜] 输入方向 %d° 在本源上检不到脸，已自动改用 0°"
+                          "（画面正常；删掉 BEAUTY_INPUT_ROT 环境变量可消掉这条）",
+                          detRot);
+                }
+            }
+        }
+        if (!detOk) {
             msgOut = ferr;
             facesOut = 0;
             return false;
         }
+        // 反变换必须与「实际用的那个方向」一致：重试成功时它已经被改成 0。
+        const int invRot = effRot_;
         // 检测在「旋转后整图」上跑，所以几何此刻是旋转后坐标系，必须立刻反变换回
         // 源坐标系。位置有两条硬约束：
         //   · 必须在 estimateSkinCenter 之前 —— 那个函数拿 faces 去采 src 的真实像素，
         //     src 是全帧原图未旋转，坐标差一次旋转就会把肤色椭圆中心采到别处；
         //   · 必须在 fboxOut 赋值之前 —— 交出去的那份是全帧源坐标（宿主/五官段用）。
         // 旋转后整图的宽高在 90/270 时要互换，与 invRotateFace 的 (Wr,Hr) 约定一致。
-        if (!mapped && inputRot_ != 0) {
-            const bool swap = (inputRot_ == 90 || inputRot_ == 270);
+        if (!mapped && invRot != 0) {
+            const bool swap = (invRot == 90 || invRot == 270);
             const int Wr = swap ? h : w;
             const int Hr = swap ? w : h;
             for (size_t i = 0; i < faces.size(); i++)
-                invRotateFace(faces[i], inputRot_, Wr, Hr, w, h);
+                invRotateFace(faces[i], invRot, Wr, Hr, w, h);
         }
         facesOut = (int)faces.size();
         // 关键点要留给后续的「五官局部」五项用（亮眼/去黑眼圈/法令纹…都要位置）。
@@ -2871,8 +3257,18 @@ private:
         // 判据与宿主的 gpu_mask_ok **同构**（单脸 + shape 不含 bit2），再加上
         // 宿主「有 GPU 掩码链」的声明。条件任一不满足就走完整路径并在 diag 里
         // 置 0 —— 所以宿主看到 0 时永远可以退回 CPU 上传，不存在「没掩码」的帧。
-        const bool geomOnly = (mapped || g_maskGeomOnly) && diagOut &&
-                              faces.size() == 1 && !(g_maskShape & 4);
+        /* 2.16.1：**宿主这帧不会有 GPU 段链时，不许只出几何**。
+         *
+         * 段区间钩子只在 `t > 0`（磨皮>0）时被调用。磨皮=0 而美白/清晰非 0 时，
+         * 钩子不跑 → GPU 掩码**没有东西替 CPU 画**；可 geomOnly 仍然为真，于是
+         * CPU 掩码是空的 → 色调乘 0 → 「美白完全没效果」。
+         * 用户 2026-11-04 20:50 的日志正是这一格：
+         *   `仅色彩层：磨皮=0 …美白=79…｜引擎掩码 px=0 有脸=1`
+         * `px=0` 不是没脸，而是**CPU 一个像素都没画**。
+         * 修法：这种情况下强制走完整路径（CPU 画全帧掩码）。 */
+        const bool geomOnly = !forceCpuMask_ && (mapped || g_maskGeomOnly) &&
+                              diagOut && faces.size() == 1 &&
+                              !(g_maskShape & 4);
         if (mapped && !geomOnly) {
             /* 缩略图模式下 src 只有 w×h 那么大，而几何坐标与掩码缓冲都是全帧 ——
              * 多脸 / shape 带 bit2 时**画不出全帧掩码**（没有像素）。
@@ -2930,12 +3326,12 @@ private:
             }
             // 2.10.0 方案 B：上面的 unscale 把缩略图坐标映射到「旋转后全帧」；
             // 再把检测几何反变换回源坐标系（源尺寸 = gw/gh，旋转后尺寸 = 交换后的 gw/gh）。
-            if (inputRot_ != 0) {
-                const bool swap = (inputRot_ == 90 || inputRot_ == 270);
+            if (invRot != 0) {
+                const bool swap = (invRot == 90 || invRot == 270);
                 const int Wr = swap ? gh : gw;
                 const int Hr = swap ? gw : gh;
                 for (size_t i = 0; i < faces.size(); i++)
-                    invRotateFace(faces[i], inputRot_, Wr, Hr, gw, gh);
+                    invRotateFace(faces[i], invRot, Wr, Hr, gw, gh);
             }
             fboxOut = faces;   // 交给宿主/五官段的那一份也要是全帧坐标
         }
@@ -2964,6 +3360,15 @@ private:
         // 只有「从 0 变 255」才计数，否则脸框与脖子通道重叠处会被重复算。
         int px = 0;
         int bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+
+        /* 2.15.1：geomOnly 帧的 ROI 来源。
+         *
+         * geomOnly 帧一个像素都不落笔（掩码由 GPU 按几何重画），所以 bx0..by1 永远
+         * 是空的，ROI 只能从**几何**推。这里在逐脸循环里累积「脸 tile ∪ 脖子通道」的
+         * 并集 —— 必须含脖子：GPU 掩码沿脖子一路画到胸口，而 ROI 是 CPU 侧色调 /
+         * 祛斑 / 美形的裁剪框。只按脸框给 ROI（2.15.0 及以前的做法）会把脖子那段
+         * 硬切在下巴下面一条横线上，也就是用户截图里那块「长方形遮罩」。 */
+        int ux0 = gw, uy0 = gh, ux1 = -1, uy1 = -1;
 
         // 单像素落笔：肤色权重 × 边界羽化系数，取最大值合并（脸框与脖子通道重叠）。
         // 返回 true = 这一像素真的落了非零值（用于统计包围盒的 y 范围）。
@@ -3000,11 +3405,42 @@ private:
             return true;
         };
 
+        size_t faceIdx = 0;
         for (const auto& f : faces) {
-            const float cx = f.x + f.w * 0.5f, cy = f.y + f.h * 0.5f;
-            const float hw = f.w * kFaceBoxGrow * 0.5f, hh = f.h * kFaceBoxGrow * 0.5f;
-            int x0 = (int)(cx - hw), x1 = (int)(cx + hw);
-            int y0 = (int)(cy - hh), y1 = (int)(cy + hh);
+            /* 2.15.3：掩码几何时间平滑（见 emaMaskFace）。
+             *
+             * 只平滑**掩码**这一侧：`fboxOut` 在本循环之前就已经交出去了，五官/美形
+             * 用的仍是本帧原始几何 —— 那边拖影的代价（变形跟着慢半拍）比闪一下大。
+             * 静止画面下每帧框完全一样，EMA 是恒等变换，黄金基准逐字节不变。 */
+            beautycore::FaceBox sf = f;
+            float rc = 1.0f, rs = 0.0f;
+            bool rolled = (g_maskRoll != 0) && faceRoll(f, rc, rs, inputRot_);
+            if (g_maskEma > 0) {
+                emaMaskFace(sf, rc, rs, faceIdx);
+                rolled = (rc != 1.0f) || (rs != 0.0f);
+            }
+            faceIdx++;
+            const float cx = sf.x + sf.w * 0.5f, cy = sf.y + sf.h * 0.5f;
+            const float ac = fabsf(rc), as = fabsf(rs);
+            /* 2026-11-05 修（对齐 2.16.1 基线）：半轴与包围盒必须分开算。
+             *
+             * 旧写法先把 lw/lh 做成**旋转后的 AABB**（w*|c|+h*|s|），
+             * 再拿它当椭圆半轴、又乘一次 |c|/|s| 去算像素迭代的包围盒 —— 等于把
+             * 同一个旋转套了两遍。代价随倾角迅速放大：θ=15° 时椭圆半轴比正确
+             * AABB 还大 19%（相对脸宽大 1.5 倍），θ=45° 时整整大 2 倍 —— 掩码
+             * 沿旋转方向糊出去一大圈，用户看到的是「歪头时磨皮范围忽然变大」。
+             * 歪头直播很常见，所以这不是纸面问题。
+             *
+             * 现在三组量各归各位：
+             *   lw/lh 脸**自身**轴上的宽高 → 羽化宽度、脖子宽度/长度
+             *   hw/hh 椭圆半轴（= 局部半宽 × kFaceBoxGrow）
+             *   hx/hy 旋转后的 AABB 半尺寸 → 只用于整数像素的迭代上下界
+             * θ=0 时三者退化成旧值，静态正脸逐字节不变（离线回归 4 条全过）。 */
+            const float lw = sf.w, lh = sf.h;
+            const float hw = lw * kFaceBoxGrow * 0.5f, hh = lh * kFaceBoxGrow * 0.5f;
+            const float hx = hw * ac + hh * as, hy = hw * as + hh * ac;
+            int x0 = (int)(cx - hx), x1 = (int)(cx + hx);
+            int y0 = (int)(cy - hy), y1 = (int)(cy + hy);
             if (x0 < 0) x0 = 0;
             if (y0 < 0) y0 = 0;
             /* 2.7.1（S4b1）⚠ 钳位边界必须是**几何坐标系**的 gw/gh，不能是 w/h。
@@ -3018,25 +3454,48 @@ private:
 
             // 脖子通道的横向范围。脸框底边在它之内时**不做下羽化**，否则下巴
             // 与脖子之间会出现一条水平接缝。
-            int nx0 = (int)(cx - f.w * g_neck.halfW);
-            int nx1 = (int)(cx + f.w * g_neck.halfW);
+            int nx0 = (int)(cx - sf.w * g_neck.halfW);
+            int nx1 = (int)(cx + sf.w * g_neck.halfW);
             if (nx0 < 0) nx0 = 0;
             if (nx1 > gw) nx1 = gw;
 
             int fe = (g_maskFeatherPx >= 0)
                          ? g_maskFeatherPx
-                         : (int)(f.w * kMaskFeatherRatio + 0.5f);
+                         : (int)(lw * kMaskFeatherRatio + 0.5f);
             if (fe > kFeatherMax) fe = kFeatherMax;
             if (fe < 0) fe = 0;
             // 脖子通道按**脖子自己的宽度**给羽化宽度 —— 3.1.9 用脸宽 12%，等价于
             // 脖子半宽的 27%，整个脖子外侧四分之一都被压成半强度，这是真机上
             // 「效果弱了较多」的主力来源。
+            // 2.15.0：这里的「脸宽」用 lw（局部轴上的脸宽），θ=0 时恒等 f.w。
             int feNeck = (g_maskFeatherPx >= 0)
                              ? g_maskFeatherPx
-                             : (int)(2.0f * g_neck.halfW * f.w * kMaskFeatherRatio
+                             : (int)(2.0f * g_neck.halfW * lw * kMaskFeatherRatio
                                      + 0.5f);
             if (feNeck > kFeatherMax) feNeck = kFeatherMax;
             if (feNeck < 0) feNeck = 0;
+
+            /* 2.15.0：脖子椭圆的中心与外接框。
+             *
+             * 脖子接在脸 tile 的**局部下沿**（v = +vcN，vcN = y1-cy），θ≠0 时这个点
+             * 沿脸的「竖」方向偏出去，不再正好在 (cx, y1)。θ=0 时 ccx≡cx、ccy≡y1、
+             * nHx≡A、nHy≡B —— 与旧式逐字节相同（所以下面只对中心做一次 rolled 分支，
+             * 循环体不用抄两份）。 */
+            const float vcN = (float)y1 - cy;
+            const float neckA_ = lw * g_neck.halfW;
+            const float neckB_ = lh * g_neck.len;
+            const float ccx = rolled ? (cx - rs * vcN) : cx;
+            const float ccy = rolled ? (cy + rc * vcN) : (float)y1;
+            const float nHx = neckA_ * ac + neckB_ * as;
+            const float nHy = neckA_ * as + neckB_ * ac;
+            int nxA0 = (int)(ccx - nHx), nxA1 = (int)(ccx + nHx);
+            int nyA0 = (int)(ccy - nHy), nyA1 = (int)(ccy + nHy);
+            if (nxA0 < 0) nxA0 = 0;
+            if (nyA0 < 0) nyA0 = 0;
+            if (nxA1 > gw) nxA1 = gw;
+            if (nyA1 > gh) nyA1 = gh;
+            if (nxA1 < nxA0) nxA1 = nxA0;
+            if (nyA1 < nyA0) nyA1 = nyA0;
 
             // 5b-2：把这张脸的**全部整数几何**原样记下来，供宿主在 GPU 上复刻。
             // 只记录、不参与任何计算 —— 所以这段对画面零影响（纯诊断/接线用）。
@@ -3049,24 +3508,22 @@ private:
                 // 脖子的循环上下界随模式变（见 BeautyMaskFace 的注释）：
                 // 椭圆分支从 cyN∓B 起算，会伸进脸框区域；矩形分支从 y1 往下。
                 if (g_maskShape & 2) {
-                    const float A = f.w * g_neck.halfW;
-                    const float B = f.h * g_neck.len;
-                    const float cyN = (float)y1;
-                    int ey0 = (int)(cyN - B);
-                    int ey1 = (int)(cyN + B);
-                    if (ey0 < 0) ey0 = 0;
-                    if (ey1 > gh) ey1 = gh;
-                    mg.nyLo = ey0; mg.nyHi = ey1;
-                    mg.neckA = A; mg.neckB = B; mg.neckCy = cyN;
+                    // 2.15.0：外接框/中心都已经按 roll 算好（见上面的 neckA_ 段）。
+                    mg.nyLo = nyA0; mg.nyHi = nyA1;
+                    mg.nx0 = nxA0; mg.nx1 = nxA1;
+                    mg.neckA = neckA_; mg.neckB = neckB_;
+                    mg.neckCy = ccy; mg.neckCx = ccx;
                 } else {
                     int n0 = y1;
-                    int n1 = (int)(cy + hh + f.h * g_neck.len);
+                    int n1 = (int)(cy + hh + sf.h * g_neck.len);
                     if (n0 < 0) n0 = 0;
                     if (n1 > gh) n1 = gh;
                     mg.nyLo = n0; mg.nyHi = n1;
                     mg.neckA = 0.0f; mg.neckB = 0.0f; mg.neckCy = 0.0f;
+                    mg.neckCx = 0.0f;   // 矩形分支用不到，但别把未初始化值送进常量缓冲
                 }
                 mg.cx = cx; mg.cy = cy; mg.a = hw; mg.b = hh;
+                mg.rc = rc; mg.rs = rs; mg.lw = lw; mg.lh = lh;
                 mg.hasEyes = 0;   // 由下面的五官保护段回填（只有第一张脸）
                 diagOut->count++;
             }
@@ -3075,7 +3532,28 @@ private:
             // → 直接跳掉后面三段逐像素（脸椭圆/矩形 + 脖子通道）。
             // 这是整段里最贵的部分：4K 8.3M 像素各一次肤色判定。
             // 放在 diag 之后是有意的：diag 填的是整数几何，与逐像素无关。
-            if (geomOnly) continue;
+            if (geomOnly) {
+                // 2.15.1：顺手累积 ROI 的并集（脸 tile ∪ 脖子），见 ux0 处的说明。
+                int rx0 = x0, ry0 = y0, rx1 = x1, ry1 = y1;
+                if (g_maskShape & 2) {
+                    if (nxA0 < rx0) rx0 = nxA0;
+                    if (nyA0 < ry0) ry0 = nyA0;
+                    if (nxA1 > rx1) rx1 = nxA1;
+                    if (nyA1 > ry1) ry1 = nyA1;
+                } else {
+                    if (nx0 < rx0) rx0 = nx0;
+                    if (y1 < ry0) ry0 = y1;
+                    if (nx1 > rx1) rx1 = nx1;
+                    int nEnd = (int)(cy + hh + sf.h * g_neck.len);
+                    if (nEnd > gh) nEnd = gh;
+                    if (nEnd > ry1) ry1 = nEnd;
+                }
+                if (rx0 < ux0) ux0 = rx0;
+                if (ry0 < uy0) uy0 = ry0;
+                if (rx1 > ux1) ux1 = rx1;
+                if (ry1 > uy1) uy1 = ry1;
+                continue;
+            }
 
             if (g_maskShape & 1) {
                 // 椭圆距离场（3.1.20）：边界按 (x/a)²+(y/b)² = 1 收敛，四条直边消失。
@@ -3087,12 +3565,16 @@ private:
                 for (int y = y0; y < y1; y++) {
                     const unsigned char* row = src + ((size_t)y * w) * 4;
                     unsigned char* mrow = &mask[(size_t)y * w];
-                    const float dy = (float)y + 0.5f - cy;
-                    const float ty = dy * dy * ib2;
+                    const float dy0 = (float)y + 0.5f - cy;
                     bool any = false;
                     for (int x = x0; x < x1; x++) {
-                        const float dx = (float)x + 0.5f - cx;
-                        const float q = sqrtf(dx * dx * ia2 + ty);
+                        const float dx0 = (float)x + 0.5f - cx;
+                        /* 2.15.0：局部坐标。θ=0（rc=1, rs=0）时 u≡dx0、v≡dy0，
+                         * 下面的式子逐字节等于 3.1.20 的原式 —— 所以旋转只在
+                         * 真歪头时才改变结果。 */
+                        const float u = dx0 * rc + dy0 * rs;
+                        const float v = -dx0 * rs + dy0 * rc;
+                        const float q = sqrtf(u * u * ia2 + v * v * ib2);
                         if (q >= 1.0f) continue;      // 椭圆外不落笔，等价于旧的矩形裁剪
                         const int dpx = (int)((1.0f - q) * rEff + 0.5f);
                         if (paintSkin(mrow, row, x, featherRamp(dpx, fe))) any = true;
@@ -3132,7 +3614,7 @@ private:
             // 脖子通道：从脸框下沿接着往下，横向收窄到 0.45 脸宽，仍然只认肤色。
             // y1 上面已经 clamp 过，所以 ny0 从它起算是安全的。
             int ny0 = y1;
-            int ny1 = (int)(cy + hh + f.h * g_neck.len);
+            int ny1 = (int)(cy + hh + sf.h * g_neck.len);
             if (ny0 < 0) ny0 = 0;
             if (ny1 > gh) ny1 = gh;
             if (g_maskShape & 4) {
@@ -3205,24 +3687,21 @@ private:
                 // 脖子也用椭圆距离场（3.1.20）：最宽处落在下颌线 y1，向下按椭圆收窄。
                 // 旧版是 nx0..nx1 的**竖直直边**，头部摆动时两条直边在脖子上来回扫，
                 // 用户看到的「遮罩残影」正是它们。椭圆没有直边段，收窄也连续。
-                const float A = f.w * g_neck.halfW;
-                const float B = f.h * g_neck.len;
-                const float ia2 = 1.0f / (A * A), ib2 = 1.0f / (B * B);
-                const float rEff = 0.5f * (A + B);
-                const float cyN = (float)y1;
-                int ey0 = (int)(cyN - B);
-                int ey1 = (int)(cyN + B);
-                if (ey0 < 0) ey0 = 0;
-                if (ey1 > h) ey1 = h;
-                for (int y = ey0; y < ey1; y++) {
+                // 2.15.0：改成绕**脖子中心**（ccx,ccy，已按 roll 算好）取局部坐标，
+                // θ=0 时 ccx≡cx、ccy≡y1，u/v 逐字节等于原来的 dx/dy。
+                const float ia2 = 1.0f / (neckA_ * neckA_);
+                const float ib2 = 1.0f / (neckB_ * neckB_);
+                const float rEff = 0.5f * (neckA_ + neckB_);
+                for (int y = nyA0; y < nyA1; y++) {
                     const unsigned char* row = src + ((size_t)y * w) * 4;
                     unsigned char* mrow = &mask[(size_t)y * w];
-                    const float dy = (float)y + 0.5f - cyN;
-                    const float ty = dy * dy * ib2;
+                    const float dy0 = (float)y + 0.5f - ccy;
                     bool any = false;
-                    for (int x = nx0; x < nx1; x++) {
-                        const float dx = (float)x + 0.5f - cx;
-                        const float q = sqrtf(dx * dx * ia2 + ty);
+                    for (int x = nxA0; x < nxA1; x++) {
+                        const float dx0 = (float)x + 0.5f - ccx;
+                        const float u = dx0 * rc + dy0 * rs;
+                        const float v = -dx0 * rs + dy0 * rc;
+                        const float q = sqrtf(u * u * ia2 + v * v * ib2);
                         if (q >= 1.0f) continue;
                         const int dpx = (int)((1.0f - q) * rEff + 0.5f);
                         if (paintSkin(mrow, row, x, featherRamp(dpx, feNeck))) any = true;
@@ -3303,25 +3782,22 @@ private:
              */
             if (!geomOnly) {
                 boundsOut = beautycore::RoiRect();      // 真的全零掩码
-            } else if (boundsOut.empty() && !faces.empty()) {
-                const auto &f0 = faces[0];
-                if (f0.w > 0.0f && f0.h > 0.0f) {
-                    const float ccx = f0.x + f0.w * 0.5f;
-                    const float ccy = f0.y + f0.h * 0.5f;
-                    const float hw = f0.w * kFaceBoxGrow * 0.5f;
-                    const float hh = f0.h * kFaceBoxGrow * 0.5f;
-                    const int pad = g_cfg.radius + 1;
-                    beautycore::RoiRect r;
-                    r.x0 = (int)(ccx - hw) - pad;
-                    r.y0 = (int)(ccy - hh) - pad;
-                    r.x1 = (int)(ccx + hw) + pad + 1;
-                    r.y1 = (int)(ccy + hh) + pad + 1;
-                    if (r.x0 < 0) r.x0 = 0;
-                    if (r.y0 < 0) r.y0 = 0;
-                    if (r.x1 > gw) r.x1 = gw;
-                    if (r.y1 > gh) r.y1 = gh;
-                    if (r.x1 > r.x0 && r.y1 > r.y0) boundsOut = r;
-                }
+            } else if (ux1 >= 0) {
+                /* 2.15.1：geomOnly 帧按**本帧几何**重算 ROI（之前只在 bounds_ 为空时
+                 * 用脸框兜底一次，之后就一直沿用那个不含脖子的框）。ROI 边缘与掩码
+                 * 支撑之间只靠 pad 隔开，而 pad（radius+1）远小于羽化宽度，所以把
+                 * 脖子切在框外的那条边是**硬**的 —— 正是用户看到的横线。 */
+                const int pad = g_cfg.radius + 1;
+                beautycore::RoiRect r;
+                r.x0 = ux0 - pad;
+                r.y0 = uy0 - pad;
+                r.x1 = ux1 + pad + 1;
+                r.y1 = uy1 + pad + 1;
+                if (r.x0 < 0) r.x0 = 0;
+                if (r.y0 < 0) r.y0 = 0;
+                if (r.x1 > gw) r.x1 = gw;
+                if (r.y1 > gh) r.y1 = gh;
+                if (r.x1 > r.x0 && r.y1 > r.y0) boundsOut = r;
             }
         } else {
             const int pad = g_cfg.radius + 1;
@@ -3448,7 +3924,11 @@ private:
     void startAsyncIfNeeded() {
         if (!asyncOn_ || asyncStarted_) return;
         asyncStarted_ = true;
-        async_.th = std::thread([this] { asyncWorker(); });
+        // 3.0.0：worker 是新建线程，thread_local 的 t_slot 默认是 0。必须把
+        // 创建它的那个槽带过去，否则第二个实例的异步检测会去读写 slot 0 的
+        // 帧号 / 肤色 EMA / 掩码轨迹 —— 正是「主机位闪烁」的来源之一。
+        const int mySlot = t_slot;
+        async_.th = std::thread([this, mySlot] { t_slot = mySlot; asyncWorker(); });
         // 把 worker 降到「低于正常」：它晚一两帧出结果完全没关系（掩码本来就
         // 4 帧才更新一次），但渲染线程晚一帧就掉帧。让 OS 优先保渲染线程。
         SetThreadPriority(async_.th.native_handle(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -3591,6 +4071,13 @@ private:
             inputSize = face_.inputSize();
             best = face_.lastBestScore();
             const double ms = nowMsCore() - t0;
+
+            // ---- 方案 E / P0：人脸裁切分割（影子层，默认完全不进这条分支）----
+            // 与 buildMaskInto 同一份输入帧、同一个 worker，天然帧对齐；
+            // 人脸框也直接复用本轮结果，不额外检测。
+            // 结果由 beauty_skinseg 内部发布，渲染线程只读 beautyCoreCopySeg。
+            runSegIfDue(&async_.frame[0], w, h, geomW, geomH,
+                        mapScale, mapOx, mapOy, fbox);
 
             {
                 std::lock_guard<std::mutex> lk(async_.m);
@@ -3795,6 +4282,14 @@ private:
     int  detMaxFaces_ = 8;   // 面板「人物个数」（1..8）
     int  detHighQ_ = 0;      // 面板「识别模式」：0 标准 / 1 高精度（conf 0.6 / 0.45）
     int  inputRot_ = 0;      // 2.10.0 方案 B：输入旋转 0/90/180/270（检测几何反变换用）
+    // 2.15.0：面板声明的方向（cfgRot_）与**验证过**的方向（effRot_，原子量 ——
+    // 宿主渲染线程要读它决定「要不要转缩略图」，检测可能跑在 worker 上）。
+    // 检不到脸时 effRot_ 会退回 0，见 buildMaskInto 的重试段。
+    int  cfgRot_ = 0;
+    std::atomic<int> effRot_{0};
+    bool rotFallbackLogged_ = false;
+    // 2.16.1：本帧强制走 CPU 掩码（钩子不会跑，见 process() 里的设置点）。
+    bool forceCpuMask_ = false;
     // 3.1.21：本次「启用以来」是否成功产出过掩码。只看第一次 —— 用它区分
     // 「刚开开关、检测还没回来」（这几帧透传）和「人不在画面里」（全帧兜底）。
     bool everHadMask_ = false;
@@ -3994,36 +4489,55 @@ private:
                     const float midY = (e0y + e1y) * 0.5f;
                     const float mouthMidX = (m0x + m1x) * 0.5f;
                     const float mouthMidY = (m0y + m1y) * 0.5f;
-                    const float feB = 0.705f;   // 亮部 feather（大平顶）
-                    const float feD = 0.378f;   // 暗部 feather（窄带）
                     const float sh = 0.15f;
-                    // 3.1.23：8 帧**统一**重拟合（_fit_region.py threed --all），
-                    // 模拟器评分 80.36（chg 2.491 / 参照 2.479，corr 0.798）。
-                    // 绝对值 = THREED_SPEC 基准 + 拟合偏移（fit_threed.json）。
-                    // 额头（宽、浅、在眉线上方）
-                    els.push_back({midX - 0.010000f, midY - 0.210000f, 0.350f,
-                                   0.115f, 0.0f, g * 8.525f, sh, feB});
-                    // 眉弓 / 眼窝（压暗）
-                    els.push_back({midX - 0.030000f, midY - 0.060000f, 0.352500f,
-                                   0.145f, 0.0f, g * -2.150f, sh, feD});
-                    // 鼻梁（窄竖条）
-                    els.push_back({midX - 0.025000f, midY + 0.000000f, 0.050f,
-                                   0.180f, 0.0f, g * 6.900f, sh, feB});
-                    // 左 / 右颧骨
-                    els.push_back({e0x - 0.045000f, e0y + 0.117500f, 0.152500f,
-                                   0.100f, 0.0f, g * 7.650f, sh, feB});
-                    els.push_back({e1x - 0.012500f, e1y + 0.125000f, 0.150f,
-                                   0.112500f, 0.0f, g * 10.6375f, sh, feB});
-                    // 鼻底 / 上唇阴影（横向压暗）
-                    els.push_back({midX - 0.005000f, midY + 0.195000f, 0.290f,
-                                   0.092500f, 0.0f, g * -7.250f, sh, feD});
+                    /* 3.1.24（2026-11-05）：形状从「8 个独立平顶光斑」改成
+                     * 「互相重叠的连续光场 + 钟形衰减」。
+                     *
+                     * 为什么改：拉满时肉眼能数出**四个白圈**（额头 / 左右颧 /
+                     * 下巴）。两个原因叠在一起：
+                     *   1. 旧羽化 feather=0.705 是「平台半径」——内圈 70% 恒为满
+                     *      增益、外圈 30% 才落下去。平台→斜坡的拐点二阶不连续，
+                     *      人眼把它看成一道圆边（马赫带）。这不是强度问题，
+                     *      调小滑块只会把圈调淡，不会调没。
+                     *   2. 8 个椭圆彼此不重叠，各是一个孤立斑点；斑点越小越像
+                     *      「打光斑」而不是「脸有立体感」。
+                     *
+                     * 改法：dome=1（fall = 1 − smoothStep(0,1,d)，中心 1、边缘 0、
+                     * 两端导数为 0），同时把亮部椭圆放大到**互相重叠**：额带下沿
+                     * 压住眉弓、鼻梁竖条穿过额带、左右颧带向外下铺开并与鼻梁相连，
+                     * 重叠区的平台被邻居填平，边界自然消失。
+                     *
+                     * 量化（frame_1280x720，脸内 dY）：
+                     *   旧：均值 +0.672  p95 7.60  峰 +12.2/−6.7  max|∇²| 1.89
+                     *   新：均值 +0.677  p95 5.59  峰 +8.6/−6.2   max|∇²| 0.13
+                     * 总量不变，二阶突变降 14 倍 —— 这一项才是「看得见圈」的来源。
+                     * 实拍 720p 大脸（face_front_720p）同向：∇² 0.90 → 0.42。
+                     */
+                    // 额头：宽软的一条带，往下压住眉弓、两侧盖到太阳穴
+                    els.push_back({midX - 0.005f, midY - 0.200f, 0.470f,
+                                   0.200f, 0.0f, g * 9.300f, sh, 0.0f, 1.0f});
+                    // 眉弓 / 眼窝：宽软凹陷（旧版 −2.15 又窄又硬，会显出一道暗箍）
+                    els.push_back({midX - 0.020f, midY - 0.045f, 0.340f,
+                                   0.115f, 0.0f, g * -4.650f, sh, 0.0f, 1.0f});
+                    // 鼻梁：竖条，上端穿进额带、下端到鼻头，把上下连成一片
+                    els.push_back({midX - 0.005f, midY + 0.020f, 0.090f,
+                                   0.245f, 0.0f, g * 6.900f, sh, 0.0f, 1.0f});
+                    // 左 / 右颧骨：斜向宽带（沿颧弓外下方向），与鼻梁重叠。
+                    // 旋转符号按解剖：屏幕左侧那条朝左下、右侧朝右下。
+                    els.push_back({e0x - 0.030f, e0y + 0.125f, 0.235f,
+                                   0.150f, -0.14f, g * 7.350f, sh, 0.0f, 1.0f});
+                    els.push_back({e1x + 0.005f, e1y + 0.135f, 0.235f,
+                                   0.150f, 0.14f, g * 7.350f, sh, 0.0f, 1.0f});
+                    // 鼻底 / 上唇：横向软阴影（旧的 −7.25 一压就是一条硬带）
+                    els.push_back({midX - 0.005f, midY + 0.190f, 0.265f,
+                                   0.080f, 0.0f, g * -7.800f, sh, 0.0f, 1.0f});
                     // 下巴
-                    els.push_back({mouthMidX - 0.020000f, mouthMidY + 0.155000f,
-                                   0.110f, 0.070f, 0.0f, g * 9.650f,
-                                   sh, feB});
-                    // 下颌 / 脖子（大面积压暗）
-                    els.push_back({midX + 0.067500f, midY + 0.500000f, 0.507500f,
-                                   0.190f, 0.0f, g * -4.800f, sh, feD});
+                    els.push_back({mouthMidX - 0.010f, mouthMidY + 0.140f,
+                                   0.160f, 0.100f, 0.0f, g * 9.600f,
+                                   sh, 0.0f, 1.0f});
+                    // 下颌 / 脖子：大面积压暗
+                    els.push_back({midX + 0.050f, midY + 0.500f, 0.505f,
+                                   0.185f, 0.0f, g * -6.300f, sh, 0.0f, 1.0f});
                 }
                 if (eye > 0.0f) {
                     const float g = g_cfg.regEyeGain * eye;
@@ -4180,6 +4694,7 @@ private:
                     o.cx = e.cx; o.cy = e.cy; o.rx = e.rx; o.ry = e.ry;
                     o.rot = e.rot; o.gain = e.gain;
                     o.shade = e.shade; o.feather = e.feather;
+                    o.dome = e.dome;
                     gf.elsCount++;
                 }
                 gf.nasoBeg = geoOut->ellipseCount;
@@ -4192,6 +4707,7 @@ private:
                     o.cx = e.cx; o.cy = e.cy; o.rx = e.rx; o.ry = e.ry;
                     o.rot = e.rot; o.gain = e.gain;
                     o.shade = e.shade; o.feather = e.feather;
+                    o.dome = e.dome;
                     gf.nasoCount++;
                 }
                 gf.tailBeg = geoOut->ellipseCount;
@@ -4204,6 +4720,7 @@ private:
                     o.cx = e.cx; o.cy = e.cy; o.rx = e.rx; o.ry = e.ry;
                     o.rot = e.rot; o.gain = e.gain;
                     o.shade = e.shade; o.feather = e.feather;
+                    o.dome = e.dome;
                     gf.tailCount++;
                 }
                 geoOut->faceCount++;
@@ -4218,8 +4735,31 @@ private:
             }
 
             if (!els.empty()) {
+                /* 调参口：把这一帧真正交给 applyEllipses 的椭圆表按行导出，
+                 * 用来在 Python 里逐式重放（形状/羽化怎么改，离线几秒钟一轮，
+                 * 不用每次重编 + 跑整条链）。只在设了 BEAUTY_REGION_DUMP 时写。 */
+                if (const char *dp = getenv("BEAUTY_REGION_DUMP")) {
+                    if (*dp) {
+                        static FILE *dfp = nullptr;
+                        static int dumped = 0;
+                        if (!dfp) dfp = fopen(dp, "wb");
+                        if (dfp && dumped < 8) {
+                            fprintf(dfp, "FACE %.4f %.4f %.4f %.4f N %d\n",
+                                    fx, fy, fw, fh, (int)els.size());
+                            for (size_t i = 0; i < els.size(); i++) {
+                                const beautycore::Ellipse &e = els[i];
+                                fprintf(dfp,
+                                        "E %.6f %.6f %.6f %.6f %.4f %.4f %.4f %.4f\n",
+                                        e.cx, e.cy, e.rx, e.ry, e.rot,
+                                        e.gain, e.shade, e.feather);
+                            }
+                            fflush(dfp);
+                            dumped++;
+                        }
+                    }
+                }
                 // 每个椭圆坐标都是**相对这张脸的归一化值**，所以这里传脸框，
-                // 一次调用把这五项的贡献一起加掉（增益相加，互不干扰）。
+                // 一次调用把这五项贡献一起加掉（增益相加，互不干扰）。
                 beautycore::applyEllipses(dst, w, h, mk, fx, fy, fw, fh,
                                           &els[0], (int)els.size(), g_cfg.threads);
                 els.clear();
@@ -4348,6 +4888,9 @@ public:
     }
 
     int           lastFaces() const override { return core_->lastFaces(); }
+    // 2.15.0：不转发的话，BEAUTY_GPU=1 下宿主会永远读到 0 —— 而 0 恰好是
+    // 「自动退回不旋转」的语义，宿主会把缩略图路径永久停掉（画面正常、白慢一截）。
+    int           effectiveRot() const override { return core_->effectiveRot(); }
     bool          regionActive() const override { return core_->regionActive(); }
     double        lastCoreMs() const override { return core_->lastCoreMs(); }
     void          lastSegMs(double* out6) const override { core_->lastSegMs(out6); }
@@ -4616,11 +5159,117 @@ bool beautyCoreToneCpu(const unsigned char* src, int w, int h,
     return true;
 }
 
+// 2.15.0：本帧实际使用的输入方向（0/90/180/270）。见 beauty_core.h 的说明 ——
+// 宿主要在构建检测缩略图**之前**读它，发现与面板值不一致就别再按错方向转。
+int beautyCoreEffectiveRot() {
+    return beautyEngine().effectiveRot();
+}
+
+// 2.15.1：掩码几何的**当前生效**配置，一行字符串，宿主启动时打一次。
+// 存在的理由：shape/roll 都是环境变量可覆盖的，光看面板看不出「到底用的哪套掩码」；
+// 用户报「能看到长方形遮罩」时，第一件事就是确认 shape 是多少。
+const char* beautyCoreMaskConfig() {
+    static char s[160];
+    snprintf(s, sizeof(s),
+             "shape=%d roll=%d feather=%d neck=%.2fx%.2f",
+             g_maskShape, g_maskRoll ? 1 : 0, g_maskFeatherPx,
+             (double)g_neck.halfW, (double)g_neck.len);
+    return s;
+}
+
 IBeautyEngine& beautyEngine() {
-    // 与 LegacyEngine::inst() 同一套路：魔法静态保证只初始化一次且线程安全；
+    // 3.0.0：按当前线程绑定的 slot 惰性建引擎。slot 0 就是原来那个单例
+    // （模块加载阶段的 preheat 已替它建好），单实例走的是完全相同的路径。
     // 对象刻意不析构，避免宿主 FreeLibrary 时静态析构与渲染线程赛跑。
-    static IBeautyEngine* s = createEngine();
-    return *s;
+    const int s = (t_slot >= 0 && t_slot < kMaxEngineSlots) ? t_slot : 0;
+    IBeautyEngine* p = g_engineAtomic[s].load(std::memory_order_acquire);
+    if (p) return *p;
+    std::lock_guard<std::mutex> lk(g_engineMutex);
+    p = g_engines[s];
+    if (!p) {
+        p = createEngine();
+        g_engines[s] = p;
+        g_engineAtomic[s].store(p, std::memory_order_release);
+    }
+    return *p;
+}
+
+// ---------------------------------------------------------------------------
+// 3.0.0 多实例槽位 API —— 宿主 obs-beauty.cpp 的唯一入口
+// ---------------------------------------------------------------------------
+
+// 每次进入宿主回调都要重新绑：OBS 的 create / update / render / destroy 可能
+// 不在同一线程，t_slot 是 thread_local，不绑就退回 0（= 别人的引擎）。
+void beautyCoreBindSlot(int slot) {
+    t_slot = (slot >= 0 && slot < kMaxEngineSlots) ? slot : 0;
+}
+
+void beautyCoreReleaseSlot(int slot) {
+    if (slot < 0 || slot >= kMaxEngineSlots) return;
+    // 3.0.1：owned 判定 / 停 worker / 清空 SlotState 收敛到同一把锁下。
+    // 旧实现在锁外整块赋值，和该槽 worker 正在读写的帧号 / 肤色 EMA /
+    // 掩码轨迹构成数据竞争；「删一路马上再建一路」时还可能抹掉新实例刚
+    // 写进去的钩子状态。releaseSlot() 会 join worker，之后本函数就是唯一
+    // 读写这份 SlotState 的人。
+    std::lock_guard<std::mutex> lk(g_slotMutex);
+    if (!g_slotOwned[slot]) return;
+    g_slotOwned[slot] = false;
+    IBeautyEngine* p = g_engineAtomic[slot].load(std::memory_order_acquire);
+    if (p) p->releaseSlot(slot);   // CoreEngine：停 worker，不卸模型、不碰 t_slot
+    g_slots[slot] = SlotState{};
+    // 引擎对象**不析构**：槽复用时直接续用已加载的模型，省掉一次
+    // ~2 秒预热；进程退出时由 OS 回收（与既有「永不析构」约定一致）。
+}
+
+// 占一个槽 → 绑定当前线程 → 惰性建该槽引擎 → ensureReady（加载 YuNet）。
+// 返回值就是宿主的 f->slot；失败返回 -1 并把原因写进 err。
+int beautyCoreAcquireSlot(std::string& err) {
+    err.clear();
+    int s = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_slotMutex);
+        for (int i = 0; i < kMaxEngineSlots; ++i) {
+            if (!g_slotOwned[i]) {
+                g_slotOwned[i] = true;
+                // 3.0.1：与 release 的清空同锁，杜绝「释放中的旧实例把
+                // 刚接管本槽的新实例状态抹掉」的复用竞态。
+                g_slots[i] = SlotState{};   // 清掉上个实例的钩子 / EMA / 帧号
+                s = i;
+                break;
+            }
+        }
+    }
+    if (s < 0) {
+        err = "engine slots exhausted (max 8 beauty filters per process)";
+        return -1;   // 注意：不 bind。宿主必须按 f->slot<0 走直通，不得再碰引擎。
+    }
+    beautyCoreBindSlot(s);
+    IBeautyEngine& e = beautyEngine();
+    if (e.acquireSlot(err) < 0) {    // CoreEngine 在这一步做 ensureReady
+        beautyCoreReleaseSlot(s);
+        return -1;
+    }
+    return s;
+}
+
+int beautyCoreActiveSlots() {
+    std::lock_guard<std::mutex> lk(g_slotMutex);
+    int n = 0;
+    for (int i = 0; i < kMaxEngineSlots; ++i)
+        if (g_slotOwned[i]) ++n;
+    return n;
+}
+
+// 模块卸载：逐个 release 所有曾经建过的引擎。旧实现只 release 当前 t_slot
+// 指向的那一个，多实例下其余引擎的异步 worker 会一直活到进程退出。
+void beautyCoreReleaseAllEngines() {
+    for (int i = 0; i < kMaxEngineSlots; ++i) {
+        IBeautyEngine* p = g_engineAtomic[i].load(std::memory_order_acquire);
+        if (!p) continue;
+        t_slot = i;                 // release() 内部也会碰按槽状态
+        p->release();
+    }
+    t_slot = 0;
 }
 
 const char* beautyEngineId() {
@@ -4832,6 +5481,7 @@ bool beautyCoreWarpCpu(const unsigned char* src, unsigned char* dst, int w, int 
         g.chinYm = s.chinYm;
         g.chinSpan = s.chinSpan;
         g.chinK = s.chinK;
+        g.chinKH = s.chinKH;
         g.roi[0] = s.roi[0];
         g.roi[1] = s.roi[1];
         g.roi[2] = s.roi[2];

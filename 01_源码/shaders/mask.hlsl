@@ -50,18 +50,42 @@ uniform float2 texel;      // (1/w, 1/h)，保留给将来的 ROI 版本
 uniform float4 faceRect;   // x0, y0, x1, y1   —— CPU: (int)(cx-hw) 等，已 clamp
 uniform float4 faceGeom;   // cx, cy, a(=hw), b(=hh)
 uniform float  faceFe;     // 羽化像素（CPU: (int)(f.w*0.08+0.5)，≤64）
+// 2.15.0（掩码跟脸转）：脸的滚转角 cos/sin（正立 = 1/0）。
+// 局部轴 u 沿两眼连线、v 沿「眼→嘴」；椭圆的距离场在这个局部系里算，
+// 于是脸一歪、或者源本身转了 90°，边界都贴着脸自身的轮廓，而不是画面轴。
+// CPU 侧是同样两行式子（buildMaskInto 的椭圆分支），改一边必须改另一边。
+uniform float4 faceRot;    // cos, sin, unused, unused
 // 脖子通道的循环上下界**随 maskShape 变**，宿主必须按模式算好再传：
 //   矩形分支（bit1 未置）: y ∈ [y1, cy+hh+f.h*len)
 //   椭圆分支（bit1 置）  : y ∈ [clamp(cyN−B), clamp(cyN+B))，其中 cyN = y1
 // 后者会**伸进脸框区域**（B 从 y1 起算），所以两条分支不能共用一个 ny0 ——
 // 共用会把椭圆上半截切掉，掩码在脖子上沿缺一块，而且不报错。
 uniform float4 neckRect;   // nx0, nyLo, nx1, nyHi —— 按上面两种模式之一填
-uniform float4 neckEll;    // A(=f.w*halfW), B(=f.h*len), cyN(=y1), unused
+// 2.15.0：z 是脖子中心的 y、w 是脖子中心的 x（转过的脖子上，中心会离开 cx）；
+// θ=0 时 w 恒等于 faceGeom.x、z 恒等于 y1，与旧式逐字节相同。
+uniform float4 neckEll;    // A(=f.w*halfW), B(=f.h*len), cy, cx
 uniform float  neckFe;     // 脖子羽化像素（CPU 按脖子自身宽度算）
 uniform int    maskShape;  // bit0=脸椭圆, bit1=脖子椭圆（bit2 不支持，宿主回退）
 
 // ---- 肤色椭圆（C20 自适应中心，由 CPU 的 estimateSkinCenter 给）-----------
 uniform float4 skinEllipse; // cb, cr, ru, rv
+
+// ==== 方案 E / P0+P1：整帧分割四语义纹理（默认全关，逐字节走原路径）======
+// 256×256 RGBA8，由 asyncWorker 在 CPU 推理后上传；无结果时宿主绑 1×1 白纹理
+// （R=255 即恒等）。R=皮肤概率 / G=五官保护 / B=非肤置信 / A=美白专用皮肤。
+// 用一张新纹理承载四语义，而不是把现有 skin_tex 从 R8 改成 RGBA8 —— 后者会
+// 牵动 beautyCoreCopyMask / protect_buf / 四处 effect 绑定，破坏面太大。
+uniform texture2d segTex;
+sampler_state segTexS {
+    Filter   = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+uniform float4 segUv;        // xy = 裁切框左上（帧归一化），zw = 裁切框尺寸；帧 UV → 纹理 UV
+                             // 整帧直填时恒为 (0,0,1,1)
+uniform float  segMix;       // 0 = 纯几何（默认，严格原路径）；1 = 完全采用分割
+uniform float  segGamma;     // 概率拉伸，默认 1.0；边界观感调它
+uniform float  segNonSkinK;  // P4：B 通道非肤置信的折扣强度，默认 0
 
 // ---- 眼睛保护（只画眼睛，不画嘴：与参考实现结构一致，见 CPU 注释 L2574）----
 uniform float4 eye0;        // cx, cy, rx, ry
@@ -170,9 +194,14 @@ float4 PS_Skin(vert_out vert_in) : TARGET
             float rEff = 0.5 * (a + b);
             float ia2 = 1.0 / (a * a);
             float ib2 = 1.0 / (b * b);
+            // 2.15.0：局部坐标（θ=0 时 u≡dx、v≡dy，与旧式逐字节相同）。
+            float rc = faceRot.x;
+            float rs = faceRot.y;
             float dx = (float)x + 0.5 - faceGeom.x;
             float dy = (float)y + 0.5 - faceGeom.y;
-            float q = sqrt(dx * dx * ia2 + dy * dy * ib2);
+            float u = dx * rc + dy * rs;
+            float v = -dx * rs + dy * rc;
+            float q = sqrt(u * u * ia2 + v * v * ib2);
             if (q < 1.0) {
                 int dpx = (int)((1.0 - q) * rEff + 0.5);
                 feather = featherRamp(dpx, fe);
@@ -204,9 +233,15 @@ float4 PS_Skin(vert_out vert_in) : TARGET
             float rEff = 0.5 * (A + B);
             float ia2 = 1.0 / (A * A);
             float ib2 = 1.0 / (B * B);
-            float dx = (float)x + 0.5 - faceGeom.x;
+            // 2.15.0：绕**脖子中心**（neckEll.w/z）取局部坐标。θ=0 时
+            // w≡faceGeom.x、z≡y1，u/v 就等于原来的 dx/dy。
+            float rc = faceRot.x;
+            float rs = faceRot.y;
+            float dx = (float)x + 0.5 - neckEll.w;
             float dy = (float)y + 0.5 - neckEll.z;
-            float q = sqrt(dx * dx * ia2 + dy * dy * ib2);
+            float u = dx * rc + dy * rs;
+            float v = -dx * rs + dy * rc;
+            float q = sqrt(u * u * ia2 + v * v * ib2);
             if (q < 1.0) {
                 int dpx = (int)((1.0 - q) * rEff + 0.5);
                 feather = featherRamp(dpx, feN);
@@ -223,6 +258,31 @@ float4 PS_Skin(vert_out vert_in) : TARGET
             float3 c = floor(image.Sample(imageTex, vert_in.uv).rgb * 255.0 + 0.5) * (1.0 / 255.0);
             v = max(v, paintWeight(skinWeight(c), feather));
         }
+    }
+
+    // ---- 方案 E / P0：分割概率只做乘性折扣，不做加法 -------------------
+    // 几何判 0 的地方不凭空长出来（保守），几何多算的地方被压下去。
+    // segMix=0 时整个分支不进，逐字节与改动前一致。
+    // 输入是**人脸裁切**（2026-11-05 P0-2）：纹理只覆盖人脸框。框外像素若照
+    // 旧写法 saturate 贴边采样，皮肤概率会沿框边糊出去（脖子、耳朵、背景墙
+    // 都被算成皮肤）。所以框外用 4px 软边把 g 拉回 1.0 —— g=1 是恒等，
+    // 等于"框外一切照几何判断"，与改动前同义。
+    if (segMix > 0.0) {
+        float2 uvPix = (float2(x, y) + 0.5) / size;
+        float2 t     = (uvPix - segUv.xy) / segUv.zw;
+        float2 suv   = saturate(t);
+        float4 s4    = segTex.Sample(segTexS, suv);
+        float  sk    = pow(saturate(s4.r), segGamma);
+        float  g     = sk * (1.0 - saturate(s4.b) * segNonSkinK);
+        // 整帧直填时 segUv.zw 恒为 (1,1)，没有"框外"，这段必须完全不生效。
+        if (segUv.z < 0.999 || segUv.w < 0.999) {
+            float2 e  = min(t, 1.0 - t);       // 到框边的归一化距离（框外为负）
+            float2 ep = e * segUv.zw * size;   // 换算成帧像素
+            float  m  = saturate(min(ep.x, ep.y) * 0.25);   // 4px 软边
+            g = lerp(1.0, g, m);
+        }
+        v = (int)((float)v * lerp(1.0, g, segMix) + 0.5);
+        v = min(v, 255);
     }
 
     // R8 目标：只写 R。×(1/255) 让 unorm 量化回同一个整数。

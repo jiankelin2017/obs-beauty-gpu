@@ -63,7 +63,10 @@ if (-not (Test-Path $pkgShaders)) { New-Item -ItemType Directory -Force -Path $p
 # P2-3: this folder is a BUILD ARTIFACT, never a source and never tracked by git.
 # Wipe stale *.hlsl BEFORE copying so a shader that was renamed or deleted in
 # 01_*/shaders cannot survive in the package as a ghost copy.
-Get-ChildItem $pkgShaders -Filter "*.hlsl" -ErrorAction SilentlyContinue | Remove-Item -Force
+# Same PowerShell 5.1 trap as build_gpu.ps1: piping Get-ChildItem into
+# Remove-Item throws InputObjectNotBound when objects arrive as PSObject.
+# Use an explicit path wildcard instead.
+Remove-Item (Join-Path $pkgShaders "*.hlsl") -Force -ErrorAction SilentlyContinue
 $srcShaders = Join-Path $srcDir "shaders"
 Get-ChildItem $srcShaders -Filter "*.hlsl" | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $pkgShaders $_.Name) -Force

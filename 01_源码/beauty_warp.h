@@ -61,9 +61,15 @@ struct WarpGeom {
     float thinYc = 0;          // 瘦脸垂直高斯中心
     float thinSig = 0;         // 瘦脸垂直高斯 sigma
     float thinK = 0;           // 瘦脸满档外移量 p.thin × 0.24
-    float chinYm = 0;          // 下巴压缩起点（嘴线略下）
-    float chinSpan = 0;        // 下巴压缩跨度
-    float chinK = 0;           // 下巴满档压缩 p.chin × 0.18
+    float chinYm = 0;          // 下巴作用起点（嘴线略下）
+    float chinSpan = 0;        // 下巴作用跨度（嘴线 → 脸框下沿）
+    // 3.1.64（2026-11-05）：下巴从「整段往下压」改成「缩短 + 变尖」的混合场。
+    //   chinK  = 中线纵向**拉长**系数（采样点上移 → 下巴尖下延）
+    //   chinKH = 两侧横向**内收**系数（采样点外移 → 下颌轮廓变窄）
+    // 两个方向一个管长度、一个管宽度，合起来才是「尖下巴」；
+    // 只做纵向压缩时脸会变短变圆，观感是「下巴没了」。
+    float chinK = 0;           // p.chin × 0.18（中线纵向拉长）
+    float chinKH = 0;          // p.chin × 0.09（两侧横向内收；原 0.20 拉扯过大）
     int   roi[4] = {0, 0, 0, 0};   // x0,y0,x1,y1（已钳到画面内）
     unsigned flags = 0;        // WARP_F_*
 };

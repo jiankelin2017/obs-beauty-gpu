@@ -205,12 +205,26 @@ for b in bad_h:
 # 盒式 pass 用 `for (int k = -rad; k <= rad; ++k)`。rad 若没声明成 uniform int，
 # fxc 会当未定义符号报错（能拦住）；但写成 `uniform float rad` 也能编过，
 # 只在运行期拿不到整数半径 —— 表现为核宽变成 0。这里钉死类型。
+#
+# 2026-11-05 放宽：P2 的值域加权核是**固定 5 tap**（`for (int k = -2; k <= 2; ++k)`），
+# 上下界都是字面量，不存在"半径不是整数"的风险。旧规则把 `-2` 当成变量名去找
+# `uniform int 2;`，于是从 P2 落地那天起这一项一直是红的 —— 门禁常红等于没有门禁。
+# 现在的判据分两类：
+#   字面量下界（-2 …）  → 上界也必须是字面量（定长核，允许）
+#   变量下界（-rad …）  → 必须有 `uniform int rad;`（动态核，钉死类型）
 bad_i = []
-loops = re.findall(r"for\s*\(\s*int\s+\w+\s*=\s*-(\w+)", code)
+loops = re.findall(r"for\s*\(\s*int\s+(\w+)\s*=\s*-(\w+)\s*;\s*\1\s*<=\s*(\w+)", code)
 if loops:
-    for var in set(loops):
-        if not re.search(r"uniform\s+int\s+%s\s*;" % re.escape(var), code):
-            bad_i.append("循环变量 -%s 不是 uniform int（盒式半径必须是整数）" % var)
+    for var, lo, hi in sorted(set(loops)):
+        if lo.isdigit():
+            if not hi.isdigit():
+                bad_i.append("循环 %s：下界是字面量 -%s，上界却是 `%s` —— "
+                             "定长核的上下界必须同为字面量" % (var, lo, hi))
+            continue
+        if not re.search(r"uniform\s+int\s+%s\s*;" % re.escape(lo), code):
+            bad_i.append("循环变量 -%s 不是 uniform int（盒式半径必须是整数）" % lo)
+    if not any(lo == "rad" and lo.isdigit() is False for _, lo, _ in loops):
+        bad_i.append("没找到 `for (int k = -rad;` 形式的盒式循环 —— 结构可能已被改坏")
 else:
     bad_i.append("没找到 `for (int k = -rad;` 形式的盒式循环 —— 结构可能已被改坏")
 print("[I] 动态循环半径检查:", "PASS" if not bad_i else "FAIL")

@@ -133,10 +133,23 @@ bool warpFaceGeom(const FaceBox& f, const WarpParams& p, int w, int h,
     const float thinK = p.thin * 0.24f;   // 满档外侧采样点外移 24%
     const bool doThin = (p.thin > 0.0f) && (thinSig > 0.5f);
 
-    // 下巴：从嘴线往下压缩，嘴线以上不动。
+    // 下巴（3.1.64，C 方案）：缩短 + 变尖的混合场。
+    // 旧实现只有纵向压缩（满档下巴缩短 18%），观感是「下巴没了、脸变短变圆」，
+    // 与美颜诉求相反。新实现拆成两件事：
+    //   · 中线纵向拉长（chinK）  —— 采样点上移，内容下移，下巴尖往下延
+    //   · 两侧横向内收（chinKH） —— 采样点外移，下颌轮廓向中线收，脸变窄
+    // 两者叠加得到的才是「尖下巴」，而不是单一的纵向缩放。
+    // 幅度取 18% / 9%：首版 10% / 14% 实测下巴轮廓位移只有约 8 px（720p），
+    // 6 倍放大图里勉强可辨 —— 原因是 YuNet 的脸框下沿本来就压在下巴中部，
+    // chinSpan（嘴线→框底）通常只有 0.25~0.30 个脸高，缩放系数乘上去很小。
+    // 18% 对应约 15 px 纵向、20 px 横向（脸宽 220 px 时），是「明显但不假」的一档。
+    // 2026-11-05 用户反馈「下巴两边的空间拉扯非常明显」：横向 20% 且作用到
+    // u=1.0（脸框边缘）会把框外的背景一起吸进来 —— 观感是两侧空间被硬扯。
+    // 横向降到 9%，并把权重带收到下颌线（见下面的 latSide）。
     const float chinYm = g.mouthY + 0.02f * g.fh;
     const float chinSpan = g.chinY - chinYm;
-    const float chinK = p.chin * 0.18f;   // 满档下巴纵向缩 18%
+    const float chinK = p.chin * 0.18f;    // 满档中线纵向拉长 18%
+    const float chinKH = p.chin * 0.09f;   // 满档两侧横向内收 9%（原 20%，拉扯过大）
     const bool doChin = (p.chin > 0.0f) && (chinSpan > 1.0f);
 
     // 大眼项实际生效还要求「眼睛来自关键点」—— 比例估算的眼位只用来定
@@ -159,6 +172,7 @@ bool warpFaceGeom(const FaceBox& f, const WarpParams& p, int w, int h,
     out.chinYm = chinYm;
     out.chinSpan = chinSpan;
     out.chinK = chinK;
+    out.chinKH = chinKH;
     out.roi[0] = x0;
     out.roi[1] = y0;
     out.roi[2] = x1;
@@ -239,17 +253,35 @@ void warpFaceWithGeom(unsigned char* rgba, int w, int h, const WarpGeom& g,
                 }
             }
 
-            // ---- ③ 下巴：下半脸纵向压缩 ----
-            // 中线强、两侧弱（lat），否则会连下颌角一起往上提，脸变方。
+            // ---- ③ 下巴：中线纵向拉长 + 两侧横向内收（3.1.64）----
+            // 两条位移方向不同：纵向让下巴尖往下延（脸变长），横向让下颌轮廓
+            // 向中线收（脸变窄）。旧版只有纵向压缩，出来的是「脸变短变圆」。
             if (doChin && sy > g.chinYm) {
                 const float t = (sy - g.chinYm) / g.chinSpan;
-                const float wv = smoothstep01(0.0f, 0.45f, t) *
-                                 (1.0f - smoothstep01(0.92f, 1.10f, t));
+                // 垂直权重：嘴线处 0 → t≥0.40 全效 → 下巴底(t=1)仍全效 →
+                // 越过下巴底进脖子的那段(t>1.0)渐降。旧版在 t=0.92~1.10 就
+                // 衰减到 0，那是为「压缩」保护下巴尖；现在要拉长，衰减必须
+                // 挪到 t>1，否则下巴尖一动不动。
+                const float wv = smoothstep01(0.0f, 0.40f, t) *
+                                 (1.0f - smoothstep01(1.00f, 1.30f, t));
                 if (wv > 1e-4f) {
                     const float u = fabsf((sx - g.cx) / halfW);
-                    const float lat = 1.0f - 0.60f * smoothstep01(0.20f, 1.0f, u);
-                    const float k = g.chinK * wv * lat;
-                    if (k > 1e-4f) sy = g.chinYm + (sy - g.chinYm) * (1.0f + k);
+                    // 中线强、两侧弱 → 只拉长面部中线（下巴尖）
+                    const float latMid = 1.0f - 0.55f * smoothstep01(0.15f, 0.95f, u);
+                    // 两侧强、中线弱 → 只收下颌轮廓，不挤压下巴尖本身。
+                    // 2026-11-05：原来 u∈[0.10,0.55] 就满档、之后一直不衰减，
+                    // 等于把「脸框半宽 55% 以外直到框外」的区域全都按 20% 外移，
+                    // 背景跟着被吸进来 → 用户看到的「两边空间拉扯」。
+                    // 现在权重带收在下颌线（0.60~0.85）并在 u→1 归零，
+                    // 框外（u>1）由 smoothstep 的钳位自动为 0。
+                    const float latSide = smoothstep01(0.25f, 0.60f, u) *
+                                          (1.0f - smoothstep01(0.85f, 1.00f, u));
+                    const float kV = g.chinK * wv * latMid;
+                    if (kV > 1e-4f)
+                        sy = g.chinYm + (sy - g.chinYm) * (1.0f - kV);
+                    const float kH = g.chinKH * wv * latSide;
+                    if (kH > 1e-4f)
+                        sx = g.cx + (sx - g.cx) * (1.0f + kH);
                 }
             }
 

@@ -111,6 +111,18 @@ uniform float  gT;        // 振幅门控阈值 T（灰阶）
 uniform float  gGwp;      // 门控陡度指数
 uniform float  gEyeK;     // 眼睛保护倍率 0..1（CPU 的 protectK/100）
 
+// ==== 方案 E / P2：值域加权核（默认全关，逐字节走原 box）=================
+// 只移植 SDK 的权重式子 wk = 1 - min((dg)^2 * yFactor, 1)，保留本仓库的
+// H/V 分离几何（采样数 25 -> 5×2）。原因见 04_文档/方案E §3 P2。
+// 两个坑：
+//  ① yFactor 标定在 0..1 图像值上。本文件别处到处是 *255.0（PS_Down /
+//     PS_Comp），这里绝不能跟着乘，否则 (dg)^2*40 在 0.16 灰阶就饱和，
+//     核退化成"只信中心"，症状是磨皮悄悄变成原图而不是报错。
+//  ② lerp 必须放在 s*invBox 之后。s 是未归一化累加和，rad 随画幅变，
+//     混在 s 上会让磨皮强度随分辨率漂移。
+uniform float  bilatK;     // 0 = 纯 box（默认）；1 = 完全值域加权
+uniform float  bilatYF;    // yFactor，SDK 原值 40（第 1 趟）/ 20（第 2 趟）
+
 struct vertex_data {
     float4 pos : POSITION;
     float2 uv  : TEXCOORD0;
@@ -163,18 +175,65 @@ float4 PS_Down(vertex_data vert_in) : TARGET {
 // 窗口越界时索引 clamp 到 [0, bw-1]。这里靠 boxTex 的 Clamp 寻址得到同一行为。
 // 逐步累加而非滑动窗差分：CPU 用滑动窗是为了 O(1)/像素且每 32 列重算一次抗漂移；
 // GPU 每像素独立求和，等于「每像素都重算」，反而更准 —— 差别只在 float 末位。
+// 5 tap 一维，值域权重只看绿通道；中心权重恒 1。
+//
+// ⚠ 量纲（2026-11-05 修）：本文件里 `boxTex` 存的是 **0..255 浮点**
+//   （PS_Down 末尾 ×255，中间层是 RGBA16F/32F 的 0..255 值）。SDK 的 yFactor
+//   是在 **0..1** 上标定的（Δg=0.16 归零），直接在 0..255 上套 40 会立刻饱和：
+//   Δg=1 灰阶时 (1)²×40=40 ≫ 1，权重全 0，核退化成"只信中心像素"——
+//   不报错，只是磨皮悄悄变成原图。所以这里先把 Δg 归一化回 0..1 再乘 yF。
+float3 boxWeightedH(float2 uv, float3 c0, float yF)
+{
+    float3 acc  = c0;
+    float  wsum = 1.0;
+    for (int k = -2; k <= 2; ++k) {
+        if (k == 0) continue;
+        float3 ck = image.Sample(boxTex, uv + float2((float)k * texel.x, 0.0)).rgb;
+        float  dg = (ck.g - c0.g) * (1.0 / 255.0);   // 0..255 → 0..1，yF 的量纲
+        float  w  = 1.0 - min(dg * dg * yF, 1.0);
+        acc  += ck * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
+
+float3 boxWeightedV(float2 uv, float3 c0, float yF)
+{
+    float3 acc  = c0;
+    float  wsum = 1.0;
+    for (int k = -2; k <= 2; ++k) {
+        if (k == 0) continue;
+        float3 ck = image.Sample(boxTex, uv + float2(0.0, (float)k * texel.y)).rgb;
+        float  dg = (ck.g - c0.g) * (1.0 / 255.0);   // 0..255 → 0..1，yF 的量纲
+        float  w  = 1.0 - min(dg * dg * yF, 1.0);
+        acc  += ck * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
+
 float4 PS_BoxH(vertex_data vert_in) : TARGET {
     float3 s = float3(0.0, 0.0, 0.0);
     for (int k = -rad; k <= rad; ++k)
         s += image.Sample(boxTex, vert_in.uv + float2((float)k * texel.x, 0.0)).rgb;
-    return float4(s * invBox, 1.0);
+    float3 box = s * invBox;
+    if (bilatK > 0.0) {
+        float3 c0 = image.Sample(boxTex, vert_in.uv).rgb;
+        box = lerp(box, boxWeightedH(vert_in.uv, c0, bilatYF), bilatK);
+    }
+    return float4(box, 1.0);
 }
 
 float4 PS_BoxV(vertex_data vert_in) : TARGET {
     float3 s = float3(0.0, 0.0, 0.0);
     for (int k = -rad; k <= rad; ++k)
         s += image.Sample(boxTex, vert_in.uv + float2(0.0, (float)k * texel.y)).rgb;
-    return float4(s * invBox, 1.0);
+    float3 box = s * invBox;
+    if (bilatK > 0.0) {
+        float3 c0 = image.Sample(boxTex, vert_in.uv).rgb;
+        box = lerp(box, boxWeightedV(vert_in.uv, c0, bilatYF), bilatK);
+    }
+    return float4(box, 1.0);
 }
 
 // ---------------------------------------------------------------------------

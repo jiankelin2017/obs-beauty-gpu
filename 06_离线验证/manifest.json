@@ -17,7 +17,7 @@
         "blur": 100
       },
       "golden": "goldens/g_blur100.raw",
-      "md5": "E25CD0AFABBCF8B25DDDC24A6CB8C151"
+      "md5": "F5163E7DE006A9810CDCE30D6F558C68"
     },
     {
       "name": "mixed",
@@ -32,7 +32,7 @@
         "chin": 10
       },
       "golden": "goldens/g_mixed.raw",
-      "md5": "E56B7361635AE3D875EB54E758A182D8"
+      "md5": "D8F6DC22743A51EC4484BEE21D620074"
     },
     {
       "name": "sharp",
@@ -43,7 +43,7 @@
         "gsharpen": 30
       },
       "golden": "goldens/g_sharp.raw",
-      "md5": "5D446CA7CEF75509EF9D368CB3D09ECB",
+      "md5": "E4E9CB7114AC3CCF8BEE7963669C80E4",
       "note": "3.1.52 首次采集：此前 manifest 里两个用例都没有锐化，detailRefill 的等价性一直没有基准可对。这条一开，以后改细节段（含 GPU 化）就有的比了。"
     },
     {
@@ -58,7 +58,7 @@
         "delspot": 30
       },
       "golden": "goldens/g_region.raw",
-      "md5": "D5D493DA863403A75D052AD5B421A05D"
+      "md5": "0C84DCD3B997C50234F7F76F546830B0"
     }
   ]
 }

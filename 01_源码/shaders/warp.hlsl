@@ -53,7 +53,7 @@ uniform float2 texSize;    // (w, h)，用来把 uv 换成整数像素坐标
 uniform float4 fA;         // cx, cy, halfW, eyeR
 uniform float4 fB;         // eyeRx, eyeRy, eyeLx, eyeLy
 uniform float4 fC;         // eyeAmp, thinYc, thinSig, thinK
-uniform float4 fD;         // chinYm, chinSpan, chinK, 保留
+uniform float4 fD;         // chinYm, chinSpan, chinK(中线拉长), chinKH(两侧内收)
 uniform float4 roi;        // x0, y0, x1, y1 —— x1/y1 是**开区间**（与 CPU 一致）
 
 // BEAUTY_WARP_F_*：1 大眼 / 2 瘦脸 / 4 下巴 / 8 眼睛来自关键点
@@ -132,18 +132,28 @@ float4 PS_Warp(vertex_data vert_in) : TARGET {
         }
     }
 
-    // ---- ③ 下巴：下半脸纵向压缩 ----
-    // 中线强、两侧弱（lat），否则会连下颌角一起往上提，脸变方。
+    // ---- ③ 下巴：中线纵向拉长 + 两侧横向内收（3.1.64，与 CPU 逐字对应）----
+    // 纵向让下巴尖往下延（脸变长），横向让下颌轮廓向中线收（脸变窄）。
+    // 旧版只有纵向压缩，出来是「脸变短变圆」，所以这一段的权重区间也跟着改了：
+    // 衰减从 t=0.92 挪到 t>1.0 —— 拉长时下巴尖本身必须动，否则等于没拉。
+    // 2026-11-05：横向权重带收窄（0.25~0.60 上升、0.85~1.00 归零）。
+    // 原来的 0.10~0.55 满档且不衰减，会把脸框外的背景按同比例外移，
+    // 画面上就是「下巴两边空间被硬扯」。
     if ((wFlags & 4) != 0 && sy > fD.x) {
         float t = (sy - fD.x) / fD.y;
-        float wv = smoothstep(0.0, 0.45, t) *
-                   (1.0 - smoothstep(0.92, 1.10, t));
+        float wv = smoothstep(0.0, 0.40, t) *
+                   (1.0 - smoothstep(1.00, 1.30, t));
         if (wv > 1e-4) {
             float u = abs((sx - fA.x) / fA.z);
-            float lat = 1.0 - 0.60 * smoothstep(0.20, 1.0, u);
-            float k = fD.z * wv * lat;
-            if (k > 1e-4)
-                sy = fD.x + (sy - fD.x) * (1.0 + k);
+            float latMid  = 1.0 - 0.55 * smoothstep(0.15, 0.95, u);
+            float latSide = smoothstep(0.25, 0.60, u) *
+                            (1.0 - smoothstep(0.85, 1.00, u));
+            float kV = fD.z * wv * latMid;
+            if (kV > 1e-4)
+                sy = fD.x + (sy - fD.x) * (1.0 - kV);
+            float kH = fD.w * wv * latSide;
+            if (kH > 1e-4)
+                sx = fA.x + (sx - fA.x) * (1.0 + kH);
         }
     }
 

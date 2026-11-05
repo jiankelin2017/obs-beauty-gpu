@@ -22,8 +22,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
+#include <atomic>   // 3.0.1：g_filterAlive 改成原子计数
 
 #include <obs.h>
 #include <obs-module.h>
@@ -37,6 +39,200 @@
 // 引擎抽象层：本文件只认 IBeautyEngine，不直接依赖任何具体实现。
 // 3.1.7 起只有自研 CoreEngine 一条生产路径（旧链路只在离线基准 DLL 里保留）。
 #include "beauty_core.h"
+#include "beauty_seg.h"    // 方案 E / P0：整帧分割影子层
+
+// ===========================================================================
+// 方案 E：新增 uniform 的集中绑定（默认全部关闭，逐字节走原路径）
+//
+// 为什么放在最前面：beauty_gpu_tone() 在 1400 行手写 technique，不走
+// smooth_draw()；其余链路都走 smooth_draw()。两处都要能调到这个函数，
+// 所以定义必须早于两者。
+//
+// 为什么由 smooth_draw() 统一调：bind_all 的老教训 —— OBS 的
+// gs_technique_begin_pass() 会消耗参数值，绑一次连画两趟时第二趟静默全 0。
+// 放在 draw 包装里，每一趟都自动重绑，不会漏。
+//
+// 单实例插件（本项目只有一个 source 类型），用文件级静态纹理是安全的；
+// 若将来支持多实例，这里要改成按 filter 持有。
+// ===========================================================================
+static gs_texture_t *g_eSegTex = nullptr;   // 512×512 RGBA8（1 MB），仅 BEAUTY_SEG=1 时创建
+static gs_texture_t *g_eWhite = nullptr;    // 1×1 白，任何未配置纹理的兜底
+static beautycore::SegFrame *g_eFrame = nullptr;
+static bool g_eInit = false;
+// 3.0.0：上面这些是进程级共享的 GPU 资源，不能再由任意一个滤镜 destroy 时抹掉
+// —— 双机位场景里销毁侧机位会把主机位的分割纹理 / seq 一起清空，下一帧 segMix
+// 乘上一张内容未定义的纹理。只在最后一个实例退出时才复位。
+static std::atomic<int> g_filterAlive{0};
+static int  g_eTries = 0;                   // 兜底纹理连续创建失败次数（见 beauty_e_ensure）
+static float g_segUv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+static float g_segMix = 0.0f, g_segGamma = 1.0f, g_segNonSkinK = 0.0f;
+// P2 值域加权：两趟的 yFactor 按 SDK 分开（40 / 20）。
+// 为什么必须分开：第二趟吃的是第一趟的输出，噪声已被压掉，SDK 因此把容限
+// 从 1/√40=0.158 放宽到 1/√20=0.224。共用一个值时第二趟偏"保边"，
+// 整体磨皮会比 SDK 弱一档，且这个偏差不会报错、只会看起来"效果不明显"。
+static float g_bilatK = 0.0f, g_bilatYF = 40.0f, g_bilatYF2 = 20.0f;
+static float g_lut3dMix = 0.0f, g_toneEarly = 0.0f;
+// 2026-11-05（复刻 SDK）：色彩三段整帧施加，不乘皮肤掩码。默认 1。
+static float g_toneGlobal = 1.0f;
+
+static float e_envf(const char *k, float def) {
+    const char *v = std::getenv(k);
+    if (!v || !*v) return def;
+    float f = (float)std::atof(v);
+    return (f >= 0.0f && f <= 8.0f) ? f : def;
+}
+
+// 给 yFactor 这类"量纲不是 0..1 比例"的参数用。
+// 起因（2026-11-05）：`BEAUTY_BILAT_YF=40` 走 e_envf 会被上面那个 0..8 夹成 8，
+// 于是"按文档设 40"实际是 8 —— 阈值从 0.158 变成 0.354，核几乎不做值域加权，
+// 症状是"开了 BILAT 看不出变化"，比报错更难查。
+static float e_envf_range(const char *k, float def, float lo, float hi) {
+    const char *v = std::getenv(k);
+    if (!v || !*v) return def;
+    float f = (float)std::atof(v);
+    return (f >= lo && f <= hi) ? f : def;
+}
+
+static void beauty_e_ensure() {
+    if (g_eInit) return;
+    const uint8_t white[4] = {255, 255, 255, 255};
+    const uint8_t *wp = white;
+    g_eWhite = gs_texture_create(1, 1, GS_RGBA, 1, &wp, 0);
+
+    // g_eWhite 是整条路径的兜底（R=255 恒等）。创建失败时**不能**把 g_eInit
+    // 提前置 true：那样后续每帧都会拿 null 去做 gs_effect_set_texture（解绑
+    // 语义，采样结果取决于驱动），而且再也不会重试。留 false 让下一帧重来，
+    // 但最多 16 次后放弃 —— 显卡真出问题时不该每帧刷一条 WARNING。
+    if (!g_eWhite) {
+        if (++g_eTries >= 16) {
+            g_eInit = true;
+            blog(LOG_WARNING,
+                 "[obs-beauty] 1×1 兜底纹理连续 %d 次创建失败，放弃分割/色调贴图初始化",
+                 g_eTries);
+        }
+        return;
+    }
+    g_eInit = true;
+    g_eTries = 0;
+
+    const char *s = std::getenv("BEAUTY_SEG");
+    if (s && s[0] == '1') {
+        g_eSegTex = gs_texture_create(beautycore::SegFrame::W,
+                                      beautycore::SegFrame::H,
+                                      GS_RGBA, 1, nullptr, GS_DYNAMIC);
+        if (g_eSegTex) g_eFrame = new (std::nothrow) beautycore::SegFrame;
+        // 静默失败是这条路径最坑的地方：开了 BEAUTY_SEG 却什么都没变，看不出
+        // 是模型路径写错、还是 onnxruntime 没找到。这里主动初始化并报原因。
+        if (!beautyCoreSegInit())
+            blog(LOG_WARNING,
+                 "[obs-beauty] BEAUTY_SEG=1 但分割未启动：%s"
+                 "（检查 BEAUTY_SEG_MODEL 是否指向 bisenet_face_dyn.onnx）",
+                 beautyCoreSegError());
+        else if (!g_eSegTex || !g_eFrame)
+            blog(LOG_WARNING, "[obs-beauty] BEAUTY_SEG=1 但 512×512 分割纹理创建失败");
+        else
+            blog(LOG_INFO, "[obs-beauty] 分割已就绪（512×512，裁脸输入）");
+    }
+    g_segMix      = e_envf("BEAUTY_SEG_MIX", 0.0f);
+    g_segGamma    = e_envf("BEAUTY_SEG_GAMMA", 1.0f);
+    // 2026-11-05 实测（crop 512，face_front_720p）：R 单独用不够 —— 头发
+    // R=0.60、衣服 R=0.005 但背景 R=0.008，而 B(非肤) 在头发 0.64 / 背景
+    // 0.98 上都很准。所以乘法因子必须带非肤项，默认给满 1.0。
+    g_segNonSkinK = e_envf("BEAUTY_SEG_NONSKIN", 1.0f);
+    g_bilatK      = e_envf("BEAUTY_BILAT", 0.0f);
+    // 不能走 e_envf：它夹在 0..8，会把 40 悄悄变成 8（见 e_envf_range 注释）。
+    g_bilatYF     = e_envf_range("BEAUTY_BILAT_YF", 40.0f, 0.25f, 400.0f);
+    g_bilatYF2    = e_envf_range("BEAUTY_BILAT_YF2", 20.0f, 0.25f, 400.0f);
+    g_lut3dMix    = e_envf("BEAUTY_LUT3D", 0.0f);
+    g_toneEarly   = e_envf("BEAUTY_TONE_EARLY", 0.0f);
+    // e_envf 只接受 0..8，正好够用：0 = 旧行为（掩码内施加），1 = 复刻 SDK。
+    g_toneGlobal  = e_envf("BEAUTY_TONE_GLOBAL", 1.0f) > 0.5f ? 1.0f : 0.0f;
+}
+
+static gs_texture_t *beauty_e_tex() {
+    beauty_e_ensure();
+    return g_eSegTex ? g_eSegTex : g_eWhite;
+}
+
+// 每帧在掩码上传处调：有新结果才拷+上传。无结果时保持白纹理（R=255 恒等）。
+//
+// 为什么先查 seq：SegFrame 现在是 512×512×4 = 1 MB，全量 memcpy + 纹理上传
+// 每帧白做一次就是 2 MB/帧的纯浪费（60 fps 下 120 MB/s）。分割本身是节流的
+// （BEAUTY_SEG_EVERY），绝大多数帧根本没有新结果。
+static unsigned g_segSeq = 0;
+static int g_segLogs = 0;
+static void beauty_e_update() {
+    beauty_e_ensure();
+    if (!g_eSegTex || !g_eFrame) return;
+    const unsigned s = beautyCoreSegSeq();
+    if (s == 0 || s == g_segSeq) return;   // 没有新结果
+    if (!beautyCoreCopySeg(g_eFrame)) return;
+    g_segSeq = s;
+    gs_texture_set_image(g_eSegTex, g_eFrame->rgba,
+                         (uint32_t)beautycore::SegFrame::W * 4, false);
+    for (int i = 0; i < 4; ++i) g_segUv[i] = g_eFrame->uv[i];
+    if (g_segLogs < 3) {   // 前三条足够判断裁切是否真在工作
+        ++g_segLogs;
+        blog(LOG_INFO,
+             "[obs-beauty] seg#%u %ums crop=%d uv=(%.3f,%.3f,%.3f,%.3f)",
+             s, (unsigned)g_eFrame->ms, g_eFrame->cropped,
+             g_segUv[0], g_segUv[1], g_segUv[2], g_segUv[3]);
+    }
+}
+
+static void beauty_bind_e_params(gs_effect_t *fx) {
+    if (!fx) return;
+    beauty_e_ensure();
+    gs_eparam_t *p;
+    struct vec4 v;
+
+    // mask.hlsl（P0 / P1）
+    if ((p = gs_effect_get_param_by_name(fx, "segTex")))
+        gs_effect_set_texture(p, beauty_e_tex());
+    if ((p = gs_effect_get_param_by_name(fx, "segUv"))) {
+        vec4_set(&v, g_segUv[0], g_segUv[1], g_segUv[2], g_segUv[3]);
+        gs_effect_set_vec4(p, &v);
+    }
+    if ((p = gs_effect_get_param_by_name(fx, "segMix")))
+        // 没有第一份分割结果时**必须把 mix 压到 0**：segTex 这时是 1×1 白纹理
+        // （或刚创建、内容未定义的 512 纹理），shader 里 g=sk*(1-b*K) 在 R=B=1
+        // 时正好等于 0，整张掩码会被乘成 0 → 用户看到的是「开了 BEAUTY_SEG，
+        // 美颜整个消失」。模型路径写错、ORT 没起来时也是这个下场，而且只留一条
+        // WARNING。压到 0 就退回纯几何路径，与没开分割逐字节一致。
+        gs_effect_set_float(p, g_segSeq ? g_segMix : 0.0f);
+    if ((p = gs_effect_get_param_by_name(fx, "segGamma")))
+        gs_effect_set_float(p, g_segGamma);
+    if ((p = gs_effect_get_param_by_name(fx, "segNonSkinK")))
+        gs_effect_set_float(p, g_segNonSkinK);
+
+    // smooth.hlsl（P2）
+    if ((p = gs_effect_get_param_by_name(fx, "bilatK")))
+        gs_effect_set_float(p, g_bilatK);
+    if ((p = gs_effect_get_param_by_name(fx, "bilatYF")))
+        gs_effect_set_float(p, g_bilatYF);
+
+    // tone.hlsl（P3）；未配置 LUT 时绑白纹理，lut3dMix=0 时整段不读。
+    if ((p = gs_effect_get_param_by_name(fx, "lutTex")))
+        gs_effect_set_texture(p, g_eWhite);
+    if ((p = gs_effect_get_param_by_name(fx, "lutDim"))) {
+        vec4_set(&v, 16.0f, 16.0f, 4.0f, 0.0f);   // 16 切片 / 4×4 网格
+        gs_effect_set_vec4(p, &v);
+    }
+    if ((p = gs_effect_get_param_by_name(fx, "lutBand"))) {
+        vec4_set(&v, 0.0f, 1600.0f, 0.0f, 0.0f);
+        gs_effect_set_vec4(p, &v);
+    }
+    if ((p = gs_effect_get_param_by_name(fx, "lut3dMix")))
+        gs_effect_set_float(p, g_lut3dMix);
+    if ((p = gs_effect_get_param_by_name(fx, "toneEarlyOut")))
+        gs_effect_set_float(p, g_toneEarly);
+}
+
+// 2.15.6：掩码落盘（定义在文件后半段）。
+static void beauty_mask_dump(const char *dir, const char *name,
+			     const uint8_t *buf, uint32_t cx, uint32_t cy);
+
+
 // 4d：五官椭圆对拍的 CPU 基准要直接调 beautycore::applyEllipses —— 这是刻意的：
 // 几何快照已经把**同一份**椭圆交给宿主，用同一个算子算基准，比对才有意义。
 #include "beauty_region.h"
@@ -241,6 +437,10 @@ struct beauty_filter {
 	double v[BEAUTY_NPARAM]; // panel units, 0..100
 	int slot;              // 引擎槽位（每个滤镜实例独占一份上下文）
 	bool dirty;            // 进程级检测选项待下发（渲染线程 flush）
+	// 2.16.9：上次已下发的检测选项 —— 只有变化时才置脏（原来每帧 update 都会重下发）。
+	int sent_max_faces;
+	int sent_landmark_q;
+	bool sent_once;
 	bool err_reported;     // 引擎报错只提示一次，避免每帧刷屏
 	// ---- 方案 A / Phase 2：GPU 色调渲染管线（默认不启用，诊断用）----
 	gs_effect_t *tone_fx;  // tone.hlsl 编译后的 effect（懒加载，失败则回落 CPU）
@@ -405,11 +605,32 @@ struct beauty_filter {
 	uint32_t an_masknull;  // job.mask == NULL → 全皮肤磨皮（整帧被磨）
 	uint32_t an_histrst;   // 细节历史被重置（EMA 断帧 → 纹理跳一下）
 	uint32_t an_claimdrop;// 认领位不满（本帧走了 CPU/回退）
+	// 2026-11-05：磨皮生效参数（job.band）的一次性取证。
+	// 用户报「重启 OBS 后磨皮无效、拖一下滑块才生效」—— 这条日志直接给出
+	// 引擎当帧交给 GPU 的 I/e/T/passes，以及面板档位，一眼能看出是不是 0。
+	bool band_logged;         // 打过一次「磨皮参数」日志
+	bool band_zero_logged;    // 打过一次「档位>0 但 band.I=0」告警
+	// 档位变化日志的初值（见 beauty_filter_update）。拖滑块时打一行，
+	// 用来区分「参数没到位」和「参数到位但 GPU 链没生效」。
+	double blur_logged;
 	// S4a（2.6.0）：只出几何的帧，GPU 掩码建图失败 → 本帧整帧跳过处理。
 	// 正常应恒为 0；一旦涨就说明掩码 RT/shader 出问题了（那时画面是原样，不是花屏）。
 	uint32_t an_geomskip;
 	// S4a：本窗口内「只出几何、由 GPU 画掩码」的帧数。应 ≈ 窗口帧数（对比 gskip）。
 	uint32_t an_geomonly;
+	// 2.15.3：GPU 掩码这帧没建成、改沿用上一份掩码的帧数。
+	// 它与 gskip 是互斥的：ghold 越高越好（不闪），gskip 才是丢帧。
+	uint32_t an_geomhold;
+	// 2.15.5：缩略图帧「掩码比帧环老」但已用当前帧兜住的帧数（不再丢帧）。
+	uint32_t an_thumblate;
+	// 2.15.4：「掩码路径」那一行只打一次。
+	int mask_path_logged;
+	// 2.15.6：BEAUTY_MASK_DUMP 已写出的张数（上限 5）。
+	int mask_dump_n;
+	// 2.15.7：本帧已落掩码，色调输出也落一张（在同一帧、同一索引）。
+	int mask_dump_want;
+	// 2.15.8：「仅色彩层」诊断行的节流（按 obs 帧号，约 2 秒一次）。
+	uint64_t color_only_at;
 	// ---- 2.7.0（S4b）：检测输入缩略图 -----------------------------------
 	// 检测要的只是「整帧等比压到 640×640」这一张，而现行办法是把**整帧**回读到
 	// CPU（4K 33 MB ≈ 2.5~3 ms）再用 letterboxRgb 缩一遍。这里改成 GPU 上缩、
@@ -537,6 +758,19 @@ static bool beauty_smooth_hook(void *user, const unsigned char *src,
 // 但两者都挂 —— 段区间钩子返回 0 时引擎仍可用单段钩子接管磨皮。
 static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job);
 
+// 2.15.2：面板「输入方向」删除后，旋转能力只剩环境变量这一条路。
+// 只认 90/180/270 三个字面量，其余（不设 / 打错 / 0）一律按 0 —— 与旧面板
+// 「原样 (0°)」同义。为什么保留能力：摄像头物理侧装、采集卡输出横躺这一种接法
+// 仍然需要它（见 PROGRESS §9.36 的侧躺素材实测），但那不是默认用户。
+static int beauty_input_rot_from_env(void)
+{
+	const char *s = getenv("BEAUTY_INPUT_ROT");
+	if (!s || !s[0])
+		return 0;
+	const int v = atoi(s);
+	return (v == 90 || v == 180 || v == 270) ? v : 0;
+}
+
 static void beauty_filter_read(struct beauty_filter *f, obs_data_t *s)
 {
 	f->enabled = obs_data_get_bool(s, "enabled");
@@ -546,7 +780,9 @@ static void beauty_filter_read(struct beauty_filter *f, obs_data_t *s)
 	f->smooth_mode = (int)obs_data_get_int(s, "smooth_mode");
 	f->landmark_q = (int)obs_data_get_int(s, "landmark_q");
 	f->max_faces = (int)obs_data_get_int(s, "max_faces");
-	f->input_rot = (int)obs_data_get_int(s, "input_rot");
+	/* 2.15.2：面板项已删，这里不再读 `input_rot`（旧场景里存着的 90/270 会被忽略，
+	 * 免得升级后画面突然跟以前不一样）。需要的人用 BEAUTY_INPUT_ROT 显式打开。 */
+	f->input_rot = beauty_input_rot_from_env();
 	for (int i = 0; i < BEAUTY_NPARAM; i++)
 		f->v[i] = obs_data_get_double(s, g_params[i].key);
 }
@@ -618,6 +854,7 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 	f->slot = -1;
 	f->dirty = true;
 	f->err_reported = false;
+	++g_filterAlive;   // 3.0.0：共享 GPU 资源的实例引用计数
 	// 只在显式开启时统计，避免给生产会话平白加两次计时调用
 	{
 		const char *p = getenv("BEAUTY_PROFILE");
@@ -635,15 +872,33 @@ static void *beauty_filter_create(obs_data_t *settings, obs_source_t *source)
 	}
 	beauty_migrate(settings);
 	beauty_filter_read(f, settings);
+	f->blur_logged = -1.0;
 
-	// 每个实例独占一份引擎上下文。第一次调用会顺带完成预热（约 2 秒），
-	// 因此首个滤镜创建时会有一个可感的停顿 —— 与 1.x 在模块加载时预热相比，
-	// 好处是「没拖滤镜的 OBS 会话完全不付这笔开销」。
+	// 3.0.0：每个滤镜实例独占一份引擎上下文。旧实现 acquireSlot() 恒返回 0，
+	// 两个机位其实共用同一个 CoreEngine —— 帧号 / 掩码 / 肤色 EMA / 钩子 user
+	// 互相串扰，就是实机「主机位人物闪烁 + 侧机位全部效果无效」的根因。
+	// beautyCoreAcquireSlot() 会占一个真实槽、绑定当前线程、惰性建该槽引擎并
+	// ensureReady；后面 create 里所有 beautyEngine() / beautyCoreSet* 都落到
+	// 自己的那份上下文。模块加载阶段的 preheat 已替 slot 0 预热过，第二个实例
+	// 会各自加载一份 YuNet 模型（多一次 ~2 秒、多一份内存），这是隔离的代价。
 	std::string err;
-	f->slot = beautyEngine().acquireSlot(err);
+	f->slot = beautyCoreAcquireSlot(err);
 	if (f->slot < 0)
 		blog(LOG_ERROR, "[" PLUGIN_NAME "] 引擎槽位获取失败：%s（滤镜将直通）",
 		     err.c_str());
+	else
+		blog(LOG_INFO, "[" PLUGIN_NAME "] 多实例槽位已分配：slot=%d 活跃实例=%d",
+		     f->slot, beautyCoreActiveSlots());
+
+	// 3.0.1：槽位获取失败（8 个已占满 / ensureReady 失败）时立刻返回直通实例，
+	// 绝不继续往下走。f 是 bzalloc 出来的，所有指针与开关都是零：destroy() 的
+	// 逐个 if(ptr) 释放路径安全，render() 按 f->slot<0 早退。继续往下则：
+	//   * 后面 12 处 beautyEngine() 会落到「上一个成功实例」的槽；
+	//   * 下面的 beautyCoreSetChainHook/SetSmoothHook 会把本实例 f 注册成
+	//     别的槽的 hook user，而本实例 f->slot=-1，destroy() 摘不到它 ——
+	//     f 被 bfree 后那个槽的钩子就是悬空指针，下一帧回调即 UAF。
+	if (f->slot < 0)
+		return f;
 
 	// Phase 2 诊断开关：BEAUTY_GPU_TONE=1 且引擎确实宣称走 GPU 路径时才开。
 	// 默认关 —— 这条路径不改画面，只是把 tone.hlsl 与 CPU toneColor 对一次账，
@@ -888,10 +1143,42 @@ static void beauty_filter_destroy(void *data)
 	struct beauty_filter *f = (struct beauty_filter *)data;
 	if (!f)
 		return;
+	// 3.0.1：只有拿到有效槽的实例才允许碰按槽状态。旧实现无条件
+	// beautyCoreBindSlot(f->slot)，失败实例 slot=-1 被 clamp 成 0，于是把
+	// 主机位（slot 0）的钩子摘掉，自己真正挂着的那个槽反而留下悬空 user。
 	if (f->slot >= 0) {
-		beautyEngine().releaseSlot(f->slot);
+		beautyCoreBindSlot(f->slot);
+		beautyCoreSetChainHook(NULL, NULL);
+		beautyCoreSetSmoothHook(NULL, NULL);
+		// 停 worker / 清 SlotState / 归还槽统一由核心层完成，不再重复调
+		// beautyEngine().releaseSlot()（3.0.1 起那也是停 worker 的同一条路径）。
+		beautyCoreReleaseSlot(f->slot);
 		f->slot = -1;
 	}
+	// 3.0.0：进程级共享的 GPU 资源只在**最后一个**滤镜实例退出时复位。
+	// 旧实现无条件清纹理 / seq，双机位时销毁侧机位会让主机位下一帧的
+	// segMix 乘上一张未定义内容的纹理（方案 E 路径）。
+	const bool last = (--g_filterAlive <= 0);
+	if (g_filterAlive.load() < 0) g_filterAlive.store(0);
+	if (last) {
+		// 方案 E：文件级静态纹理。置回初态，
+		// 下次 create 时 beauty_e_ensure() 会重建，不会留悬垂指针。
+		if (g_eSegTex) { gs_texture_destroy(g_eSegTex); g_eSegTex = nullptr; }
+		if (g_eWhite)  { gs_texture_destroy(g_eWhite);  g_eWhite  = nullptr; }
+		// 分割纹理已销毁，seq 必须同步清零。否则：下次 ensure 用 NULL 数据重建
+		// 512×512 纹理（内容未定义），而 beauty_e_update() 的 `s == g_segSeq`
+		// 会跳过上传，同时 beauty_bind_e_params() 因 `g_segSeq != 0` 仍放行
+		// segMix → 掩码被一张垃圾纹理乘掉整整一个分割周期（约 400 ms）。
+		// UV 一并回初态，避免新纹理配旧裁切窗。
+		g_segSeq = 0;
+		g_segUv[0] = 0.0f; g_segUv[1] = 0.0f; g_segUv[2] = 1.0f; g_segUv[3] = 1.0f;
+		g_segLogs = 0;
+		g_eTries = 0;   // 重建时允许重新计数（否则上次的失败次数会带过来）
+		delete g_eFrame;
+		g_eFrame = nullptr;
+		g_eInit = false;
+	}
+
 	// Phase 2 GPU 色调资源（这些全是 graphics 对象，必须在图形线程/上下文
 	// 仍然有效时释放；destroy 由 OBS 在销毁 source 时调用，满足条件）。
 	if (f->tone_fx)
@@ -902,10 +1189,8 @@ static void beauty_filter_destroy(void *data)
 		gs_texture_destroy(f->mask_tex);
 	free(f->mask_buf);
 	// Phase 3 GPU 磨皮资源（同一批约定：图形对象在此统一释放）
-	if (f->gpu_smooth_prod)
-		beautyCoreSetSmoothHook(NULL, NULL);   // 先摘钩子，避免悬空 user
-	if (f->chain_prod)
-		beautyCoreSetChainHook(NULL, NULL);    // 段区间钩子优先，先摘它
+	// 3.0.1：钩子已在函数开头按本实例槽无条件摘除。这里不要再按
+	// gpu_smooth_prod / chain_prod 条件摘一次 —— 直通实例会因此误摘 slot 0。
 	// Phase 5a 资源
 	if (f->detail_fx)
 		gs_effect_destroy(f->detail_fx);
@@ -1001,7 +1286,6 @@ static void beauty_filter_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "mirror", false);
 	obs_data_set_default_int(settings, "blur_type", 1);
 	obs_data_set_default_int(settings, "smooth_mode", 0);
-	obs_data_set_default_int(settings, "input_rot", 0);
 	// 2.0 起默认开：BGRA 修正 + 语义掩码之后，"只磨皮肤"才是预期行为，
 	// 1.x 默认关是因为当时人脸检测基本失效，开着只会全局磨糊。
 	obs_data_set_default_bool(settings, "skin_detect", true);
@@ -1099,15 +1383,16 @@ static obs_properties_t *beauty_filter_properties(void *data)
 	obs_property_list_add_int(sm, "精细磨皮", 2);
 	obs_property_list_add_int(sm, "朦胧磨皮", 3);
 
-	// 2.10.0 方案 B：输入方向。把摄像头/来源的旋转吸收进滤镜，使检测几何、五官、
-	// 美形、保护椭圆对齐到正确人脸位置；用户保留场景项旋转负责显示方向。
-	obs_property_t *ir = obs_properties_add_list(
-		ppts, "input_rot", "输入方向",
-		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(ir, "原样 (0°)", 0);
-	obs_property_list_add_int(ir, "顺时针 90°", 90);
-	obs_property_list_add_int(ir, "180°", 180);
-	obs_property_list_add_int(ir, "顺时针 270°", 270);
+	/* 2.15.2：面板「输入方向」已**删除**（用户 2026-11-04 20:0x 反馈「没有一点效果」）。
+	 *
+	 * 为什么删而不是留：这一档要解决的问题（源被转了 90°，检测吃不到正立的人脸）
+	 * 只对「摄像头物理侧装 / 采集卡输出横躺」这一种接法成立；对绝大多数用户，
+	 * 选任何一档都等于 0 —— 选错了还会让检测整段失效（YuNet 检不出 ±90° 的脸）。
+	 * 2.15.0 加的自动兜底又让它进一步退化成「选什么都一样」，留着只会误导。
+	 *
+	 * 能力没有删：引擎侧的旋转、`invRotateFace`、`letterboxRgbRot` 全部保留，
+	 * 需要的人用环境变量 `BEAUTY_INPUT_ROT=90/180/270` 打开（见《开关总表》）。
+	 * 面板上不再有这一项，用户也不用再为「该选哪一档」试错。 */
 
 	// ---- 组 1：美颜（3.1.29 合并磨皮与肤色；3.1.30 改名为「美颜」）----
 	// 为什么合并：这两类是**天天要调的主参数**，分成两页反而每次都要切。
@@ -1158,11 +1443,41 @@ static obs_properties_t *beauty_filter_properties(void *data)
 static void beauty_filter_update(void *data, obs_data_t *settings)
 {
 	struct beauty_filter *f = (struct beauty_filter *)data;
+	// 3.0.1：直通实例（slot<0）不得把 UI 线程绑到 slot 0，否则后续若有人
+	// 在这里加引擎调用，参数会下发到主机位。其余实例照旧绑定自己的槽。
+	if (f->slot >= 0)
+		beautyCoreBindSlot(f->slot);
 	beauty_migrate(settings);
 	beauty_filter_read(f, settings);
-	// 只置脏；进程级检测选项（旋转/识别模式/人数）推迟到渲染线程下发。
-	// 九个效果滑块不需要脏标记 —— 引擎每槽位做参数指纹比对，不变就不下发。
-	f->dirty = true;
+	/* 2026-11-05：只在磨皮档位真的变化时打一行（update 可能被每帧调用）。
+	 * 16:16 会话就是靠它证明「启动后档位一直是 100、从未被清零」，
+	 * 那些 100→0 的连续值全是用户拖滑块的轨迹。据此撤销了误判后
+	 * 加的「启动期清零保护」—— 那版保护会在用户主动拖到 0 时误触发。 */
+	{
+		const double b = f->v[BEAUTY_IDX_BLUR];
+		if (fabs(b - f->blur_logged) > 0.01) {
+			blog(LOG_INFO,
+			     "[obs-beauty] 档位变化：磨皮 %.0f→%.0f"
+			     "（美白=%.0f 红润=%.0f 清晰=%.0f, frame=%llu）",
+			     f->blur_logged, b,
+			     f->v[P_WHITEN], f->v[P_RED], f->v[P_CLARITY],
+			     (unsigned long long)obs_get_total_frames());
+			f->blur_logged = b;
+		}
+	}
+	/* 2.16.9：**只在检测选项真的变了时才置脏**。
+	 *
+	 * 用户 2026-11-04 21:35 的日志里，识别选项已下发 每 33 ms 打一次 —— 说明
+	 * update() 被每帧调用，于是每帧都重新下发一次 setDetectOptions（进程级），
+	 * 既刷屏又可能让检测器每帧重建，是"掉帧"的一个来源。
+	 * 九个效果滑块不需要脏标记（引擎按参数指纹比对），所以这里只比这几个。 */
+	if (f->max_faces != f->sent_max_faces ||
+	    f->landmark_q != f->sent_landmark_q || !f->sent_once) {
+		f->sent_max_faces = f->max_faces;
+		f->sent_landmark_q = f->landmark_q;
+		f->sent_once = true;
+		f->dirty = true;
+	}
 }
 
 // ------------------------------------------------------------------
@@ -1373,6 +1688,8 @@ static gs_texture_t *beauty_gpu_tone(struct beauty_filter *f, gs_texture_t *in_t
 	vec4_zero(&clear_color);
 	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
 
+	// 方案 E：这条路径手写 technique（不走 smooth_draw），必须自己重绑。
+	beauty_bind_e_params(fx);
 	gs_eparam_t *p;
 	p = gs_effect_get_param_by_name(fx, "image");
 	if (p)
@@ -1389,6 +1706,11 @@ static gs_texture_t *beauty_gpu_tone(struct beauty_filter *f, gs_texture_t *in_t
 	p = gs_effect_get_param_by_name(fx, "rosy");
 	if (p)
 		gs_effect_set_float(p, rosy);
+	// 2026-11-05：色彩三段是否整帧施加（复刻 SDK）。与 CPU toneColor 的
+	// BEAUTY_TONE_GLOBAL 同一个开关，GPU/CPU 对拍才不会出现"两边判据不同"。
+	p = gs_effect_get_param_by_name(fx, "toneGlobal");
+	if (p)
+		gs_effect_set_float(p, g_toneGlobal);
 
 	// 与主路径同一个理由要用 begin/begin_pass 而不是 gs_effect_loop()：
 	// OBS 可能已经在我们外面 begin 了一个 technique，loop 会直接报
@@ -1896,6 +2218,9 @@ static void smooth_rt_end(gs_texrender_t *rt)
 static void smooth_draw(gs_effect_t *fx, const char *tech_name, gs_texture_t *draw_tex,
 			uint32_t cx, uint32_t cy)
 {
+	// 方案 E：每趟绘制前重绑全部新增参数（见文件头的 bind_all 教训）。
+	// 所有开关默认 0，未配置时纹理全绑 1×1 白，逐字节走原路径。
+	beauty_bind_e_params(fx);
 	gs_technique_t *tech = gs_effect_get_technique(fx, tech_name);
 	if (!tech)
 		return;
@@ -1911,15 +2236,23 @@ static void smooth_draw(gs_effect_t *fx, const char *tech_name, gs_texture_t *dr
 // 一趟可分离盒式：src → rt。
 // rad == 0 时退化为「逐像素复制」（循环只跑 k=0、invBox=1），Copy 步骤就靠它，
 // 不必再写一个只做 copy 的 technique。
+//
+// bk / yF 每趟单独绑，不再依赖 bind_all 的那一份：
+//  * B1 与 B2 的 yFactor 不同（SDK 40 → 20），共用一个值会让第二趟偏保边。
+//  * amp 平滑趟必须传 bk=0 —— 它平滑的是"振幅图"，不是画面。对振幅图做值域
+//    加权会把大振幅区（五官边的强反差）排除在平滑之外，门控曲线被改成另一条，
+//    这不属于 P2 的设计，必须显式关掉。
 static void smooth_box_pass(gs_effect_t *fx, gs_texrender_t *rt, gs_texture_t *src,
 			    uint32_t w, uint32_t h, int rad, bool horiz,
-			    gs_texture_t *draw_tex)
+			    gs_texture_t *draw_tex, float bk, float yF)
 {
 	smooth_bind_tex(fx, "image", src);
 	smooth_bind_vec2(fx, "texel", horiz ? 1.0f / (float)w : 0.0f,
 			 horiz ? 0.0f : 1.0f / (float)h);
 	smooth_bind_int(fx, "rad", rad);
 	smooth_bind_float(fx, "invBox", 1.0f / (float)(2 * rad + 1));
+	smooth_bind_float(fx, "bilatK", bk);
+	smooth_bind_float(fx, "bilatYF", yF);
 
 	if (!smooth_rt_begin(rt, w, h))
 		return;
@@ -2016,19 +2349,22 @@ static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in
 	//    随后 (B,A) 交替，共 2·nPass 趟 → 最终落在 A（step 6 的 Comp 要读它）。
 	//    趟序逐趟等价：H(D), V, H, V, …；D 只被这一趟读过，此后不再当任何
 	//    渲染目标（step 5 的 amp 平滑才拿它做 ping-pong，那时 B1/B2 都算完了）。
-	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r1, true, in_tex);
+	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r1, true, in_tex,
+			       g_bilatK, g_bilatYF);
 	gs_texture_t *tex_b = gs_texrender_get_texture(f->sm_b);
 	if (!tex_b)
 		return NULL;
 	gs_texture_t *tex_a = NULL;
 	for (int i = 0; i < nPass; i++) {
-		smooth_box_pass(fx, f->sm_a, tex_b, ws, hs, r1, false, in_tex);
+		smooth_box_pass(fx, f->sm_a, tex_b, ws, hs, r1, false, in_tex,
+			       g_bilatK, g_bilatYF);
 		tex_a = gs_texrender_get_texture(f->sm_a);
 		if (!tex_a)
 			return NULL;
 		// 末趟必须落在 A，别再绕回 B —— 绕回去结果就在 B 里了
 		if (i + 1 < nPass) {
-			smooth_box_pass(fx, f->sm_b, tex_a, ws, hs, r1, true, in_tex);
+			smooth_box_pass(fx, f->sm_b, tex_a, ws, hs, r1, true, in_tex,
+			       g_bilatK, g_bilatYF);
 			tex_b = gs_texrender_get_texture(f->sm_b);
 			if (!tex_b)
 				return NULL;
@@ -2037,18 +2373,21 @@ static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in
 
 	// 3) B2：同样首趟 H 直接读 D 写 B，随后 (B,C) 交替 → 最终落在 C。
 	//    r2 > r1 保证 B2 确实比 B1 宽（上面已按 CPU 同一条约束纠过 w2）。
-	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r2, true, in_tex);
+	smooth_box_pass(fx, f->sm_b, tex_d, ws, hs, r2, true, in_tex,
+			       g_bilatK, g_bilatYF2);
 	tex_b = gs_texrender_get_texture(f->sm_b);
 	if (!tex_b)
 		return NULL;
 	gs_texture_t *tex_c = NULL;
 	for (int i = 0; i < nPass; i++) {
-		smooth_box_pass(fx, f->sm_c, tex_b, ws, hs, r2, false, in_tex);
+		smooth_box_pass(fx, f->sm_c, tex_b, ws, hs, r2, false, in_tex,
+			       g_bilatK, g_bilatYF2);
 		tex_c = gs_texrender_get_texture(f->sm_c);
 		if (!tex_c)
 			return NULL;
 		if (i + 1 < nPass) {
-			smooth_box_pass(fx, f->sm_b, tex_c, ws, hs, r2, true, in_tex);
+			smooth_box_pass(fx, f->sm_b, tex_c, ws, hs, r2, true, in_tex,
+			       g_bilatK, g_bilatYF2);
 			tex_b = gs_texrender_get_texture(f->sm_b);
 			if (!tex_b)
 				return NULL;
@@ -2068,11 +2407,11 @@ static gs_texture_t *beauty_gpu_smooth(struct beauty_filter *f, gs_texture_t *in
 
 	// 5) amp 的盒式平滑：(B,D) 交替 → 最终落在 B。D 到这里已经不被需要。
 	for (int i = 0; i < nPass; i++) {
-		smooth_box_pass(fx, f->sm_d, tex_b, ws, hs, ra, true, in_tex);
+		smooth_box_pass(fx, f->sm_d, tex_b, ws, hs, ra, true, in_tex, 0.0f, 0.0f);
 		gs_texture_t *td = gs_texrender_get_texture(f->sm_d);
 		if (!td)
 			return NULL;
-		smooth_box_pass(fx, f->sm_b, td, ws, hs, ra, false, in_tex);
+		smooth_box_pass(fx, f->sm_b, td, ws, hs, ra, false, in_tex, 0.0f, 0.0f);
 		tex_b = gs_texrender_get_texture(f->sm_b);
 		if (!tex_b)
 			return NULL;
@@ -2176,6 +2515,8 @@ static void beauty_gpu_smooth_selfcheck(struct beauty_filter *f, gs_texture_t *i
 	// mask_buf / protect_buf 本身就是连续单通道缓冲，set_image 一行就够。
 	gs_texture_set_image(f->skin_tex, f->mask_buf, cx, false);
 	gs_texture_set_image(f->eye_tex, f->protect_buf, cx, false);
+	// 方案 E：分割影子层的纹理上传（默认 BEAUTY_SEG=0 时是空操作）。
+	beauty_e_update();
 	f->hook_eye_zero = false;   // 诊断路径把 eye_tex 也写过了
 
 	gs_texture_t *gpu_tex = beauty_gpu_smooth(f, in_tex, cx, cy, &bp);
@@ -2302,6 +2643,7 @@ static void beauty_gpu_smooth_selfcheck(struct beauty_filter *f, gs_texture_t *i
 		f->gpu_smooth_broken = true;
 		blog(LOG_ERROR,
 		     "[" PLUGIN_NAME "] GPU 磨皮对拍失败，卸载磨皮钩子回退 CPU 磨皮");
+		beautyCoreBindSlot(f->slot);   // 3.0.0：只摘本实例的钩子
 		beautyCoreSetSmoothHook(NULL, NULL);
 	}
 
@@ -2480,6 +2822,7 @@ static bool beauty_smooth_hook(void *user, const unsigned char *src,
 		     "[" PLUGIN_NAME "] GPU 磨皮生产路径触发异常（疑似 device-lost），"
 		     "卸载磨皮钩子、本会话永久回退 CPU 磨皮；排查可设 "
 		     "BEAUTY_GPU_SMOOTH=1 跑对拍日志");
+		beautyCoreBindSlot(f->slot);   // 3.0.0：只摘本实例的钩子
 		beautyCoreSetSmoothHook(NULL, NULL);
 		return false;
 	}
@@ -2705,6 +3048,9 @@ static bool beauty_ensure_detail_rt(struct beauty_filter *f, uint32_t cx,
 
 // 色调 pass：in → chain_rt。掩码直接用磨皮准备段已经上传好的 skin_tex，
 // 不再单独传一份（诊断路径 beauty_gpu_tone 用的是 mask_tex，两者互不影响）。
+static bool beauty_readback_rgba(struct beauty_filter *f, gs_texture_t *tex,
+				 uint8_t *dst, uint32_t cx, uint32_t cy);
+
 static gs_texture_t *beauty_chain_tone(struct beauty_filter *f,
 				       gs_texture_t *in, uint32_t cx, uint32_t cy,
 				       float clarity, float whiten, float rosy)
@@ -2721,8 +3067,36 @@ static gs_texture_t *beauty_chain_tone(struct beauty_filter *f,
 	smooth_bind_float(fx, "clarity", clarity);
 	smooth_bind_float(fx, "whiten", whiten);
 	smooth_bind_float(fx, "rosy", rosy);
+	// 2026-11-05：与 CPU / 诊断路径同一个开关（色彩三段整帧施加）。
+	smooth_bind_float(fx, "toneGlobal", g_toneGlobal);
 	smooth_draw(fx, "ToneTech", in, cx, cy);
 	smooth_rt_end(f->chain_rt);
+
+	/* 2.15.7：同一帧把**色调输出**也落一份（`tone_<n>.rgba`）。
+	 * 与 `src_<n>.rgba` 相减就是「这一段到底改了哪些像素、边界什么形状」——
+	 * 掩码图只能看形状，看不出它落在画面的哪里、软硬如何。 */
+	if (f->mask_dump_want) {
+		const char *dd = getenv("BEAUTY_MASK_DUMP");
+		if (dd && dd[0]) {
+			const size_t np4 = (size_t)cx * cy * 4;
+			uint8_t *obuf = (uint8_t *)bmalloc(np4);
+			if (obuf) {
+				gs_texture_t *ot = gs_texrender_get_texture(f->chain_rt);
+				if (ot && beauty_readback_rgba(f, ot, obuf, cx, cy)) {
+					char op[600];
+					snprintf(op, sizeof(op), "%s/tone_%d_%ux%u.rgba",
+						 dd, f->mask_dump_n - 1, cx, cy);
+					FILE *of = fopen(op, "wb");
+					if (of) {
+						fwrite(obuf, 1, np4, of);
+						fclose(of);
+					}
+				}
+				bfree(obuf);
+			}
+		}
+		f->mask_dump_want = 0;
+	}
 
 	// 不要恢复投影（见 smooth_rt_begin 上方的说明）
 	return gs_texrender_get_texture(f->chain_rt);
@@ -3054,7 +3428,7 @@ static gs_texture_t *beauty_chain_warp_into(struct beauty_filter *f,
 		vec4_set(&va, g.cx, g.cy, g.halfW, g.eyeR);
 		vec4_set(&vb, g.eyeRx, g.eyeRy, g.eyeLx, g.eyeLy);
 		vec4_set(&vc, g.eyeAmp, g.thinYc, g.thinSig, g.thinK);
-		vec4_set(&vd, g.chinYm, g.chinSpan, g.chinK, 0.0f);
+		vec4_set(&vd, g.chinYm, g.chinSpan, g.chinK, g.chinKH);
 		vec4_set(&vr, (float)g.roi[0], (float)g.roi[1],
 			 (float)g.roi[2], (float)g.roi[3]);
 
@@ -3155,7 +3529,7 @@ static gs_effect_t *beauty_load_mask_effect(struct beauty_filter *f)
 		static const char *kNeed[] = {
 			"image", "size", "texel", "faceRect", "faceGeom",
 			"faceFe", "neckRect", "neckEll", "neckFe", "maskShape",
-			"skinEllipse", "eye0", "eye1"};
+			"skinEllipse", "eye0", "eye1", "faceRot"};
 		bool ok = true;
 		for (size_t i = 0; i < sizeof(kNeed) / sizeof(kNeed[0]); i++) {
 			if (!gs_effect_get_param_by_name(f->mask_fx, kNeed[i])) {
@@ -3231,6 +3605,28 @@ static bool beauty_ensure_mask_rt(struct beauty_filter *f, uint32_t cx,
 
 // 把一张脸的掩码画进 scratch：skin → rt_skin，eye → rt_eye。
 // 切片 1 只支持单脸（多脸时上层直接跳过对拍，不做 blend 合并）。
+// 2.15.3：沿用**上一帧画好的**掩码（RT 里还在）。
+//
+// 为什么可以：mask_rt_a/b 是持久 texrender，内容保留到下一次 begin。一帧陈旧的
+// 掩码最多让效果偏 1 帧（33ms），而整帧不认领是**闪一下** —— 用户对闪的容忍度
+// 远低于这点滞后。首次使用（RT 还从没画过）时返回 false，宿主照旧跳过。
+static bool beauty_mask_readback8(struct beauty_filter *f, gs_texture_t *tex,
+				  uint8_t *dst, uint32_t cx, uint32_t cy);
+static bool beauty_readback_rgba(struct beauty_filter *f, gs_texture_t *tex,
+				 uint8_t *dst, uint32_t cx, uint32_t cy);
+static bool beauty_mask_hold(struct beauty_filter *f)
+{
+	if (!f->mask_rt_a || !f->mask_rt_b)
+		return false;
+	gs_texture_t *a = gs_texrender_get_texture(f->mask_rt_a);
+	gs_texture_t *b = gs_texrender_get_texture(f->mask_rt_b);
+	if (!a || !b)
+		return false;
+	f->mask_skin_use = a;
+	f->mask_eye_use = b;
+	return true;
+}
+
 static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 				 uint32_t cx, uint32_t cy,
 				 const BeautyMaskDiag &md)
@@ -3243,13 +3639,16 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 
 	const BeautyMaskFace &g = md.faces[0];
 
-	struct vec4 vr, vg, vn, vne, vell, ve0, ve1, vezero;
+	struct vec4 vr, vg, vn, vne, vell, ve0, ve1, vezero, vrot;
 	vec4_zero(&vezero);
 	vec4_set(&vr, (float)g.x0, (float)g.y0, (float)g.x1, (float)g.y1);
 	vec4_set(&vg, g.cx, g.cy, g.a, g.b);
 	vec4_set(&vn, (float)g.nx0, (float)g.nyLo, (float)g.nx1,
 		 (float)g.nyHi);
-	vec4_set(&vne, g.neckA, g.neckB, g.neckCy, 0.0f);
+	// 2.15.0：z/w 是脖子中心的 y/x（转过的脖子上它不再等于 cx/y1）。
+	vec4_set(&vne, g.neckA, g.neckB, g.neckCy, g.neckCx);
+	// 2.15.0：脸的滚转角，椭圆的距离场在脸自己的局部系里算。
+	vec4_set(&vrot, g.rc, g.rs, 0.0f, 0.0f);
 	vec4_set(&vell, md.cb, md.cr, md.ru, md.rv);
 	vec4_set(&ve0, g.eye0x, g.eye0y, g.eyeW, g.eyeH);
 	vec4_set(&ve1, g.eye1x, g.eye1y, g.eyeW, g.eyeH);
@@ -3268,6 +3667,8 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 			gs_effect_set_vec4(p, &vn);
 		if ((p = gs_effect_get_param_by_name(fx, "neckEll")))
 			gs_effect_set_vec4(p, &vne);
+		if ((p = gs_effect_get_param_by_name(fx, "faceRot")))
+			gs_effect_set_vec4(p, &vrot);
 		if ((p = gs_effect_get_param_by_name(fx, "skinEllipse")))
 			gs_effect_set_vec4(p, &vell);
 		// hasEyes == 0 时把两个椭圆设成退化尺寸（rx=0）：shader 里 <0.5 直接
@@ -3289,6 +3690,81 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 	bind_all();
 	smooth_draw(fx, "MaskSkinTech", src, cx, cy);
 	smooth_rt_end(f->mask_rt_a);
+
+	/* 2.15.6：可选的掩码落盘（`BEAUTY_MASK_DUMP=<目录>`）。
+	 *
+	 * 为什么需要它：这几轮的症状「矩形边界 / 椭圆边界 / 皮肤边界」只靠日志里的
+	 * 数字判断不了 —— 一张 1:1 的 8-bit 掩码图直接给出答案。默认关，最多写 5 张，
+	 * 每约 3 秒一张（`frame_tag % 90`），所以对帧率没有影响。 */
+	{
+		const char *dd = getenv("BEAUTY_MASK_DUMP");
+		if (dd && dd[0] && f->mask_dump_n < 5 && (f->frame_tag % 90) == 0) {
+			const size_t np = (size_t)cx * cy;
+			uint8_t *buf = (uint8_t *)bmalloc(np);
+			if (buf) {
+				gs_texture_t *mt = gs_texrender_get_texture(f->mask_rt_a);
+				if (mt && beauty_mask_readback8(f, mt, buf, cx, cy)) {
+					/* 2.15.7：同帧把**输入画面**也落一份 RGBA，这样「改了哪些像素」
+					 * 可以直接算出来（掩码图只看得到形状，看不到它到底作用在哪）。 */
+					{
+						const size_t np4 = np * 4;
+						uint8_t *sbuf = (uint8_t *)bmalloc(np4);
+						if (sbuf) {
+							if (beauty_readback_rgba(f, src, sbuf, cx, cy)) {
+								char sp[600];
+								snprintf(sp, sizeof(sp), "%s/src_%d_%ux%u.rgba",
+									 dd, f->mask_dump_n, cx, cy);
+								FILE *sf = fopen(sp, "wb");
+								if (sf) {
+									fwrite(sbuf, 1, np4, sf);
+									fclose(sf);
+								}
+							}
+							bfree(sbuf);
+						}
+					}
+					char nm[64];
+					snprintf(nm, sizeof(nm), "gpu_skin_%d", f->mask_dump_n);
+					beauty_mask_dump(dd, nm, buf, cx, cy);
+					char tp[600];
+					snprintf(tp, sizeof(tp), "%s/%s_%ux%u.txt", dd, nm, cx, cy);
+					FILE *fp = fopen(tp, "wb");
+					if (fp) {
+						fprintf(fp,
+							"shape=%d count=%d cx=%.1f cy=%.1f a=%.1f b=%.1f "
+							"rc=%.4f rs=%.4f lw=%.1f lh=%.1f fe=%d feNeck=%d "
+							"neckA=%.1f neckB=%.1f\n",
+							(int)md.shape, md.count,
+							md.count > 0 ? md.faces[0].cx : 0.0f,
+							md.count > 0 ? md.faces[0].cy : 0.0f,
+							md.count > 0 ? md.faces[0].a : 0.0f,
+							md.count > 0 ? md.faces[0].b : 0.0f,
+							md.count > 0 ? md.faces[0].rc : 1.0f,
+							md.count > 0 ? md.faces[0].rs : 0.0f,
+							md.count > 0 ? md.faces[0].lw : 0.0f,
+							md.count > 0 ? md.faces[0].lh : 0.0f,
+							md.count > 0 ? md.faces[0].fe : 0,
+							md.count > 0 ? md.faces[0].feNeck : 0,
+							md.count > 0 ? md.faces[0].neckA : 0.0f,
+							md.count > 0 ? md.faces[0].neckB : 0.0f);
+						fclose(fp);
+					}
+					f->mask_dump_n++;
+					f->mask_dump_want = 1;
+					blog(LOG_INFO,
+					     "[" PLUGIN_NAME "] 掩码已落盘：%s/%s_%ux%u.raw "
+					     "（shape=%d count=%d a=%.1f b=%.1f rc=%.3f rs=%.3f fe=%d）",
+					     dd, nm, cx, cy, (int)md.shape, md.count,
+					     md.count > 0 ? md.faces[0].a : 0.0f,
+					     md.count > 0 ? md.faces[0].b : 0.0f,
+					     md.count > 0 ? md.faces[0].rc : 1.0f,
+					     md.count > 0 ? md.faces[0].rs : 0.0f,
+					     md.count > 0 ? md.faces[0].fe : 0);
+				}
+				bfree(buf);
+			}
+		}
+	}
 
 	if (!smooth_rt_begin(f->mask_rt_b, cx, cy))
 		return false;
@@ -3388,6 +3864,12 @@ static bool beauty_readback_rgba(struct beauty_filter *f, gs_texture_t *tex,
 		return false;
 	if (gs_texture_get_width(tex) != cx || gs_texture_get_height(tex) != cy)
 		return false;
+	// stage 的尺寸也必须与本次 cx/cy 相符。只比 tex 是不够的：gs_stage_texture
+	// 尺寸不符会失败（这里不检查返回值），之后按新的 cy 去 map 旧 surface 的行，
+	// 就是越界读。触发面很窄（需同时换分辨率 + 开诊断回读），但代价是一行。
+	if (gs_stagesurface_get_width(f->mask_stage) != cx ||
+	    gs_stagesurface_get_height(f->mask_stage) != cy)
+		return false;
 	gs_stage_texture(f->mask_stage, tex);
 	uint8_t *ptr = NULL;
 	uint32_t linesize = 0;
@@ -3412,6 +3894,12 @@ static bool beauty_mask_readback8(struct beauty_filter *f, gs_texture_t *tex,
 	if (!tex || !f->mask_stage || !dst)
 		return false;
 	if (gs_texture_get_width(tex) != cx || gs_texture_get_height(tex) != cy)
+		return false;
+	// stage 的尺寸也必须与本次 cx/cy 相符。只比 tex 是不够的：gs_stage_texture
+	// 尺寸不符会失败（这里不检查返回值），之后按新的 cy 去 map 旧 surface 的行，
+	// 就是越界读。触发面很窄（需同时换分辨率 + 开诊断回读），但代价是一行。
+	if (gs_stagesurface_get_width(f->mask_stage) != cx ||
+	    gs_stagesurface_get_height(f->mask_stage) != cy)
 		return false;
 	gs_stage_texture(f->mask_stage, tex);
 	uint8_t *ptr = NULL;
@@ -3708,6 +4196,7 @@ static void beauty_region_upload_els(struct beauty_filter *f,
 		B[3] = e.feather;
 		float *C = pb + (size_t)(i * 3 + 2) * 4;
 		C[0] = e.shade;
+		C[1] = e.dome;   // 0 = 旧式平顶羽化（feather 生效）；>0 = 钟形衰减
 	}
 	gs_texture_set_image(f->region_param, (const uint8_t *)pb, 64 * 16,
 			     false);
@@ -4146,11 +4635,39 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 				 mg.count == 1 && !(mg.shape & 4);
 
 	gs_texture_t *ring = NULL;
-	if (gpu_mask_ok && f->gpu_ring_ok)
+	/* 2.15.2：这里**不能**再要求 gpu_mask_ok。
+	 *
+	 * 为什么：ring 是「本帧那张全帧纹理」，缩略图帧的 job.src 是**上一帧的旧像素**，
+	 * 所以缩略图帧必须靠 ring 才能把画面喂给链 —— 这与「掩码是 GPU 画的还是 CPU 画的」
+	 * 毫无关系。原来的 `gpu_mask_ok && gpu_ring_ok` 会在 gpu_mask_ok 短暂为 0 的帧上
+	 * （多脸 / 掩码不新鲜 —— 用户 2026-11-04 20:0x 的日志里就是 count=2、gpu_mask_ok=0）
+	 * 直接跳过整帧：那一帧**没有任何美颜**，于是画面一闪。脸越近 → 掩码越慢 → gpu_mask_ok
+	 * 掉 0 的帧越密 → 闪得越勤，正是用户说的「脸离镜头越近，闪动频率越高」。
+	 *
+	 * 环只在 gpu_ring_ok 时存在（它本身已经绑定 gpu_mask_chain），所以放开这一条不会
+	 * 引入新的资源依赖。 */
+	if (f->gpu_ring_ok)
 		ring = beauty_ring_get(f, job.srcTag);
 	/* S4b：缩略图帧的 job.src 是**上一帧的旧像素**（本帧没有回读全帧）。
 	 * 环没命中时绝不能落到 beauty_hook_prepare 的「从 job.src 上传」那条路 ——
 	 * 那会把上一帧的画面送进链，动态场景直接错帧。整帧不认领，让宿主跳过。 */
+	/* 2.15.5：**掩码比帧环老**时不要再整帧丢弃。
+	 *
+	 * 用户日志（2026-11-04 20:19 会话）：
+	 *   `找不到 tag=2506 的纹理｜环=2508/2509/2510 frame_tag=2510 …`
+	 * —— 掩码的来源帧比当前帧老 **4 帧**，而帧环只有 3 个槽，那一帧早被挤掉了。
+	 * 掩码本来就会复用（检测每 N 帧才提交一次），N 一变大就必然出现这个差。
+	 *
+	 * 处置：退回**当前帧**的纹理继续画 —— 这就是非缩略图路径一直在用的
+	 * 「当前帧 + 旧掩码」语义（代码里写得很清楚：停顿一次比一帧淡边更显眼）。
+	 * 掩码最多老几帧，而丢一帧是**完全没有美颜**，用户看到的就是「遮罩闪一下」。
+	 * 真正取不到当前帧纹理时才跳过（那说明帧环本身没建起来）。
+	 */
+	if (f->thumb_frame && !ring && f->gpu_ring_ok) {
+		ring = beauty_ring_get(f, f->frame_tag);
+		if (ring)
+			f->an_thumblate++;   // 计数：掩码比帧环老、但已用当前帧兜住
+	}
 	if (f->thumb_frame && !ring) {
 		f->an_thumbskip++;
 		if (!f->thumb_skip_logged) {
@@ -4244,32 +4761,73 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	if (gpu_mask_ok) {
 		if (!beauty_gpu_mask_into(f, in, cx, cy, mg)) {
 			// S4a（2.6.0）：本帧引擎只给了几何，**没有 CPU 掩码可以退**。
-			// 整帧跳过处理（原样输出）—— 宁可这一帧不美颜，也绝不能
-			// 按「无掩码 = 全皮肤」把整张画面磨掉。计数进 an_geomskip。
-			if (geom_only) {
-				f->an_geomskip++;
-				obs_source_skip_video_filter(f->context);
+			// 2.15.3：但 RT 里还留着**上一帧画好的**掩码 —— 沿用一小会儿，
+			// 比整帧不美颜好（后者就是用户看到的「遮罩闪一下」）。
+			if (geom_only && beauty_mask_hold(f)) {
+				f->an_geomhold++;
+			} else {
+				if (geom_only) {
+					f->an_geomskip++;
+					obs_source_skip_video_filter(f->context);
+				}
+				return 0;   // 画不出来就整帧交回 CPU（画面正确，只是慢一帧）
 			}
-			return 0;   // 画不出来就整帧交回 CPU（画面正确，只是慢一帧）
-		}
-		f->mask_skin_use = gs_texrender_get_texture(f->mask_rt_a);
-		f->mask_eye_use = gs_texrender_get_texture(f->mask_rt_b);
-		if (geom_only)
-			f->an_geomonly++;   // S4a：本帧用的是「几何 + GPU 重画」
-		if (!f->mask_skin_use || !f->mask_eye_use) {
-			if (geom_only) {
-				f->an_geomskip++;
-				obs_source_skip_video_filter(f->context);
+		} else {
+			f->mask_skin_use = gs_texrender_get_texture(f->mask_rt_a);
+			f->mask_eye_use = gs_texrender_get_texture(f->mask_rt_b);
+			if (geom_only)
+				f->an_geomonly++;   // S4a：本帧用的是「几何 + GPU 重画」
+			if (!f->mask_skin_use || !f->mask_eye_use) {
+				if (!(geom_only && beauty_mask_hold(f))) {
+					if (geom_only) {
+						f->an_geomskip++;
+						obs_source_skip_video_filter(f->context);
+					}
+					return 0;
+				}
+				f->an_geomhold++;
 			}
-			return 0;
 		}
 	} else if (geom_only) {
-		/* 防御分支：按上面的判据，geom_only 为真时 gpu_mask_ok 必然为真，
-		 * 这里理论上不可达（除非将来改了判据）。留着的理由与上一处相同：
-		 * 真走到这儿时，`job.mask == NULL` 会被当成全皮肤，必须拦住。 */
+		/* 2.15.3：原来这里必定整帧丢弃（注释说「理论上不可达」，但用户日志里
+		 * `gpu_mask_ok=0 geom_only=0 count=2` 说明判据会分叉）。多脸 / 掩码不新鲜时
+		 * 引擎仍可能只给几何；这时沿用 RT 里上一帧的掩码继续渲染，不要闪。 */
+		if (beauty_mask_hold(f)) {
+			f->an_geomhold++;
+		} else {
+			f->an_geomskip++;
+			obs_source_skip_video_filter(f->context);
+			return 0;
+		}
+	} else if (!job.mask && beautyCoreNoFaceSkip()) {
+		/* 2.15.4：**没有掩码就什么都别做**。
+		 *
+		 * 引擎的约定是 `mask == nullptr` 表示「全皮肤」，于是色调/磨皮会按 255 的权重
+		 * 整片刷一遍 —— 而它们只在 `bounds_`（上一份掩码的包围盒，一个矩形）里跑。
+		 * 两者一叠，画面上就是**一块被刷到过曝的矩形**（用户 2026-11-04 20:2x 的
+		 * 截图：歪头、脸怼镜头时，脸颊上一块死白、左边缘是一条硬直线）。
+		 * 宁可这一帧不美颜，也不能整片刷 —— 与上面 geom_only 那条同一个原则。 */
+		f->an_masknull++;
 		f->an_geomskip++;
 		obs_source_skip_video_filter(f->context);
 		return 0;
+	}
+
+	/* 2.15.4：一次性「掩码路径」快照。用户报「能看到一块矩形」时，这一行直接
+	 * 指出走的是哪条路（CPU 掩码 / GPU 掩码 / 沿用 / 没掩码），不用再猜。
+	 * 只打一次，零成本。 */
+	if (!f->mask_path_logged) {
+		f->mask_path_logged = 1;
+		blog(LOG_INFO,
+		     "[" PLUGIN_NAME "] 掩码路径：mask=%s geomOnly=%d gpuMask=%d "
+		     "count=%d shape=%d fresh=%d roi=%d,%d,%d,%d",
+		     job.mask ? "cpu" : (f->mask_skin_use ? "gpu" : "none"),
+		     job.maskGeomOnly ? 1 : 0, gpu_mask_ok ? 1 : 0,
+		     mg.count, (int)mg.shape, (int)mg.fresh,
+		     mg.count > 0 ? mg.faces[0].x0 : 0,
+		     mg.count > 0 ? mg.faces[0].y0 : 0,
+		     mg.count > 0 ? mg.faces[0].x1 : 0,
+		     mg.count > 0 ? mg.faces[0].y1 : 0);
 	}
 
 	// ==== 4d：五官椭圆族的对拍（一次性，纯诊断）=========================
@@ -4280,6 +4838,33 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 
 	const double t_draw0 = beauty_now_ms();
 	BeautyBandDiag cp = job.band;
+	// 2026-11-05：磨皮生效参数的一次性取证 + 缺失保护。
+	//
+	// 现象（用户实测）：磨皮拉满后重启 OBS，磨皮无效（美白/红润正常），
+	// 来回拖一下磨皮滑块才恢复。机理上只有一种可能 —— 引擎这一帧没给出
+	// band 参数（`bandValid_` 为假 → `job.band` 全 0），而这里**无条件**认领
+	// 了 SMOOTH，于是 Comp 用 gI=0 原样输出、引擎又因「已被认领」不补 CPU
+	// 磨皮 —— 这一帧就真的没有磨皮，而且画面上看不出任何异常。
+	// 所以档位>0 而 I=0 时必须交回 CPU：慢一点，但画面是对的。
+	if (!f->band_logged) {
+		f->band_logged = true;
+		blog(LOG_INFO,
+		     "[obs-beauty] 磨皮参数：I=%.3f e=%.3f T=%.2f gwp=%.2f "
+		     "passes=%d f1=%.3f f2=%.3f fa=%.3f halfRes=%d | "
+		     "面板档位=%.0f blur_type=%d",
+		     cp.I, cp.e, cp.T, cp.gwp, cp.passes, cp.f1, cp.f2, cp.fa,
+		     cp.halfRes, f->v[BEAUTY_IDX_BLUR], f->blur_type);
+	}
+	if (cp.I <= 0.0f && f->v[BEAUTY_IDX_BLUR] > 0.5) {
+		if (!f->band_zero_logged) {
+			f->band_zero_logged = true;
+			blog(LOG_WARNING,
+			     "[obs-beauty] 磨皮档位=%.0f 但引擎给的 band.I=%.3f"
+			     "（T=%.2f passes=%d）→ 本帧交回 CPU 磨皮（画面正确）",
+			     f->v[BEAUTY_IDX_BLUR], cp.I, cp.T, cp.passes);
+		}
+		return 0;
+	}
 	// 诊断覆盖（默认关）：把趟数锁死，量「趟数 → 耗时」斜率用。见
 	// beauty_smooth_passes_force() 上方的说明。放在这里而不是引擎里的原因：
 	// GPU draw 与 CPU 对拍基准都从这里取 cp，覆盖一次两边一致。
@@ -4334,8 +4919,31 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	if ((job.flags & BEAUTY_SEG_DETAIL) && !region_blocks && tone_ok) {
 		const bool hist_reset = !f->det_hist_ok;
 		const double t0 = beauty_now_ms();
+		/* ⚠ noMask 的判据不能只看 `job.mask`（3.1.65 修）。
+		 *
+		 * GPU 掩码链接管时，引擎走的是 geomOnly 帧：它**故意不画 CPU 掩码**，
+		 * 于是 `job.mask` 必为 NULL，掩码改由宿主按几何重画到 skin 纹理上
+		 * （beauty_mask_skin，是一张真的、可用的 GS_R8）。
+		 *
+		 * 旧判据 `job.mask == NULL` 把这类帧一概当成「引擎没给掩码」，
+		 * 而 detail.hlsl 对 noMask=1 的语义是 `m = 0`（与磨皮相反，见那里的
+		 * 注释），于是 `fwF = m·dFine` 恒为 0 —— **脸内锐化 / 中频回填整段失效**，
+		 * 只剩 `fwG = (1−0)·dGFine` 的全局项还在动。
+		 *
+		 * 实测（真实 GPU 链，脸区，面板 100）：
+		 *   · 只开「锐化」       → 与关滤镜逐字节相同，**0 像素变化**（md5 一致）
+		 *   · 只开「全局锐化」   → 390 416 px / 42.4% 变化
+		 *   · 两个都开           → 与「只开全局」完全相同
+		 * 这就是用户说的「锐化拉满没效果」：他只拉面部锐化，而那一档被这条
+		 * 判据静默关掉了。
+		 *
+		 * 正确判据与宿主 gpu_mask_ok 同构，见 beauty_hook 里那句注释：
+		 * 「有掩码可用」= `job.mask || geomOnly`（几何也算一种掩码来源）。
+		 * 只有两者都不成立，才是真的这一帧没有任何掩码。 */
+		const bool no_mask_for_detail =
+			(job.mask == NULL) && (job.maskGeomOnly == 0);
 		gs_texture_t *t = beauty_chain_detail(f, in, cur, cx, cy,
-						      job.detail, job.mask == NULL,
+						      job.detail, no_mask_for_detail,
 						      hist_reset);
 		t_detail = beauty_now_ms() - t0;
 		if (t) {
@@ -5433,12 +6041,28 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 static void beauty_filter_render(void *data, gs_effect_t *effect)
 {
 	struct beauty_filter *f = (struct beauty_filter *)data;
+	if (!f)
+		return;
 	obs_source_t *target = obs_filter_get_target(f->context);
 	static int dbg = 0;
 
 	// 投影守卫必须在**所有** return 之前构造：下面每一个 obs_source_skip_video_filter
 	// 都会让父源用当前投影自己画一遍，投影被改坏就同样会放大。
 	beauty_projection_guard proj_guard;
+
+	// 3.0.1：早退判断提到「绑定槽」之前。旧实现先 beautyCoreBindSlot(f->slot)，
+	// 失败实例 slot=-1 被 clamp 成 0，紧接着 f->dirty 分支的
+	// beautyEngine().setDetectOptions() 就把 UI 参数下发到了主机位引擎。
+	// 直通实例不绑槽、不碰引擎；t_slot 保持原值也无害（后面没有引擎调用）。
+	if (!f->enabled || f->slot < 0 || !target) {
+		obs_source_skip_video_filter(f->context);
+		return;
+	}
+
+	// 3.0.0：每帧入口绑定本实例的槽。OBS 在同一图形线程里顺序渲染多个滤镜，
+	// 不绑的话 t_slot 会停在上一个实例的槽，本帧所有 setter / process / 钩子
+	// 都会写进别人的上下文 —— 这正是两个机位互相串扰的机理。
+	beautyCoreBindSlot(f->slot);
 
 	// 进程级检测选项（识别模式 / 人物个数）。这两个 setter 在引擎里
 	// 是进程全局的，只能从渲染线程调；UI 线程只置脏。
@@ -5452,11 +6076,6 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		     "（conf=%.2f）",
 		     f->max_faces, f->landmark_q ? "高精度" : "标准",
 		     f->landmark_q ? 0.45 : 0.60);
-	}
-
-	if (!f->enabled || f->slot < 0 || !target) {
-		obs_source_skip_video_filter(f->context);
-		return;
 	}
 
 	const uint32_t cx = obs_source_get_base_width(target);
@@ -5490,6 +6109,15 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			f->tick_max = f->tick_cur;
 	}
 
+	// 方案 E / P0：分割影子层每帧查一次有没有新结果。没有新结果时是空操作
+	// （先用 seq 判，不白拷 1 MB）。
+	//
+	// 2026-11-05 修：这里原来**没有**这个调用 —— beauty_e_update 只写在
+	// beauty_gpu_smooth_selfcheck 里，而自检只跑启动那一次，那时分割还没出
+	// 第一帧结果，于是 segTex 永远是 1×1 白纹理，segMix 拨到多少都没效果。
+	// 现象很隐蔽：日志一切正常、BEAUTY_SEG=1 也报"已就绪"，就是不生效。
+	beauty_e_update();
+
 	if (dbg < 3) {
 		blog(LOG_INFO, "[" PLUGIN_NAME "] render#%d target=%s %ux%u (v%s, slot=%d)", dbg,
 		     obs_source_get_name(target), cx, cy, PLUGIN_VERSION, f->slot);
@@ -5521,6 +6149,29 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			// 是 3.1.52 就写好的（见 process 之后那段注释），这里不必额外
 			// 清 det_hist，否则反而会多丢一帧的 EMA 历史。
 		}
+	}
+
+	/* 2026-11-05 16:1x 的 §9.56 补丁：钩子原本是进程级全局，两个滤镜实例里
+	 * 后 create 的那个会把 user 覆盖掉，于是先渲染的机位拿到别人的 f，GPU
+	 * 磨皮链用别人的 stage / 中间 RT / 面板参数，输出不落回本实例的 buf_out。
+	 * 当时的修法是「每帧 process() 之前按当前实例重挂一次」。
+	 *
+	 * 3.0.0：钩子已按 slot 各存一份（beauty_core.cpp 的 SlotState），加上本函数
+	 * 入口的 beautyCoreBindSlot()，user 不会再跨实例串。这段代码**仍然保留**：
+	 * chain_ab 每 180 帧切臂、gpu_smooth_broken 永久卸载、以及 OBS 可能重排
+	 * 渲染顺序，都需要一个「以本帧实际配置为准」的收敛点。每帧两次指针赋值
+	 * 可忽略；gpu_smooth_broken 的语义由该标志守住，不会被重挂撤销。 */
+	if (f->chain_prod) {
+		beautyCoreSetChainHook(beauty_chain_hook, f);
+		beautyCoreSetSmoothHook(f->gpu_smooth_broken ? NULL : beauty_smooth_hook,
+					f->gpu_smooth_broken ? NULL : f);
+	} else if (f->gpu_smooth_prod) {
+		beautyCoreSetChainHook(NULL, NULL);
+		beautyCoreSetSmoothHook(f->gpu_smooth_broken ? NULL : beauty_smooth_hook,
+					f->gpu_smooth_broken ? NULL : f);
+	} else {
+		beautyCoreSetChainHook(NULL, NULL);
+		beautyCoreSetSmoothHook(NULL, NULL);
 	}
 
 	// (re)allocate on size change
@@ -5697,10 +6348,43 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	 * 就会「试一帧 → 跳过 → 回退全帧 → 再试」，画面每两帧掉一帧。 */
 	int mkpx0 = -1, mkfaces0 = 0;
 	beautyCoreMaskStat(&mkpx0, &mkfaces0);
+	/* 2.15.8：**磨皮=0 但色彩层非 0** 时，每约 2 秒打一行「引擎到底有没有掩码」。
+	 *
+	 * 用户 2026-11-04 20:3x 报「磨皮=0 时美白/清晰/红润完全不生效」。引擎侧的代码
+	 * 是「只要 wantTone 就一定会跑色调」（色调在 `if (t>0)` 之外，离线也验证过
+	 * blur=0 时 7.5% 像素被改），所以那一刻只可能是**没有掩码**（掩码为 0 时
+	 * 色调乘 0 = 什么都不改）或**走了别的分支**。这一行把这两个数直接打出来。 */
+	if (f->v[P_BLUR] <= 0.0 && (f->v[P_WHITEN] > 0.0 || f->v[P_CLARITY] > 0.0 ||
+				    f->v[P_RED] > 0.0)) {
+		const uint64_t nf = obs_get_total_frames();
+		if (nf - f->color_only_at >= 60) {
+			f->color_only_at = nf;
+			blog(LOG_INFO,
+			     "[" PLUGIN_NAME "] 仅色彩层：磨皮=0 清晰=%.0f 美白=%.0f "
+			     "红润=%.0f｜引擎掩码 px=%d 有脸=%d 无脸帧=%llu "
+			     "gpu_smooth=%d chain=%d",
+			     f->v[P_CLARITY], f->v[P_WHITEN], f->v[P_RED],
+			     mkpx0, mkfaces0,
+			     (unsigned long long)beautyCoreNoFaceFrames(),
+			     f->gpu_smooth_prod ? 1 : 0, f->chain_prod ? 1 : 0);
+		}
+	}
+	/* 2.15.0：引擎判定「面板这一档方向检不到脸、已改用 0°」时，缩略图不能再按
+	 * 面板值转 —— 转过一次的图是错的，检测会永远失败（于是美颜整段消失）。
+	 * 这时停用缩略图、改走全帧路径：那边引擎自己按有效方向做旋转重采样。 */
+	const bool rot_match = (f->input_rot == beautyCoreEffectiveRot());
+	/* 2.15.9：**磨皮=0 时不要走缩略图路径**。
+	 *
+	 * 为什么：段区间钩子只在 `t > 0`（磨皮>0）时被调用；磨皮=0 时它一段都不认领，
+	 * 而缩略图帧**没有全帧像素**、链尾又不回读（`chain_out=1`），于是只能整帧跳过
+	 * —— 用户看到的就是「磨皮=0 时美白/清晰/红润完全不生效」。日志里的
+	 * `缩略图帧没被全认领：chain_claim=0x0 chain_out=1 → 本帧跳过` 正是它。
+	 * 磨皮=0 时改走全帧回读（只是每帧多一次下载），色彩层就由 CPU 正常执行。 */
+	const bool thumb_blur_ok = (f->v[P_BLUR] > 0.0);
 	const bool want_thumb = f->detect_small && f->gpu_mask_chain &&
 				f->gpu_ring_ok && f->thumb_prev_ok &&
 				!f->stage_async && !f->mirror && f->verified &&
-				mkfaces0 == 1;
+				mkfaces0 == 1 && rot_match && thumb_blur_ok;
 	f->thumb_frame = false;
 	f->nopix_frame = false;   // 2.11.0（方案C）：每帧复位，见下方两段式分支
 	// S4b 一次性判据快照：缩略图路径「为什么会/不会生效」只看这一行。
@@ -6166,7 +6850,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     " 对齐 %llu/%llu（%.0f%%）边框 %s ab=%s"
 			     " tick=%llu/%llu dup=%d"
 			     " anom=nofresh%u/masknull%u/histrst%u/claimdrop%u"
-			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u tsm=%u tskip=%u tdl=%.2f"
+			     " dlw=%.2f dlm=%.2f gonly=%u gskip=%u ghold=%u tsm=%u tskip=%u tlate=%u tdl=%.2f"
 			     " dper=%u dmot=%d",
 			     cx, cy, dl, pr, up, dl + pr + up, f->prof_frames,
 			     f->prof_cover * 100.0 / n,
@@ -6178,14 +6862,14 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     f->an_nofresh, f->an_masknull, f->an_histrst,
 			     f->an_claimdrop,
 			     f->prof_dl_wait / n, f->prof_dl_copy / n,
-			     f->an_geomonly, f->an_geomskip,
-			     f->an_thumb, f->an_thumbskip, f->prof_dl_thumb / n,
+			     f->an_geomonly, f->an_geomskip, f->an_geomhold,
+			     f->an_thumb, f->an_thumbskip, f->an_thumblate, f->prof_dl_thumb / n,
 			     f->dper_max, f->dmot_max);
 			// 打印完清零，下一窗口重新统计
 			f->an_nofresh = f->an_masknull = 0;
 			f->an_histrst = f->an_claimdrop = 0;
-			f->an_geomonly = f->an_geomskip = 0;
-			f->an_thumb = f->an_thumbskip = 0;
+			f->an_geomonly = f->an_geomskip = f->an_geomhold = 0;
+			f->an_thumb = f->an_thumbskip = f->an_thumblate = 0;
 			f->dper_max = 0;
 			f->dmot_max = 0;
 			f->prof_dl_thumb = 0.0;
@@ -6515,8 +7199,10 @@ static void obs_module_unload(void)
 {
 	// 释放引擎 / GL / 语义区域资源。滤镜实例此时已被 OBS 全部销毁
 	// （source info 的 destroy 先于模块卸载），槽位都已归还。
-	beautyEngine().release();
-	blog(LOG_INFO, "[" PLUGIN_NAME "] engine released");
+	// 3.0.0：旧实现只 release 当前 t_slot 指向的那一个引擎，多实例下其余
+	// 引擎的异步 worker 会一直活到进程退出。这里统一遍历所有建过的槽。
+	beautyCoreReleaseAllEngines();
+	blog(LOG_INFO, "[" PLUGIN_NAME "] all engine slots released");
 }
 
 MODULE_EXPORT const char *obs_module_description(void);
@@ -6570,6 +7256,11 @@ bool obs_module_load(void)
 		msg += std::to_string(e.ownerThread());
 		msg += ")";
 		blog(LOG_INFO, "[" PLUGIN_NAME "] %s", msg.c_str());
+		// 2.15.1：掩码几何快照。用户报「能看到长方形遮罩」时，第一个要看的就是
+		// 这一行 —— shape 是 `BEAUTY_MASK_SHAPE` 可覆盖的，面板上看不出来。
+		blog(LOG_INFO, "[" PLUGIN_NAME "] 掩码几何：%s（BEAUTY_MASK_SHAPE / "
+			       "BEAUTY_MASK_ROLL 可覆盖）",
+		     beautyCoreMaskConfig());
 		// C20：皮肤判据快照。真机「磨皮没效果」的头号原因是肤色掩码被白平衡
 		// 压低（实测真机帧掩码只剩 34%），而这一点光看画面看不出来。打一行
 		// 让用户能自查自适应有没有开、椭圆中心在哪。

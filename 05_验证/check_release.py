@@ -17,13 +17,19 @@
     py -3 05_验证/check_release.py --no-installed # 跳过「装机 vs 构建」比对
     py -3 05_验证/check_release.py --json out.json
 
-六项检查（每项独立判定，互不掩盖）:
+检查项（每项独立判定，互不掩盖）:
     1. 版本单源    01_源码/beauty_params.h 的 BEAUTY_BUILD_STR 能被解析
     2. 构建产物    02_构建/obs-beauty.dll 里**真的有**这个版本字符串（不是靠文件名猜）
     3. 装机        装机 dll 与构建 dll 逐字节相同
     4. 安装包      07_安装包/obs-beauty.dll 与构建 dll 逐字节相同
     5. 着色器      源码 / 安装包 / 装机 / solo 目录 四份 6 个 .hlsl 全部逐字节相同
     6. 开关表      开关总表.md ⊆ 源码 getenv()，且「源码有、表里没有、别的文档提到」= 0
+    7. 安装路径    setup.cpp 的 plug/shad 必须由 %PROGRAMDATA% 插件根派生（3.0.1 修 N13 第二种形态）
+    8. 安装包版本串 Setup.exe 内真的含当前版本（ASCII / UTF-16LE）
+    9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 6 个 shader，与 07_安装包 payload 逐字节相同
+
+    7-9 是 3.0.1 新增：3.0.0 时 Setup.exe 只被检查「文件存在」，于是它装到
+    Program Files 旧目录（OBS 32.x 根本不加载）也能一路 9 PASS 发布出去。
 
 为什么第 2 项要看二进制内容而不是 `dll_version()`：
     撞版本号是最常见的翻车方式 —— 源码 bump 了，但编译命令没重跑，dll 还是旧的，
@@ -227,6 +233,102 @@ def check_switches():
             % len(src - tbl))
 
 
+# ------------------------------------------- 7/8/9. Setup.exe 路径与内嵌载荷
+SETUP_EXE = os.path.join(ROOT, "07_安装包", "Setup.exe")
+SETUP_CPP = os.path.join(ROOT, "07_安装包", "setup.cpp")
+# setup.rc 的资源 id -> 文件名（顺序与 rc 保持一致）
+SETUP_RCDATA = {
+    101: "obs-beauty.dll",
+    201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
+    204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
+}
+
+
+def read_setup_resources():
+    """只把 Setup.exe 当数据文件读，不执行它；返回 {id: bytes} 或 None。"""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p,
+                                 ctypes.c_uint32]
+    k.LoadLibraryExW.restype = ctypes.c_void_p
+    k.FindResourceW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                ctypes.c_void_p]
+    k.FindResourceW.restype = ctypes.c_void_p
+    k.SizeofResource.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    k.SizeofResource.restype = ctypes.c_uint32
+    k.LoadResource.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    k.LoadResource.restype = ctypes.c_void_p
+    k.LockResource.argtypes = [ctypes.c_void_p]
+    k.LockResource.restype = ctypes.c_void_p
+    k.FreeLibrary.argtypes = [ctypes.c_void_p]
+    mod = k.LoadLibraryExW(SETUP_EXE, None, 0x2)  # LOAD_LIBRARY_AS_DATAFILE
+    if not mod:
+        return None
+    try:
+        out = {}
+        for rid in SETUP_RCDATA:
+            r = k.FindResourceW(mod, rid, 10)     # 10 = RT_RCDATA
+            if not r:
+                return None
+            sz = k.SizeofResource(mod, r)
+            g = k.LoadResource(mod, r)
+            p = k.LockResource(g) if g else None
+            if not p or not sz:
+                return None
+            out[rid] = ctypes.string_at(p, sz)
+        return out
+    finally:
+        k.FreeLibrary(mod)
+
+
+def check_setup(ver):
+    # (7) 路径：plug / shad 必须由 ProgramData 插件根派生，不能是旧布局
+    if not os.path.isfile(SETUP_CPP):
+        add("FAIL", "安装路径", "找不到 %s" % SETUP_CPP)
+    else:
+        t = read_text(SETUP_CPP)
+        ok = ("ProgramData" in t
+              and "obs-studio\\\\plugins\\\\obs-beauty" in t
+              and re.search(r"const std::wstring plug\s*=\s*root", t)
+              and re.search(r"const std::wstring shad\s*=\s*root", t))
+        if ok:
+            add("PASS", "安装路径",
+                "setup.cpp 的 plug/shad 由 %PROGRAMDATA%\\obs-studio\\plugins\\obs-beauty 派生，与装机脚本一致")
+        else:
+            add("FAIL", "安装路径",
+                "setup.cpp 仍指向 OBS 32.x 不加载的旧目录（或不再从 ProgramData 根派生）")
+
+    if not os.path.isfile(SETUP_EXE):
+        add("WARN", "安装包",
+            "缺 Setup.exe —— 发布前要跑 07_安装包/build_setup.ps1")
+        return
+
+    # (8) 版本串
+    check_build_contains(ver, SETUP_EXE, "安装包版本串", missing_level="WARN")
+
+    # (9) 内嵌 payload 与磁盘 payload 逐字节相同（N13 的真正闭环）
+    res = read_setup_resources()
+    if res is None:
+        add("FAIL", "安装包载荷",
+            "无法从 Setup.exe 读回 RCDATA 资源（文件损坏 / 非 Windows）")
+        return
+    bad = []
+    for rid, name in SETUP_RCDATA.items():
+        disk = (PKG_DLL if name == "obs-beauty.dll"
+                else os.path.join(ROOT, "07_安装包", "shaders", name))
+        if not os.path.isfile(disk):
+            bad.append("%s 磁盘副本缺失" % name)
+        elif hashlib.md5(res[rid]).hexdigest().upper() != md5(disk):
+            bad.append("%s 内嵌≠磁盘" % name)
+    if bad:
+        add("FAIL", "安装包载荷", "；".join(bad))
+    else:
+        add("PASS", "安装包载荷",
+            "Setup.exe 内嵌 dll + 6 个 shader 与 07_安装包 payload 逐字节相同")
+
+
 # ---------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -269,10 +371,7 @@ def main():
     check_shaders()
     check_switches()
 
-    for name in ("Setup.exe",):
-        p = os.path.join(ROOT, "07_安装包", name)
-        if not os.path.isfile(p):
-            add("WARN", "安装包", "缺 %s —— 发布前要跑 07_安装包/build_setup.ps1" % name)
+    check_setup(ver)
 
     # 报告 -------------------------------------------------------------
     w = max(len(r["item"]) for r in RESULTS) if RESULTS else 4

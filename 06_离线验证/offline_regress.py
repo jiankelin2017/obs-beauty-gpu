@@ -66,12 +66,44 @@ def find_model():
     return None
 
 
+def preload_ort():
+    """按**全路径**先把一份 onnxruntime.dll 装进进程。
+
+    为什么必须做：beauty_onnx.cpp 用 LoadLibraryA("onnxruntime.dll") 按名字加载，
+    Windows 的搜索顺序里 python.exe 所在目录排在 cwd 之前。机器上装了 pip 版
+    onnxruntime 时会被它抢先命中，版本不匹配就报
+    「requested API version [20] is not available」，然后引擎**静默降级**成
+    「无脸、全帧磨皮」—— 回归照跑、结果全绿，但掩码 / 祛斑 / 美形分支一次都
+    没被覆盖（2026-11-05 实测：faces=0，manifest 里明明写着 faces=1）。
+
+    顺序：pip 包自带的 capi/onnxruntime.dll（版本新，向下兼容 API 20）→
+    本目录的 onnxruntime.dll。谁先加载成功就用谁，后续按名字加载会复用同一模块。
+    """
+    cands = []
+    try:
+        import onnxruntime as _ort  # noqa: F401
+        cands.append(os.path.join(os.path.dirname(_ort.__file__),
+                                  "capi", "onnxruntime.dll"))
+    except Exception:
+        pass
+    cands.append(os.path.join(HERE, "onnxruntime.dll"))
+    for p in cands:
+        if not os.path.isfile(p):
+            continue
+        try:
+            ctypes.WinDLL(p)
+            return p
+        except OSError as e:
+            print("[warn] ORT 预加载失败 %s : %s" % (p, e), file=sys.stderr)
+    return None
+
+
 def load_dll():
     if not os.path.isfile(DLL_PATH):
         sys.exit("找不到 core_probe.dll —— 先跑 build_offline.bat 编译。")
-    # onnxruntime.dll 要在 DLL 同目录：引擎会用 selfDir() 指给 ORT。
-    if not os.path.isfile(os.path.join(HERE, "onnxruntime.dll")):
-        print("[warn] 本目录没有 onnxruntime.dll，人脸检测会加载失败"
+    got = preload_ort()
+    if got is None:
+        print("[warn] 找不到可用的 onnxruntime.dll，人脸检测会加载失败"
               "（引擎会降级成全帧磨皮，仍是合法的回归目标，但不再覆盖掩码分支）",
               file=sys.stderr)
 

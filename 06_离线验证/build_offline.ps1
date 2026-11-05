@@ -95,6 +95,7 @@ $engine = @(
     "beauty_pool.cpp",
     "beauty_region.cpp",
     "beauty_smooth.cpp",
+    "beauty_skinseg.cpp",
     "beauty_warp.cpp"
 )
 

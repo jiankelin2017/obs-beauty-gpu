@@ -71,7 +71,7 @@ void applyEllipses(unsigned char* dst, int w, int h,
     // ---- 预计算 + 并集包围盒 -------------------------------------------
     // 旋转后椭圆的轴对齐包围盒取外接圆半径 max(rx,ry)，宁可多扫几行也不错杀。
     struct E {
-        float cx, cy, rx, ry, cosT, sinT, gain, shade, feather;
+        float cx, cy, rx, ry, cosT, sinT, gain, shade, feather, dome;
     };
     std::vector<E> v((size_t)n);
     float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
@@ -91,6 +91,9 @@ void applyEllipses(unsigned char* dst, int w, int h,
         o.gain = e.gain;
         o.shade = clampf(e.shade, 0.0f, 1.0f);
         o.feather = clampf(e.feather, 0.0f, 0.95f);
+        o.dome = e.dome > 0.0f ? e.dome : 0.0f;
+        // 钟形路径用不到 feather：清零，免得旧式平台分支被误用
+        if (o.dome > 0.0f) o.feather = 0.0f;
         v[(size_t)used++] = o;
         const float r = (rx > ry) ? rx : ry;
         if (o.cx - r < bx0) bx0 = o.cx - r;
@@ -138,8 +141,17 @@ void applyEllipses(unsigned char* dst, int w, int h,
                     const float d2 = u * u + t2 * t2;
                     if (d2 >= 1.0f) continue;
                     const float d = sqrtf(d2);
-                    // 软边：内圈满强度，外圈 smoothstep 归零（避免硬边台阶）
-                    const float fall = 1.0f - smoothStep(e.feather, 1.0f, d);
+                    float fall;
+                    if (e.dome > 0.0f) {
+                        // 钟形：中心 1 → 边缘 0，导数在两端都为 0，没有平台拐点。
+                        // t = d（因为 a=0,b=1），smoothStep(0,1,d) = d²(3-2d)。
+                        const float t = d;
+                        const float v = 1.0f - t * t * (3.0f - 2.0f * t);
+                        fall = (e.dome == 1.0f) ? v : powf(v, e.dome);
+                    } else {
+                        // 旧式：内圈满强度，外圈 smoothstep 归零
+                        fall = 1.0f - smoothStep(e.feather, 1.0f, d);
+                    }
                     float g = e.gain * fall;
                     if (e.shade > 0.0f) g *= (1.0f - e.shade * (Y * (1.0f / 255.0f)));
                     acc += g;

@@ -129,7 +129,12 @@ bool OnnxModel::load(const char* path, std::string& err, int threads) {
     env_ = env;
 
     OrtSessionOptions* opts = nullptr;
-    A->CreateSessionOptions(&opts);
+    // 返回值必须查：失败时 opts 为 null，后面 set_* 全家都会解引用它。
+    if (A->CreateSessionOptions(&opts) != nullptr || !opts) {
+        err = "CreateSessionOptions 失败";
+        release();
+        return false;
+    }
     if (threads > 0) A->SetIntraOpNumThreads(opts, threads);
     A->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL);
 
@@ -157,6 +162,7 @@ bool OnnxModel::load(const char* path, std::string& err, int threads) {
     if (!readAll(path, blob)) {
         A->ReleaseSessionOptions(opts);
         err = std::string("读不到模型文件: ") + path;
+        release();   // 连同前面已建的 env_ 一起回收
         return false;
     }
 
@@ -166,6 +172,7 @@ bool OnnxModel::load(const char* path, std::string& err, int threads) {
     if (st != nullptr) {
         err = std::string("CreateSession 失败: ") + A->GetErrorMessage(st);
         A->ReleaseStatus(st);
+        release();   // 释放 env_；session_ 此时仍为 null
         return false;
     }
     session_ = sess;
@@ -206,7 +213,10 @@ bool OnnxModel::load(const char* path, std::string& err, int threads) {
 
     OrtMemoryInfo* mem = nullptr;
     if (A->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem) != nullptr) {
+        // 此时 session_ 已就位：留着它会让 run() 拿到空 memInfo_，
+        // CreateTensorWithDataAsOrtValue 直接吃 null。整体回退更安全。
         err = "CreateCpuMemoryInfo 失败";
+        release();
         return false;
     }
     memInfo_ = mem;
