@@ -1,7 +1,7 @@
 ---
 doc_type: guides
 title: 开发流程与优化计划
-version: 0.1.2
+version: 0.1.3
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -300,3 +300,4 @@ supersedes: 04_文档/开发流程与优化计划.md
 | [`../archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) | 证据总账（已归档，按 `§9.x` 检索） | 查某轮实测数字、踩坑经过 |
 | [`../design/design-mask-gpu.md`](../design/design-mask-gpu.md) 等 7 篇 | 分段设计稿（掩码 / 五官 / 输入旋转 / 运动判定 / 遮挡掩码 Draft / SDK 移植 Draft / 整帧美白）；逐篇路径见 [`../INDEX.md`](../INDEX.md) §1 | 改对应代码之前 |
 | [`../reference/reference-baseline.md`](../reference/reference-baseline.md) | 基线测量规程（历史参考） | 跑诊断 / 读日志 / 复算 |
+| [`../adr/adr-multi-instance-slots.md`](../adr/adr-multi-instance-slots.md) 等 4 篇 | 架构决策（多实例引擎槽 / ProgramData 安装路径 / 分割不用于遮挡 / CPU-GPU 共用 `faceGeom`）；逐篇路径见 [`../INDEX.md`](../INDEX.md) §1 | 改动相关架构之前 |

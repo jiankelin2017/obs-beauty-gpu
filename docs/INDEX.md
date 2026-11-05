@@ -1,7 +1,7 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.2
+version: 0.1.3
 last_updated: 2026-11-05
 applies_to: 3.0.1
 repo_baseline: bb4dfba
@@ -20,7 +20,7 @@ status: Active
 | 主题 | 路径 | 类型 | 状态 | 适用版本 | 维护人 | 最后核对 | 替代 / 归档 |
 |---|---|---|---|---|---|---|---|
 | 现状入口 | [`README.md`](README.md) | README | Active | 3.0.1 | Jian | 2026-11-05 | 替代根 `README.md`、`04_文档/README.md` |
-| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active（骨架） | 3.0.1 | Jian | 2026-11-05 | 批 4 并入 7 篇 `修复_*` |
+| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.0.1 | Jian | 2026-11-05 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
 | 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开关总表.md` |
@@ -35,6 +35,10 @@ status: Active
 | 遮挡感知掩码（Draft） | [`design/design-occlusion-mask.md`](design/design-occlusion-mask.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案D_遮挡感知掩码设计.md` |
 | SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
 | 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
+| 多实例引擎槽决策 | [`adr/adr-multi-instance-slots.md`](adr/adr-multi-instance-slots.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 3.0.0 / 3.0.1 决策；证据见 `CHANGELOG.md` |
+| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 3.0.1 决策；`Setup.exe` 端到端安装 / 卸载未实跑 |
+| 分割不用于遮挡决策 | [`adr/adr-seg-not-for-occlusion.md`](adr/adr-seg-not-for-occlusion.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 替代 `04_文档/结论_分割对手遮脸无效_20261105.md`（原文已归档） |
+| CPU/GPU 共用 faceGeom | [`adr/adr-cpu-gpu-same-mask.md`](adr/adr-cpu-gpu-same-mask.md) | adr | Active（归纳 · 待人工确认） | 3.0.1 | Jian | 2026-11-05 | 归纳自 3 篇修复记录，**非原始决策** |
 
 > 批 2 起上表全部为 Active；批 3 起 `design/` 7 篇纳入总表，其中方案 D / E 是
 > **Draft · 未接线**，不可作为当前实现依据。`05_验证/`、`06_离线验证/` 下的脚本与数据仍在原目录，文档只是归位。
@@ -46,6 +50,14 @@ status: Active
 | [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md) | 根 `PROGRESS.md` | 6263 行逐轮证据总账 / 流水账，正文冻结 | `README.md` / `CHANGELOG.md` |
 | [`archive/index-20261105.md`](archive/index-20261105.md) | `04_文档/README.md` | 严重失实：写 2.14.1、47 条开关、25 项清单（实际 3.0.1 / 63 条） | 本表 |
 | [`archive/plan-gpu-port-20261105.md`](archive/plan-gpu-port-20261105.md) | `04_文档/方案A_GPU移植开发计划.md` | GPU 移植立项规划书，进度数字为写作当时快照；正文冻结、7 条旧链接失效 | `guides/guide-development.md` / 本表 |
+| [`archive/changelog-src-sharpen-mask-20261105.md`](archive/changelog-src-sharpen-mask-20261105.md) | `04_文档/修复_GPU纯锐化掩码缺失_20261105.md` | 结论已并入 `CHANGELOG.md` 修复批次；正文冻结 | `CHANGELOG.md` |
+| [`archive/changelog-src-bilateral-p2-20261105.md`](archive/changelog-src-bilateral-p2-20261105.md) | `04_文档/修复_P2值域加权核_20261105.md` | 结论与「选 A 保持关闭」决策已并入；正文冻结 | `CHANGELOG.md` |
+| [`archive/changelog-src-threed-mach-band-20261105.md`](archive/changelog-src-threed-mach-band-20261105.md) | `04_文档/修复_五官立体白圈_20261105.md` | 结论已并入；正文冻结 | `CHANGELOG.md` |
+| [`archive/changelog-src-seg-sync-path-20261105.md`](archive/changelog-src-seg-sync-path-20261105.md) | `04_文档/修复_分割同步路径与segMix地雷_20261105.md` | 结论已并入；正文冻结 | `CHANGELOG.md` |
+| [`archive/changelog-src-mask-double-rotation-20261105.md`](archive/changelog-src-mask-double-rotation-20261105.md) | `04_文档/修复_掩码椭圆双重旋转_20261105.md` | 结论已并入；正文冻结 | `CHANGELOG.md` / `adr/adr-cpu-gpu-same-mask.md` |
+| [`archive/changelog-src-spot-chin-20261105.md`](archive/changelog-src-spot-chin-20261105.md) | `04_文档/修复_祛斑与下巴_20261105.md` | 结论与方案 A / C 决策已并入；正文冻结 | `CHANGELOG.md` |
+| [`archive/changelog-src-sharpen-threshold-20261105.md`](archive/changelog-src-sharpen-threshold-20261105.md) | `04_文档/修复_锐化阈值被覆盖_20261105.md` | 结论已并入；正文冻结 | `CHANGELOG.md` |
+| [`archive/conclusion-seg-occlusion-20261105.md`](archive/conclusion-seg-occlusion-20261105.md) | `04_文档/结论_分割对手遮脸无效_20261105.md` | 实测结论稿，已改写为 ADR；原文保留合成素材数据与三个待决策方向 | `adr/adr-seg-not-for-occlusion.md` |
 
 归档区另有：`05_验证/out/logs/*.md` 25 篇过程日志、`_回档备份_20261104_2249/` 快照（批 5 迁入）。
 
@@ -94,7 +106,7 @@ status: Active
 | 1 | G1/G2 骨架 + 入口 | **已落地**（commit `bb4dfba`） |
 | 2 | G3/G9 参考与工具 | **已落地**（commit `8deeaac`） |
 | 3 | G4/G5/G6 设计稿 | **已落地**（单独 commit） |
-| 4 | G7/G8 决策与变更 | 待执行 |
+| 4 | G7/G8 决策与变更 | **已落地**（单独 commit） |
 | 5 | G10 过程日志与回档快照归档 | 待执行 |
 | 6 | 防腐化机制建议 | 待输出 |
 
@@ -110,3 +122,5 @@ status: Active
   （归档日志含未入表内部旋钮，纳入会制造假 FAIL）。
 - `design/` 中的 Draft 稿不扩 `status` 枚举：仍写 `Active`，但文首必须醒目标注
   「**Draft · 未接线，不可作为当前实现依据**」，并写明适用条件与失效说明。
+- `adr/` 命名 `adr-<主题>.md`，**不带日期**，一事一篇。归纳性而非原始决策的 ADR
+  必须在头部标注「归纳、待人工确认」，不得冒充已接受决策。
