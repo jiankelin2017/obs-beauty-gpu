@@ -2,8 +2,8 @@
 
 > ⚠ **先读这一行再看正文**：本文是**当初的规划书**，正文里的进度数字（3.1.54 / 3.1.61 / "下一步 5c"）
 > 都是**写作当时的快照**。
-> **当前进度与下一步**以 [`开发流程与优化计划.md`](开发流程与优化计划.md) 为准；
-> 逐轮实测证据见 [`../PROGRESS.md`](../PROGRESS.md)。
+> **当前进度与下一步**以 [`docs/guides/guide-development.md`](../docs/guides/guide-development.md) 为准；
+> 逐轮实测证据见 [`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md)。
 > **当前状态（2026-11-04 更新，滤镜 2.14.1）**：五段（磨皮/色调/五官/细节/美形）全部已 GPU 化并各有 720p+4K 对拍；
 > 5b-1/5b-2 落地；帧环自 2.4.0 起默认开；**五官（REGION）自 2.14.0 起默认开**（只认 `BEAUTY_GPU_REGION=0` 关闭），
 > 依据 T10-b 的 17 格等价矩阵 17/17 PASS（`PROGRESS §9.37` / `§9.40` / `§9.41`）。
@@ -23,7 +23,7 @@
 
 > 补充说明（2026-11-01 整理）：上面的「状态」行是本文写作当时的原始记录，保留以体现计划书的性质。
 > **实际进度已远超该行** —— 5c（美形）、5b-2（掩码 + 帧环）、五官整段均已完成，
-> 详见本文件顶部的「当前」说明与 [`../PROGRESS.md`](../PROGRESS.md) 的版本里程碑表。
+> 详见本文件顶部的「当前」说明与 [`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) 的版本里程碑表。
 > 上游 CPU 版的 `00_速览_给AI.md` 已于 2026-11-01 随文档合并移除，现状以 CPU 版根 `README.md` 为准。
 
 ---
@@ -31,8 +31,8 @@
 ## 零、当时状态（v3.1.54，2026-10-31 19:50｜历史快照）
 
 > ⚠ **本节为历史快照（2026-10-31），不再更新。** 当前计划与流程见
-> [`开发流程与优化计划.md`](开发流程与优化计划.md)；S0–S7 的执行门槛与实测数据见
-> [`../PROGRESS.md`](../PROGRESS.md) **§9**；本节的 3.1.54 数字仅作存档。
+> [`docs/guides/guide-development.md`](../docs/guides/guide-development.md)；S0–S7 的执行门槛与实测数据见
+> [`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) **§9**；本节的 3.1.54 数字仅作存档。
 
 ### 0.1 进度总表
 
@@ -200,8 +200,8 @@ virtual bool processGpu(int slot, void* in_tex, void* out_tex,
 
 > ⚠ **本节为历史路线（写作时 3.1.54）。** 后续 S0–S7（帧环 / 双缓冲回读 / GPU 掩码 /
 > 缩略图检测 / 通道打包 / 检测降频）的实际执行、门槛与实测，见
-> [`../PROGRESS.md`](../PROGRESS.md) **§9**；下一步排期与验收见
-> [`开发流程与优化计划.md`](开发流程与优化计划.md)；本节只存档当初的路线判断。
+> [`docs/archive/PROGRESS-20261105.md`](../docs/archive/PROGRESS-20261105.md) **§9**；下一步排期与验收见
+> [`docs/guides/guide-development.md`](../docs/guides/guide-development.md)；本节只存档当初的路线判断。
 
 **① 3.6 尾段 —— 4K 跑一次（✅ 已完成，2026-10-31 19:45，3.1.54）**
 

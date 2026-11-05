@@ -1,8 +1,23 @@
+---
+doc_type: reference
+title: 引擎 core 与 gpu 是什么关系
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: 56dc178
+maintainer: Jian
+status: Active
+supersedes: 根 GPU_CPU_对比报告.md
+---
+
 # 引擎 `core` 与 `gpu` 是什么关系（现状）
 
-> 更新：2026-11-04。**性能数字不在这里维护** —— 统一看 [`README.md`](README.md) §2。
+> **结论**：`engine=gpu` 只是让宿主挂上 GPU 段链钩子；真正决定快慢的是六个 hlsl 有没有加载成功。
+> **性能数字不在这里维护** —— 统一看 [`../README.md`](../README.md) §2，且该处数字已标注
+> 「**2.14.x 基线实测，3.0.1 未重测**」，不要当作当前版本实测值。
 > 本文只回答一件事：「`engine=core` / `engine=gpu` 两个启动日志值，与『GPU 管线到底有没有跑』是什么关系」。
 > 历史版本（v3.1.76 时代）的对比数字与"切勿设 `BEAUTY_GPU_SMOOTH_PROD`"警告**已作废**，见文末。
+> §2 的示例日志保留 2.14.1 原貌，仅演示日志格式；**当前版本号以 `../README.md` §1 为准**。
 
 ## 1. 结论先说
 
@@ -48,5 +63,6 @@ findstr /C:"hlsl 已加载" /C:"引擎资源已预热" /C:"段区间钩子已启
         "%APPDATA%\obs-studio\logs\*.txt"
 ```
 
-判定标准、门禁口径与「哪些数字能横比」见 [`05_验证/README.md`](05_验证/README.md) 与
-[`README.md`](README.md) §5。
+判定标准、门禁口径与「哪些数字能横比」见
+[`../guides/guide-verification.md`](../guides/guide-verification.md)（批 2 迁移，当前 `05_验证/README.md`）
+与 [`../README.md`](../README.md) §5；全库总表见 [`../INDEX.md`](../INDEX.md)。

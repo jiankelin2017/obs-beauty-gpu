@@ -7,7 +7,7 @@
     「我手里这个 dll，到底是哪份源码编出来的？装到机器上的、打进安装包的，
       跟它是同一个文件吗？」
 
-对应 `README.md` §3.3 的三条工程债：
+对应 `docs/CHANGELOG.md` 的 N13 / N15 两条工程债（旧编号映射见 `docs/INDEX.md` §4）：
     N13 安装包会与构建产物脱节（2.9.1 装了一个月，Setup.exe 还停在 2.9.0）
     N14 工具不校验「dll 版本 == 源码 BEAUTY_BUILD_STR」
 
@@ -35,6 +35,9 @@
     撞版本号是最常见的翻车方式 —— 源码 bump 了，但编译命令没重跑，dll 还是旧的，
     文件名/时间戳都像新的。只有从二进制里搜字符串，才知道**这份 dll 自报几版**。
 """
+# 脚本自身版本（文档治理配套改动，与插件 BEAUTY_BUILD_STR 无关）
+__version__ = "0.1.0"
+
 import argparse
 import hashlib
 import json
@@ -51,7 +54,8 @@ PKG_DLL = os.path.join(ROOT, "07_安装包", "obs-beauty.dll")
 INSTALLED_DLL = r"C:\ProgramData\obs-studio\plugins\obs-beauty\bin\64bit\obs-beauty.dll"
 SOLO_SHADER_DIR = r"D:\obs_beauty_gpu\shaders"
 PARAMS_H = os.path.join(SRC_DIR, "beauty_params.h")
-SWITCH_DOC = os.path.join(ROOT, "04_文档", "开关总表.md")
+# 文档治理后开关总表统一在 docs/reference/（正文表格语义不变）
+SWITCH_DOC = os.path.join(ROOT, "docs", "reference", "reference-switches.md")
 
 SHADERS = ["smooth.hlsl", "tone.hlsl", "detail.hlsl", "warp.hlsl", "mask.hlsl",
            "region.hlsl"]
@@ -219,7 +223,16 @@ def check_switches():
             if os.path.isfile(p) and name.endswith(
                     (".md", ".py", ".ps1", ".bat", ".txt")):
                 corpus += read_text(p)
-    for name in ("README.md", "PROGRESS.md"):
+    # 现行文档统一在 docs/；archive/ 是历史，含未入表的内部旋钮名，
+    # 一旦纳入语料就会把「内部旋钮」误判成「文档提到却没进表」的漏收（假 FAIL）。
+    docs_root = os.path.join(ROOT, "docs")
+    if os.path.isdir(docs_root):
+        for dirpath, dirnames, filenames in os.walk(docs_root):
+            dirnames[:] = [d for d in dirnames if d != "archive"]
+            for name in sorted(filenames):
+                if name.endswith((".md", ".py", ".ps1", ".bat", ".txt")):
+                    corpus += read_text(os.path.join(dirpath, name))
+    for name in ("README.md", "PROGRESS.md"):   # 兼容治理前旧布局，文件移走后自动失效
         p = os.path.join(ROOT, name)
         if os.path.isfile(p):
             corpus += read_text(p)

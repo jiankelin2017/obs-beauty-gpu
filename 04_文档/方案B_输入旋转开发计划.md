@@ -129,7 +129,7 @@ P_src = R(-θ) · (P_rot - C_rot) + C_src
 > 以下原文保留，作为「一次立项要同步哪几处」的清单样例。
 
 - `beauty_params.h` `BEAUTY_BUILD_STR` → `2.10.0`。
-- `04_文档/开发流程与优化计划.md`：表 A 升 2.10.0 + 新增「输入旋转」行（状态：进行中）；表 D 补 2.10.0。
+- `docs/guides/guide-development.md`：表 A 升 2.10.0 + 新增「输入旋转」行（状态：进行中）；表 D 补 2.10.0。
 - `04_文档/开关总表.md`：补 `BEAUTY_INPUT_ROT` 或说明该能力走面板（非 env）；若实现中确需 env 旁路再加。
 - `05_验证/README.md`：补输入旋转验证工具行与坑。
 - `PROGRESS.md`：新增 §9.27 立项记录。

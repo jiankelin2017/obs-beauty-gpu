@@ -1,10 +1,26 @@
-# 开发流程与优化计划（当前唯一计划文档）
+---
+doc_type: guides
+title: 开发流程与优化计划
+version: 0.1.0
+last_updated: 2026-11-05
+applies_to: 3.0.1
+repo_baseline: 56dc178
+maintainer: Jian
+status: Active
+supersedes: 04_文档/开发流程与优化计划.md
+---
 
-> **适用版本**：GPU 滤镜 **3.0.1**（2026-11-05 晚间代码审查修复；源码 / 构建 / 安装包 / 装机已同步，闸门 12 PASS、离线回归与 4 机位复验通过，真实多机位画面观感待用户人工确认）｜ GPU 引擎 **2.0.0** ｜ CPU 引擎 **1.6.0**
-> **更新日期**：2026-11-05（第十七次刷新：3.0.0 → 3.0.1 修复安装包路径 / 悬空钩子 / worker 竞态并补齐发布闸门；3.0.0 及以前为历史快照）
-> **定位**：本文回答"**现在走到哪、下一步做什么、按什么流程做**"。
-> 历史过程与逐轮实测证据在 [`../PROGRESS.md`](../PROGRESS.md)（不再重复搬运）；
-> 开关的默认值/回退看 [`开关总表.md`](开关总表.md)；各段实现细节看 `方案A_*设计.md`。
+# 开发流程与优化计划
+
+> **结论先行**：立项清单 25 项，**21 已结、2 判定不做、2 观察项**，**当前没有需要写产品代码的活**；
+> 本文只回答「按什么流程改代码 → 验收 → 发版」，§2 表 B 是作业指导书。
+> **当前版本 3.0.1**（2026-11-05 代码审查修复）：闸门 12 PASS、离线回归与 4 机位自动化复验通过；
+> **真实多机位画面观感待人工确认**。GPU 引擎 2.0.0 ｜ CPU 引擎 1.6.0。
+>
+> 现状 / 限制看 [`../README.md`](../README.md)；用户可见变更看 [`../CHANGELOG.md`](../CHANGELOG.md)；
+> 开关默认值 / 回退看 [`../reference/reference-switches.md`](../reference/reference-switches.md)；
+> 逐轮实测证据按 `§9.x` 在 [`../archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) 检索
+> （映射见 [`../INDEX.md`](../INDEX.md) §3）；全库总表见 [`../INDEX.md`](../INDEX.md)。
 
 ---
 
@@ -160,7 +176,7 @@
 | 8 | 门禁判定 | `gate.py --skip-transfer --cmp`（口径 A）+ `ab_pair.py`（口径 C） | PASS/FAIL 表 | ✅ | **收益只认配对**；搬运项跨会话不可比，这条要写进流程卡 | 是 |
 | 9 | 稳定性长跑 | `soak_s2.py` 720p/4K 30 min，盯 device-lost | 帧数/异常 | ✅ | **S2** 已过 30 min（4K 54180 帧，§9.3.1）；**S3** 已补 4K 30 min（301 窗，§9.16，稳定性 PASS）；S4b1 是 4K 20 min×2。**S3 与 S4b 互斥**（S4b 以 `!stage_async` 为前提），不存在"组合跑"；实测 S3 在 2.8.0 默认组合下 4K 慢 1.53 ms → 不翻默认 | 是 |
 | 10 | 回滚演练 | 每个开关 `=0`（或 `=1`）实跑一次 | 回退证据 | ⚠️ 部分 | 新开关必须补。**无开关的变更**（S6 / 等价重构）回退口径是 `git revert`，演练方式改为「重跑 T1/T2 对拍」而不是拨开关 | 是 |
-| 11 | 文档/提交 | 本文 + `开关总表.md` + `PROGRESS.md`，并同步**三处指针**（根 `README.md`、`04_文档\README.md`、方案A 的顶部/§零/§6.2）+ commit | 记录 | ✅ 2.11.0 起有闸门 | 新增开关同批进表（**47 条**）；`05_验证/check_release.py` 已把「dll 版本 == 源码宏」「装机/安装包 == 构建产物」「四份 shader 相同」「开关表 ↔ `getenv()`」全部自动化 | 否 |
+| 11 | 文档/提交 | 本文 + `../reference/reference-switches.md` + `../CHANGELOG.md`，并同步 [`../INDEX.md`](../INDEX.md) 总表 + commit | 记录 | ✅ 2.11.0 起有闸门 | 新增开关同批进表（**63 条**，2026-11-05 复核）；`05_验证/check_release.py` 已把「dll 版本 == 源码宏」「装机/安装包 == 构建产物」「四份 shader 相同」「开关表 ↔ `getenv()`」全部自动化，并把 `docs/` 纳入语料（`archive/` 除外） | 否 |
 | 12 | **发布前一致性闸门** | `py -3 05_验证/check_release.py --strict` | PASS/WARN/FAIL 九项 | ✅ 2.11.0 新增 | **必须在打 `Setup.exe` 之后跑**：它同时比三处 dll 与四份 shader，任何一处漏更新都当场 FAIL。历史教训 N13（2.9.1 装了一个月、`Setup.exe` 还停在 2.9.0）就是没这道闸 | 否 |
 
 **读表要点**
@@ -259,27 +275,28 @@
 ---
 
 
-## 5. 当前默认开关矩阵（2.14.1，从代码读出）
+## 5. 默认开关矩阵
 
-| 层 | 开关 | 默认 |
-|---|---|---|
-| 生产链 | `GPU_SMOOTH_PROD` / `GPU_MASK` / `CHAIN_PROD` / `CHAIN_OUT` / `GPU_FRAME_RING` / `DETECT_SMALL` / `ALLZERO_SKIP` / `NOFACE_SKIP` / `ASYNC_DETECT` / **`DET_ADAPT`（2.8.0 新增）** / **`GPU_REGION`（2.14.0 翻默认）** | **开**（只认 `=0` 关闭） |
-| opt-in | `ASYNC_STAGE`（S3）/ **`MOTION_GPU`（2.11.0 方案C）** / **`DET_ADAPT_AGG=rms`（2.12.0）** | **关**（只认 `=1` / 字面量开启） |
-| 诊断/对拍 | `GPU_TONE` / `GPU_SMOOTH` / `GPU_DETAIL` / `GPU_WARP` / `GPU_MASK_CMP` / `REGION_CMP` / `CHAINOUT_CMP` / **`SPOT_DEBUG`（2.9.0）** / **`MOT_DUMP`（2.11.1）** / **`DET_OFFSET`（2.13.0，会改画面）** / `PROFILE` / `CHAIN_AB` / `SMOOTH_PASSES` | 关 |
-| 其他 | `MASK_EVERY`（自动；**显式设置会关掉 DET_ADAPT**）/ `DET_ADAPT_STILL`（8）/ `DET_ADAPT_THR`（6，合法区间 **1–64**，越界被静默丢弃）/ `DET_ADAPT_HOT`（3）/ `RING_ALWAYS`（关）/ `AB_TARGET`（`chain`）/ `SHADER_DIR`（不设） | — |
+**本表已于 2026-11-05 停止维护，整表删除。** 开关默认值、影响与回退统一以
+[`../reference/reference-switches.md`](../reference/reference-switches.md) 为准，
+该表由 `05_验证/check_release.py` 第 6 项与源码 `getenv()` 自动双向校验。
 
-逐项含义、回退与"改了什么画面"见 [`开关总表.md`](开关总表.md)。
+> 失效说明：原表标题写「2.14.1，从代码读出」，但 3.0.1 源码已有 **138** 个 `BEAUTY_*` 环境变量、
+> 表内 **63** 条操作开关、另有 **75** 条纯内部旋钮；2.14.1 的矩阵既漏项又含已改变默认值的条目，
+> 按它操作会得到错误结果，故不增量修补而是整表移除。
 
 ---
 
 ## 6. 文档地图（谁说了算）
 
+**唯一总表 [`../INDEX.md`](../INDEX.md)**；下表只列与「排期 / 验收」直接相关的几篇。
+
 | 文档 | 身份 | 什么时候看 |
 |---|---|---|
-| **本文** | **当前计划与流程（唯一）** | 排期、验收、版本决策 |
-| [`开关总表.md`](开关总表.md) | 开关字典 | 查默认值 / 回退 |
-| [`../PROGRESS.md`](../PROGRESS.md) | 进度与证据总账 | 查某轮实测数字、踩坑经过 |
-| [`方案A_GPU移植开发计划.md`](方案A_GPU移植开发计划.md) | **设计参考（历史）** | 看阶段划分、架构决策偏差、风险登记 |
-| [`方案A_5b2_掩码上GPU设计.md`](方案A_5b2_掩码上GPU设计.md) / [`方案A_五官GPU设计.md`](方案A_五官GPU设计.md) | 分段设计稿 | 改那两段代码之前 |
-| [`Phase0_基线测量规程.md`](Phase0_基线测量规程.md) | 测量规程 | 跑诊断 / 读日志 / 复算 |
-| [`../README.md`](../README.md) | 项目入口 | 新人第一天 |
+| **本文** | 当前计划与流程（唯一） | 排期、验收、版本决策 |
+| [`../README.md`](../README.md) | 现状入口（正向 / 负向 / 部署） | 先看这个 |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | 用户可见变更 | 判断某版改了什么、怎么回退 |
+| [`../reference/reference-switches.md`](../reference/reference-switches.md) | 开关字典 | 查默认值 / 回退 |
+| [`../archive/PROGRESS-20261105.md`](../archive/PROGRESS-20261105.md) | 证据总账（已归档，按 `§9.x` 检索） | 查某轮实测数字、踩坑经过 |
+| `../../04_文档/方案A_*设计.md` | 分段设计稿（批 3 迁入 `../design/`） | 改对应代码之前 |
+| `../../04_文档/Phase0_基线测量规程.md` | 测量规程（批 2 迁入 `../reference/`） | 跑诊断 / 读日志 / 复算 |

@@ -17,7 +17,7 @@ py -3 05_验证\verify_smooth_compiles.py
 `websocket-client` 是 `obsctl.py` 访问 obs-websocket v5 的客户端；只有需要**起停 OBS、改滤镜、截图**的脚本才会用到它。纯离线对拍（`verify_*_compiles.py`）不需要它，也不需要 OBS。
 
 **`tools/` 目录不进仓库**（`.gitignore` 已挡）。人眼 A/B 那轮用过的 `tools/ffmpeg.exe`（约 64 MB）与 `tools/ffpkg.tgz`
-（约 22 MB）是第三方二进制，与本仓库「二进制不入库」的规则（根 `README.md` N12）同口径。需要重跑 A/B 时自备 ffmpeg
+（约 22 MB）是第三方二进制，与本仓库「二进制不入库」的规则（`docs/README.md` §3「工程」；旧编号 N12 见 `docs/INDEX.md` §4）同口径。需要重跑 A/B 时自备 ffmpeg
 放到 `05_验证/tools/`；**当前没有任何脚本硬编码这个路径**（`ab_*.py` 全部走 Python 库与 OBS 录制，不外调 ffmpeg），
 所以删掉它不影响任何门禁脚本，只影响手工造片。
 
