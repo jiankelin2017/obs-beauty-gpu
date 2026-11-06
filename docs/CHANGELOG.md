@@ -25,7 +25,7 @@ status: Active
 | `05_验证/out/` 的实验日志与截图（19 份）**从仓库移除** | 同上。这些是整份 OBS 日志，含本机用户名、显卡型号、配置文件与整份第三方插件清单 |
 | 源码去掉写死的个人路径 | `obs-beauty.cpp` 的 `BEAUTY_THUMB_DUMP` 落盘位置改为系统临时目录（宽字符，中文用户名可用）；10 个验证脚本的项目绝对路径改为相对仓库根；`make_assets.py` / `scan_frontal_faces.py` 不再预设个人目录 |
 | 新增 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | 登记 ONNX Runtime / YuNet / BiSeNet / MediaPipe / 手部模型的许可与分发状态；顺带纠正一处口径：YuNet 模型目录是 MIT，而 `opencv_zoo` **仓库根是 Apache-2.0**，两者不能混用 |
-| `07_安装包/models/` 下 15.5 MB 手部模型移入 `07_安装包/backup/` | 打包脚本从未收录、生产路径也不加载，属死重 |
+| `07_安装包/models/` 下 15.5 MB 手部模型移入 `07_安装包/backup/` | 打包脚本从未收录、生产路径也不加载，属死重。**该 backup 已于同日整体删除**（含 2.17.2 旧版 exe/dll），仓库树内不再保留任何手部模型 |
 
 **怎么回退**：历史重写前的完整仓库镜像曾是 `D:\插件\_obs_beauty_history_20261106.bundle`，
 **已于 2026-11-06 20:50 按用户要求删除**（它含人脸图像，留着本身就是风险）。
@@ -49,10 +49,12 @@ status: Active
 | 新增根目录 `LICENSE`：**GPL-2.0**（与 OBS 宿主同一许可） | 此前仓库无任何许可文件。现在明确：可自由使用、修改、再分发（含商用），但**分发修改版必须同样以 GPL-2.0 开源**并保留版权声明。选 GPL-2.0 是因为插件动态链接 `libobs`（OBS 本身即 GPL-2.0），分发时许可层面不存在冲突。第三方组件（ONNX Runtime / YuNet 的 MIT）不受影响，仍在 `THIRD-PARTY-NOTICES.md` 单独声明 —— MIT 与 GPL 兼容。`LICENSE` 随安装包落到装机目录 |
 | 安装包随附 ONNX Runtime 官方 `ThirdPartyNotices.txt`（6,508 行 / 338,538 B，逐字未改），落到 `<root>\onnxruntime-ThirdPartyNotices.txt` | 此前只声明了 ORT 本身的 MIT，**漏了 ORT 内部链接的 abseil / protobuf 等**。原文存 `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt`，取自上游 tag `v1.20.1`（与 dll 内唯一版本串 `1.20.1` 对应），SHA256 记在 `THIRD-PARTY-NOTICES.md`。换 ORT 版本须同步换这份文件 |
 | `THIRD-PARTY-NOTICES.md` 第四节改写：新增「无论是否认定为衍生作品，两种认定导向同一套义务」的分支对照 | 原文写「需自行评估」，与已选定 GPL-2.0 的事实脱节。改写**不下法律结论**，只说明选定同许可后该判断不再产生分歧；并注明若基于本插件改闭源商业版，该问题会重新变成实质风险 |
-| `THIRD-PARTY-NOTICES.md` 待办三条全部关闭 | 含一条早已完成却未勾选的（`07_安装包/models/` 已删）。另补记唯一残留：`07_安装包/backup/` 里的手部模型若随文件夹对外拷贝，需附 PINTO0309 的 Apache-2.0 文本 |
+| `THIRD-PARTY-NOTICES.md` 待办三条全部关闭 | 含一条早已完成却未勾选的（`07_安装包/models/` 已删）。同日另删 `07_安装包/backup/`（手部模型 + 2.17.2 旧版），原「对外拷贝文件夹会带出 Apache-2.0 模型」的残留风险随之消除 |
 
 **交付**：dll `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`；
-`Setup.exe 13,089,792 B / MD5 86F769B7C502C3199D5257A09F17C8A1`。
+`Setup.exe 13,089,792 B / MD5 2E3537A10D644CC4F655381C01204A04`
+（体积未变是 PE 节对齐吸收：本轮改的是内嵌的 `THIRD-PARTY-NOTICES.md` 文本，
+10,355 → 10,485 B，md5 因此变化；以 md5 为准确认版本）。
 `check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（安装包载荷项已扩到 12 个内嵌资源：
 dll + 运行时 + 模型 + 两份第三方声明 + 本项目 LICENSE + 6 shader）。
 

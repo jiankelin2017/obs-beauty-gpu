@@ -26,7 +26,7 @@ supersedes: 04_文档/README.md（已归档）
 | 3.2.1 改了什么 | 「仅色彩层」诊断补 `geomOnly` 字段并直接写出结论（`px=-1` 无有效掩码 / `px=0 且 geomOnly=1` 正常 / `px=0 且 geomOnly=0` 异常） |
 | 3.2.0 改了什么 | 新增**自动输入方向认定**（`BEAUTY_AUTO_ROT`）：采集卡输出横躺、场景项旋转成竖屏时，插件自己在 90°/270° 上试出正确方向并补偿。修「磨皮冻在横屏坐标、拉参数不响应、美白失效」。另修 `warmUp()` 不幂等 |
 | 3.0.1 修了什么 | 安装包路径改 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty`、槽位失败路径悬空钩子、worker 释放竞态、命令注入面、闸门补 3 条断言 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
-| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 13,089,792 B / 86F769B7C502C3199D5257A09F17C8A1`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE，共 12 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
+| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 13,089,792 B / 2E3537A10D644CC4F655381C01204A04`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE，共 12 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
 | 安装方式 | 双击 `07_安装包/Setup.exe` 即装完可用，**不再需要手工放 `onnxruntime.dll` / `yunet.onnx`**；再双击一次即卸载（目录与注册表一并清除） |
 | 离线回归 | 4 条 golden 逐字节相同；方向判据 `06_离线验证/_autorot_probe.py`（3 例全 PASS）；槽位循环判据 `06_离线验证/_slot_cycle_probe.py`（PASS，且已做「撤掉修复必挂」的反向对照） |
 | 多机位自动化 | 4 个独立源各挂 1 滤镜 → `slot=0/1/2/3 活跃实例=1/2/3/4`；删一路、槽复用、无黑屏 / 条纹 / 崩溃 |

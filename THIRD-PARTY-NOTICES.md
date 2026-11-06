@@ -27,7 +27,10 @@
 | MediaPipe Selfie Multiclass 256（`selfie_multiclass_256.onnx`，16 MB） | Apache-2.0 | 同上，轻量替代方案 | 否 | MediaPipe 官方模型卡 |
 | 手部检测（`hand.onnx` / `hand_landmark.onnx`，共 15.5 MB） | Apache-2.0（Copyright 2022 Katsuya Hyodo） | `BEAUTY_HAND_MASK` 遮挡实验，**默认关闭且打包脚本从未收录** | 否 | `PINTO0309/hand-gesture-recognition-using-onnx` LICENSE |
 
-> 2026-11-06 清理：`07_安装包/models/` 下的两份手部模型已移到 `07_安装包/backup/models_hand_20261106/`。
+> 2026-11-06 清理：`07_安装包/models/` 下的两份手部模型先移到 `07_安装包/backup/`，
+> 同日晚该 backup 目录整体删除（连同 2.17.2 旧版 exe/dll）。**仓库树内已无这两份模型**；
+> 本机若要用，原件在 `06_离线验证/models/`（`BEAUTY_HAND_MASK=1` 时加载）；两份都由
+> `.gitignore` 挡住、不入库，也不随安装包分发。
 > 它们既不在 `build_setup.ps1` 的打包清单里，也不被生产路径加载，留在安装包目录只会
 > 让「装了但没用到」的第三方二进制混进交付物。
 
@@ -154,8 +157,6 @@ SOFTWARE.
       闸门载荷项同批收录。换 ORT 版本需同步换这份文件。
 - [x] `07_安装包/models/` 已清空并删除，`build_setup.ps1` 不再引用该目录。
 
-> 剩下唯一已知缺口：`07_安装包/backup/` 里还留着两份手部模型（Apache-2.0，
-> PINTO0309）与几个旧版 dll 备份。它们被 `.gitignore` 挡住、不进安装包，
-> 但**整个 `07_安装包/` 文件夹对外拷贝时会一起带出去** —— 若要走这条路径，
-> 需先附上 `PINTO0309/hand-gesture-recognition-using-onnx` 的许可文本，
-> 或干脆把 `backup/` 删掉。
+> `07_安装包/backup/`（曾放两份手部模型与 2.17.2 旧版 exe/dll）已于 2026-11-06 删除，
+> 上面那条「整个文件夹对外拷贝会带出模型」的风险随之消失。现在 `07_安装包/`
+> 下的全部内容都是可交付物或其构建中间件。
