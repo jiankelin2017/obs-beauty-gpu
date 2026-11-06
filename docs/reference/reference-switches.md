@@ -117,7 +117,7 @@ supersedes: 04_文档/开关总表.md
 | `BEAUTY_REG_SPOT` | 关 | **会改画面**：把祛斑强度 `regSpotK` 覆盖成给定浮点值（数值型，`*rs` 非空才生效） | 只在标定祛斑 ROI 时设；生产不设 |
 | `BEAUTY_DIAG_DIMS` | 关 | `=1` 时每 180 帧打印一次 `draw_tex` 的宽高（查「画到哪张纹理、尺寸对不对」） | `=1` 开，进程内只初始化一次（改了要重启 OBS） |
 | `BEAUTY_M1_DUMP_DIR` | 不设 | 掩码对拍（M1）失败时的取证目录：把 GPU 采样图与 CPU 掩码所用输入都 dump 成裸字节。**对拍通过时不产生任何文件** | 给一个纯 ASCII 绝对路径；不设 = 不 dump |
-| `BEAUTY_THUMB_DUMP` | 关 | `=1` 时把 S4b 的 640×640 缩略图原样落盘一份（`%TEMP%\thumb_dump.rgba`），只落一次。缩略图有翻转/通道错/黑边时检测会检出一堆假脸，日志只报数字 | `=1` 开。⚠ 路径硬编码在 `C:/Users/Administrator/AppData/Local/Temp/`，换用户要改源码 |
+| `BEAUTY_THUMB_DUMP` | 关 | `=1` 时把 S4b 的 640×640 缩略图原样落盘一份（`%TEMP%\obs_beauty_thumb_dump.rgba`），只落一次。缩略图有翻转/通道错/黑边时检测会检出一堆假脸，日志只报数字 | `=1` 开。落盘位置取 `GetTempPathW`，**当前源码**已不再写死用户目录（旧版写死过 `C:/Users/<用户>/AppData/Local/Temp/`，换用户即失效）；宽字符打开，中文用户名可用。⚠ 已交付的 3.2.2 dll 仍是旧路径，下次重编才生效 |
 | `BEAUTY_REGION_DBG` | 关 | 任意非空即开：每 120 次上传打一行五官参数表（`A/B/C.shade`），用于确认「交到 shader 手里的是什么」（2.8.2 起，geomOnly 帧五官消失时定位用） | 取消该变量即关 |
 
 ## 五、性能测量 / A/B
