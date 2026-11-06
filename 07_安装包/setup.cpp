@@ -135,6 +135,60 @@ static std::wstring pluginRoot()
     return std::wstring(buf) + L"\\obs-studio\\plugins\\obs-beauty";
 }
 
+// <root> 的父目录 = %PROGRAMDATA%\obs-studio\plugins。
+// 从 pluginRoot() 的结果去掉固定后缀得到，不重新读一次环境变量 —— 读两次就会
+// 变成「校验过的是这一份、实际用的是另一份」，这类不一致本身就是注入面。
+static std::wstring pluginsDir()
+{
+    const std::wstring r = pluginRoot();
+    const std::wstring tail = L"\\obs-beauty";
+    if (r.size() <= tail.size()) return L"";
+    if (r.compare(r.size() - tail.size(), tail.size(), tail) != 0) return L"";
+    return r.substr(0, r.size() - tail.size());
+}
+
+// 3.2.3：清掉顶层「美颜」菜单模块的残留。
+//
+// obs-beauty-ui.dll 自带 OBS_DECLARE_MODULE()，是一个与本滤镜并列的独立模块，
+// 它注册的是 OBS 顶部菜单栏的一个入口。这个 dll 从未被打进安装包（历史上是
+// 手工部署的），所以安装器从来不知道它的存在，卸载时自然也不会动它 ——
+// 用户看到的现象就是「插件已全面卸载，菜单还在」。
+//
+// 这里只按**固定文件名**删，不扫目录、不用通配符，因此不存在误伤同目录下
+// 其它插件的可能。两种布局都覆盖：带子目录的正常布局，以及 dll 直接铺在
+// plugins\ 下的变体。
+//
+// 刻意**不碰** %APPDATA%\obs-studio\plugin_config\obs-beauty-ui：本程序以
+// 管理员提权运行，%APPDATA% 在这种上下文里指向哪个账户并不确定，删配置有
+// 误伤风险；而配置本身没有副作用，菜单模块都没了它也不会再生效。
+//
+// 返回 false 表示有项目没删掉（多半是被占用），由调用方决定怎么提示。
+static bool purgeMenuModule(const std::wstring& plugins)
+{
+    bool ok = true;
+    if (!plugins.empty()) {
+        if (GetFileAttributesW((plugins + L"\\obs-beauty-ui").c_str()) != INVALID_FILE_ATTRIBUTES)
+            ok = removeTree(plugins + L"\\obs-beauty-ui") && ok;
+        if (!DeleteFileW((plugins + L"\\obs-beauty-ui.dll").c_str())) {
+            // 不存在不算失败：这台机器本来就没装过菜单模块是常态。
+            const DWORD e = GetLastError();
+            if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) ok = false;
+        }
+    }
+    // 旧布局：3.0.x 时代的插件可能落在 OBS 安装目录下。
+    const wchar_t* obsRoots[] = {L"C:\\Program Files\\obs-studio",
+                                 L"C:\\Program Files (x86)\\obs-studio"};
+    for (auto r : obsRoots) {
+        const std::wstring base = r;
+        DeleteFileW((base + L"\\obs-plugins\\64bit\\obs-beauty-ui.dll").c_str());
+        DeleteFileW((base + L"\\obs-plugins\\32bit\\obs-beauty-ui.dll").c_str());
+        if (GetFileAttributesW((base + L"\\data\\obs-plugins\\obs-beauty-ui").c_str())
+            != INVALID_FILE_ATTRIBUTES)
+            ok = removeTree(base + L"\\data\\obs-plugins\\obs-beauty-ui") && ok;
+    }
+    return ok;
+}
+
 // 只用于「这台机器装没装 OBS」的存在性检查，不再参与拼安装路径。
 static std::wstring findObs()
 {
@@ -204,6 +258,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 
     const std::wstring root = pluginRoot();
     if (root.empty()) { msg(L"无法定位 %PROGRAMDATA%，安装中止。"); return 2; }
+    const std::wstring plugins = pluginsDir();
 
     const std::wstring binDir   = root + L"\\bin\\64bit";
     const std::wstring plug     = binDir + L"\\obs-beauty.dll";
@@ -261,6 +316,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         removeTree(legacyData + L"\\models");
         removeTree(legacyData + L"\\shaders");
         removeTree(legacyData);
+        // 3.2.3：菜单模块不随滤镜卸载，这里一并收尾（详见 purgeMenuModule 注释）
+        const bool menuPurged = purgeMenuModule(plugins);
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, KEY);
         // 自己就在 <root>\uninstall.exe 里跑，删不掉自己所在的目录。
         // 交给一个脱离的 cmd：等 2 秒（本进程退出后）再删。root 已通过
@@ -282,9 +339,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 CloseHandle(pi.hProcess);
             }
         }
-        msg(L"已卸载：插件文件与注册表项都已移除（残留目录会在 2 秒内自动删除）。");
+        // 菜单模块删不掉时必须说出来：否则用户重启 OBS 仍见「美颜」，会认为
+        // 卸载根本没生效（这正是 3.2.2 及以前的实际表现）。
+        std::wstring doneMsg = L"已卸载：插件文件、菜单入口与注册表项都已移除"
+                              L"（残留目录会在 2 秒内自动删除）。";
+        if (!menuPurged)
+            doneMsg += L"\n\n注意：菜单模块 obs-beauty-ui 有文件未能删除，"
+                       L"通常是仍被进程占用。请关闭 OBS 后重新运行本程序，"
+                       L"或手工删除 %ProgramData%\\obs-studio\\plugins\\obs-beauty-ui。";
+        msg(doneMsg.c_str());
         return 0;
     }
+
+    // 3.2.3：安装前先清掉旧的菜单模块。它与本滤镜是两套独立实现，并存时
+    // 用户点顶部「美颜」菜单看到的是旧模块的界面，而滤镜参数在滤镜属性页里
+    // —— 两个入口指向不同实现，比「只有一个入口」更难解释。
+    const bool uiCleared = purgeMenuModule(plugins);
 
     makeDir(binDir);
     makeDir(modelDir);
@@ -408,6 +478,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
              L"再次运行本程序即可卸载。\n\n"
              L"启动 OBS → 源 → 滤镜 → + → Beauty (GPU)。",
              plug.c_str(), okCount);
-    msg(done);
+    std::wstring doneMsg(done);
+    if (!uiCleared)
+        doneMsg += L"\n\n注意：旧的「美颜」菜单模块未能完全清除，"
+                   L"OBS 菜单里可能仍可见该入口。请关闭 OBS 后重新运行本程序。";
+    msg(doneMsg.c_str());
     return 0;
 }

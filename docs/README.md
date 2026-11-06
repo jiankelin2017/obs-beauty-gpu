@@ -20,14 +20,15 @@ supersedes: 04_文档/README.md（已归档）
 
 | 项 | 结论 |
 |---|---|
-| 版本 | **3.2.2**（删滤镜再加回来的修复 + 三处内部缺陷补完），唯一出处 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR` |
+| 版本 | **3.2.3**（安装器补：卸载时连「美颜」菜单模块一起清），唯一出处 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR` |
 | 架构 | 3.0.0 起 `SlotState` 按槽隔离帧号 / 掩码轨迹 / 肤色 EMA / hook user / 异步 worker；修「A 镜头闪烁 + 侧机位无效果」的根因（进程单例引擎 + 文件级全局帧状态） |
 | 3.2.2 改了什么 | **修「删掉美颜滤镜再加回来 → 该槽异步检测线程永久死亡」**（`stopAsync()` 置 `quit` 后 `startAsyncIfNeeded()` 从不复位，新 worker 第一句就退出）。另修自动方向探测的数据竞争、`warmed_` 标记位置与 `release()` 复位 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
 | 3.2.1 改了什么 | 「仅色彩层」诊断补 `geomOnly` 字段并直接写出结论（`px=-1` 无有效掩码 / `px=0 且 geomOnly=1` 正常 / `px=0 且 geomOnly=0` 异常） |
 | 3.2.0 改了什么 | 新增**自动输入方向认定**（`BEAUTY_AUTO_ROT`）：采集卡输出横躺、场景项旋转成竖屏时，插件自己在 90°/270° 上试出正确方向并补偿。修「磨皮冻在横屏坐标、拉参数不响应、美白失效」。另修 `warmUp()` 不幂等 |
 | 3.0.1 修了什么 | 安装包路径改 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty`、槽位失败路径悬空钩子、worker 释放竞态、命令注入面、闸门补 3 条断言 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
-| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 13,091,840 B / E81A99881257904B5B7E68D3AB0D2B60`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE + COPYRIGHT.md，共 13 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
-| 安装方式 | 双击 `07_安装包/Setup.exe` 即装完可用，**不再需要手工放 `onnxruntime.dll` / `yunet.onnx`**；再双击一次即卸载（目录与注册表一并清除） |
+| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `828E919722CA5A4D7D7919DABBFFEBF6`**）；`Setup.exe 13,096,960 B / CB329D90EF19CE87DDE3A0DD749F369A`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE + COPYRIGHT.md，共 13 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
+| 安装方式 | 双击 `07_安装包/Setup.exe` 即装完可用，**不再需要手工放 `onnxruntime.dll` / `yunet.onnx`**；再双击一次即卸载（插件目录、注册表、以及历史遗留的「美颜」顶层菜单模块 `obs-beauty-ui` 一并清除） |
+| 3.2.3 改了什么 | **卸载不干净：插件已卸、OBS 顶部「美颜」菜单仍在**。该菜单由独立模块 `obs-beauty-ui.dll` 提供（自带 `OBS_DECLARE_MODULE()`，从未进过安装包），安装器不认识它。现在安装与卸载都按固定文件名清理三处布局 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
 | 离线回归 | 4 条 golden 逐字节相同；方向判据 `06_离线验证/_autorot_probe.py`（3 例全 PASS）；槽位循环判据 `06_离线验证/_slot_cycle_probe.py`（PASS，且已做「撤掉修复必挂」的反向对照） |
 | 多机位自动化 | 4 个独立源各挂 1 滤镜 → `slot=0/1/2/3 活跃实例=1/2/3/4`；删一路、槽复用、无黑屏 / 条纹 / 崩溃 |
 | 3.2.0 真机验收 | 2026-11-06 18:02 直播中（1080×1920@30，美颜+录制+推流同时）：日志 `自动方向探测命中 270°` → 38 ms 后 `count=1`；滑块恢复响应、美白可见；渲染帧平均 **5.8 ms**、因渲染延迟丢帧 **0/23620**、编码延迟跳过 **0/11407**、CPU **4.9%** |

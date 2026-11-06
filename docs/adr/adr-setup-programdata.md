@@ -1,8 +1,8 @@
 ---
 doc_type: adr
 title: ADR · 安装路径统一到 ProgramData 并由闸门强制校验
-version: 0.1.0
-last_updated: 2026-11-05
+version: 0.1.1
+last_updated: 2026-11-06
 applies_to: 3.0.1
 repo_baseline: 914f388
 maintainer: Jian
@@ -79,3 +79,32 @@ supersedes: 无（新增决策记录）
   并在安装末尾 stat 三个关键文件，缺一即报错退出。
 - 卸载会连 `models\` 一起删。手工放进去的其它模型（如 `selfie_multiclass_256.onnx`）
   一并消失，这是有意为之：卸载的语义是回到没装过。
+
+## 后续（3.2.3，2026-11-06 21:43）
+
+3.2.2 的「卸载即回到没装过」有一处没兑现：**OBS 顶部菜单栏的「美颜」入口
+在卸载后仍然存在**。
+
+- **根因**：该入口由 `obs-beauty-ui.dll` 注册。它是一个**独立模块**——自带
+  `OBS_DECLARE_MODULE()`，与本滤镜并列、互不依赖，链接产物也是单独的 dll
+  （`build_gpu.ps1` 第 2 条注释已写明「obs-beauty-ui.cpp 不得链入本 dll，
+  否则 LNK2005」）。它从未被收进安装包，历史上是手工部署到
+  `%PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\`。安装器既不知道
+  它的存在，卸载自然不会动它。
+- **修法**：安装与卸载两条路径都调用 `purgeMenuModule()`，按**固定文件名**
+  （非通配符）清三处布局：`plugins\obs-beauty-ui\`、`plugins\obs-beauty-ui.dll`、
+  `Program Files\obs-studio\obs-plugins\{64,32}bit\obs-beauty-ui.dll` 与
+  `data\obs-plugins\obs-beauty-ui\`。父目录由 `pluginRoot()` 去掉固定后缀得到
+  （`pluginsDir()`），不重复读环境变量，避免「校验过的字符串」与「实际使用的
+  字符串」不是同一份。
+- **刻意不碰** `%APPDATA%\obs-studio\plugin_config\obs-beauty-ui`：安装器以
+  管理员提权运行，`%APPDATA%` 在提权上下文里指向哪个账户并不确定，删配置有
+  误伤风险；菜单模块既已移除，这份配置也不会再生效。
+- **实测**（构造式）：手工造出 `plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll`
+  与平铺的 `plugins\obs-beauty-ui.dll`，跑 `uninstall.exe --uninstall --quiet`
+  （退出码 0），两者连同目录一并消失；同目录的 `obs-multi-rtmp` 与 `obsplus`
+  完好，证明固定名清理没有误伤。
+- **同类缺陷的共性**：这是第三次遇到「组件不在安装器视野里」——3.0.0 是装到
+  错目录、3.2.2 是漏带运行时、3.2.3 是漏管菜单模块。判据统一为一条：**凡本
+  项目曾交付到用户磁盘上的文件，安装器必须知道自己管哪些**。目前这些路径集中
+  在 `setup.cpp` 顶部的常量与 `purgeMenuModule()` 两处，新增交付物须同步。

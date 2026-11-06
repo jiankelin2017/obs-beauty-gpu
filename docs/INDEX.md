@@ -1,9 +1,9 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.7
+version: 0.1.8
 last_updated: 2026-11-06
-applies_to: 3.2.2
+applies_to: 3.2.3
 repo_baseline: 914f388
 maintainer: Jian
 status: Active
@@ -19,8 +19,8 @@ status: Active
 
 | 主题 | 路径 | 类型 | 状态 | 适用版本 | 维护人 | 最后核对 | 替代 / 归档 |
 |---|---|---|---|---|---|---|---|
-| 现状入口 | [`README.md`](README.md) | README | Active | 3.2.2 | Jian | 2026-11-06 | 替代根 `README.md`、`04_文档/README.md` |
-| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.2.2 | Jian | 2026-11-06 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
+| 现状入口 | [`README.md`](README.md) | README | Active | 3.2.3 | Jian | 2026-11-06 | 替代根 `README.md`、`04_文档/README.md` |
+| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.2.3 | Jian | 2026-11-06 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
 | 第三方组件与许可 | [`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | NOTICES | Active | 3.2.2 | Jian | 2026-11-06 | 新建：登记 ONNX Runtime / YuNet / BiSeNet / MediaPipe / 手部模型的许可、入库与分发状态 |
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
@@ -37,7 +37,7 @@ status: Active
 | SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
 | 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
 | 多实例引擎槽决策 | [`adr/adr-multi-instance-slots.md`](adr/adr-multi-instance-slots.md) | adr | Active | 3.2.2 | Jian | 2026-11-06 | 3.0.0 / 3.0.1 决策 + 3.2.2 worker 重启加固；证据见 `CHANGELOG.md` |
-| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.2.2 | Jian | 2026-11-06 | 3.0.1 决策；3.2.2 补端到端安装 / 卸载实跑记录与「载荷缺失」同类缺陷 |
+| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.2.3 | Jian | 2026-11-06 | 3.0.1 决策；3.2.2 补端到端安装 / 卸载实跑记录与「载荷缺失」同类缺陷；3.2.3 补卸载残留（菜单模块）清理 |
 | 分割不用于遮挡决策 | [`adr/adr-seg-not-for-occlusion.md`](adr/adr-seg-not-for-occlusion.md) | adr | Active | 3.2.2 | Jian | 2026-11-05 | 替代 `04_文档/结论_分割对手遮脸无效_20261105.md`（原文已归档） |
 | CPU/GPU 共用 faceGeom | [`adr/adr-cpu-gpu-same-mask.md`](adr/adr-cpu-gpu-same-mask.md) | adr | Active（归纳 · 待人工确认） | 3.2.2 | Jian | 2026-11-05 | 归纳自 3 篇修复记录，**非原始决策** |
 

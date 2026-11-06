@@ -1,9 +1,9 @@
 ---
 doc_type: CHANGELOG
 title: 用户可见变更
-version: 0.1.6
+version: 0.1.7
 last_updated: 2026-11-06
-applies_to: 3.2.2
+applies_to: 3.2.3
 repo_baseline: 914f388
 maintainer: Jian
 status: Active
@@ -14,6 +14,38 @@ status: Active
 > 只记**影响读者使用的变更**：装到哪、行为变没变、怎么回退。
 > 逐轮实测、踩坑经过、内部调参一律在 [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md)。
 > 版本号唯一出处是 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR`。
+
+## 3.2.3（2026-11-06 · 修复：卸载后 OBS 顶部「美颜」菜单仍在）
+
+**滤镜行为与 3.2.2 完全相同；这一轮只改安装器的卸载路径，dll 里只有版本字符串变了。**
+
+| 改动 | 对使用者的影响 |
+|---|---|
+| 卸载与安装都会清掉「美颜」菜单模块 | 此前插件已卸载、`%PROGRAMDATA%\obs-studio\plugins\obs-beauty` 目录已空，但 OBS 顶部菜单栏的「美颜」入口还在，看起来像没卸干净。根因是那个菜单来自**另一个模块** `obs-beauty-ui.dll`：它自带 `OBS_DECLARE_MODULE()`，与本滤镜并列、互不依赖，且从未被打进安装包（历史遗留的手工部署）。安装器不认识它，卸载自然不删它 |
+| 清理范围只按固定文件名，三处都覆盖 | `plugins\obs-beauty-ui\`（正常子目录布局）、`plugins\obs-beauty-ui.dll`（dll 直接铺平的变体）、`Program Files\obs-studio\obs-plugins\{64,32}bit\obs-beauty-ui.dll` 与 `data\obs-plugins\obs-beauty-ui\`（3.0.x 旧布局）。不扫目录、不用通配符，因此不会误伤同目录下其它插件 |
+| 安装时也清一次 | 菜单模块与本滤镜是两套独立实现。并存时，用户点顶部「美颜」看到的是旧模块的界面，而滤镜参数在滤镜属性页里 —— 两个入口指向不同实现，比「只有一个入口」更难解释 |
+| 删不掉会明说 | 若有文件被占用，弹窗会点名 `obs-beauty-ui` 并给出处置办法，而不是照旧显示「已卸载」 |
+
+**刻意不碰** `%APPDATA%\obs-studio\plugin_config\obs-beauty-ui`：本程序以管理员提权
+运行，`%APPDATA%` 在这种上下文里指向哪个账户并不确定，删配置有误伤风险；而菜单
+模块既然没了，这份配置也不会再生效。
+
+**装到哪**：`%PROGRAMDATA%\obs-studio\plugins\obs-beauty\bin\64bit\obs-beauty.dll`
+
+**交付**：dll `645,632 B / MD5 828E919722CA5A4D7D7919DABBFFEBF6`（体积与 3.2.2 相同，
+差异只是内嵌版本串 `3.2.2` → `3.2.3`）；`Setup.exe 13,091,840 → 13,096,960 B /
+MD5 CB329D90EF19CE87DDE3A0DD749F369A`（+5,120 B 全部来自新增的清理逻辑）。
+`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**。
+
+**怎么验**：装 3.2.3 → 卸载 → 打开 OBS 看顶部菜单栏应无「美颜」；
+目录侧 `plugins` 下应查不到 `obs-beauty-ui`，而 `obs-multi-rtmp`、`obsplus`
+等其它插件不受影响。本轮已做**构造式实测**：手工造出
+`plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll` 与平铺的
+`plugins\obs-beauty-ui.dll`，跑一期卸载，两者连同目录一并消失，同目录另两个
+插件完好。
+
+**回退**：把 `obs-beauty_3.2.2.dll` 覆盖回 `obs-beauty.dll`（菜单清理只发生在
+安装器里，回退 dll 不改变卸载行为）。
 
 ## 维护（2026-11-06 · LICENSE 改为 FSF 原文，版权说明拆到 COPYRIGHT.md）
 
