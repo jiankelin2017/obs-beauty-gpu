@@ -17,7 +17,7 @@ supersedes: 无（新增决策记录）
 > **决策状态**：已接受（3.0.1 落地）。
 > **适用条件**：3.0.1、OBS 32.x、Windows。
 > **失效说明**：`Program Files\obs-studio\obs-plugins\64bit` 是历史布局，写入该目录等于没装；
-> Setup.exe 端到端安装 / 卸载本轮**未实跑**。
+> Setup.exe 端到端安装 / 卸载在 3.0.1 时点**未实跑**，已于 3.2.2 补齐（见文末「后续」）。
 
 ## 上下文
 
@@ -56,5 +56,26 @@ supersedes: 无（新增决策记录）
 
 ## 待人工确认
 
-- Setup.exe 端到端安装 / 卸载（会写 HKLM 并创建卸载器副本），本轮按边界未执行。
+- ~~Setup.exe 端到端安装 / 卸载（会写 HKLM 并创建卸载器副本），本轮按边界未执行。~~
+  **3.2.2 已实跑**，见下节。
 - 不同 OBS 版本 / 便携版是否同样只认 ProgramData 布局，未在本仓库外验证。
+
+## 后续（3.2.2，2026-11-06 20:52）
+
+端到端安装 / 卸载已在真机执行，决策前提得到确认，并暴露了原包的一处缺陷：
+
+- **安装**（`Setup.exe --quiet`，退出码 0）：写出 10 个文件 —— dll、
+  `onnxruntime.dll`、`models\yunet.onnx`、`THIRD-PARTY-NOTICES.md`、6 支 shader，
+  外加卸载器副本 `uninstall.exe`。注册表
+  `HKLM\...\Uninstall\obs-beauty` 的 `DisplayVersion` = `3.2.2`，
+  `InstallLocation` = `C:\ProgramData\obs-studio\plugins\obs-beauty`，
+  `UninstallString` 指向 `uninstall.exe --uninstall`。
+  dll 与 `02_构建/obs-beauty.dll` 的 MD5 均为 `ABF4413811F00C2E6EE1B9E14D0B84F5`。
+- **卸载**（`uninstall.exe --uninstall --quiet`，退出码 0）：插件根目录在 2 秒内
+  被自删的 cmd 完全移除，注册表项同时消失。
+- **缺陷**：3.2.2 之前的包只带 dll + shader，`onnxruntime.dll` 与 `yunet.onnx` 要
+  手工放。缺这两样时滤镜照样加载、不报错，只是人脸检测起不来、退化成全帧磨皮 ——
+  与 3.0.0「装到错目录」属于同一类失败：**看起来装成功了**。现已把两者内嵌进包，
+  并在安装末尾 stat 三个关键文件，缺一即报错退出。
+- 卸载会连 `models\` 一起删。手工放进去的其它模型（如 `selfie_multiclass_256.onnx`）
+  一并消失，这是有意为之：卸载的语义是回到没装过。

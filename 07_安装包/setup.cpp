@@ -17,6 +17,21 @@
 // obs-plugins\64bit，OBS 根本不加载 —— 装了等于没装（N13 的第二种形态）。
 // 同时去掉 _wsystem("cmd /c rmdir ...") 的路径拼接（命令注入 / 误删），
 // 改为 Win32 递归删除；写文件改为「临时文件 + 原子替换」，失败不留半截 dll。
+//
+// 3.2.2：补齐运行载荷，做成一键安装包。
+//   旧版只带 dll + 6 支 shader，装完还得手工把 onnxruntime.dll 与 yunet.onnx
+//   放进装机目录，否则自研引擎整条路径降级（人脸检测拿不到模型 → 无掩码）。
+//   现在这两样以 RCDATA 一并嵌入，安装时写到 dll 同目录：
+//     <root>\bin\64bit\onnxruntime.dll
+//     <root>\bin\64bit\models\yunet.onnx
+//   引擎的查找顺序是 BEAUTY_FACE_MODEL → <dll目录>\models\yunet.onnx →
+//   <dll目录>\yunet.onnx，放到 models\ 下正好走第二条；ONNX Runtime 由
+//   onnxSetRuntimeDir(自身目录) 用完整路径加载，不受 PATH 里同版本干扰。
+//   再分发 MIT 二进制必须随附许可文本，故 THIRD-PARTY-NOTICES.md 也进包。
+//
+// 版本号由 build_setup.ps1 从 beauty_params.h 的 BEAUTY_BUILD_STR 提取后写入
+// setup_ver.h 注入。旧版把 "3.0.1" 写死在三处，dll 已经到 3.2.2 而弹窗与
+// 注册表还写着 3.0.1 —— 版本脱节的根源就是手抄。
 // ===========================================================================
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -26,6 +41,12 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+
+// 由 build_setup.ps1 生成、并用 /FI 强制包含。单独手编本文件时退回 "dev"，
+// 这样漏注入只会显示成 dev，不会伪装成某个真版本。
+#ifndef BEAUTY_SETUP_VER
+#define BEAUTY_SETUP_VER L"dev"
+#endif
 
 static bool g_quiet = false;
 
@@ -172,7 +193,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     if (argv) LocalFree(argv);
     g_quiet = quiet;
 
-    if (findObs().empty()) {
+    // 卸载不要求 OBS 还在场：用户完全可能先卸了 OBS 才来清插件。
+    // 旧版在这里无条件检查，于是「先卸 OBS 再卸插件」时直接退出，
+    // 插件目录与注册表项原样留着，看起来像卸载失败。
+    if (!uninstall && findObs().empty()) {
         msg(L"找不到 OBS Studio（C:\\Program Files\\obs-studio）。请先安装 OBS。");
         return 2;
     }
@@ -181,8 +205,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     const std::wstring root = pluginRoot();
     if (root.empty()) { msg(L"无法定位 %PROGRAMDATA%，安装中止。"); return 2; }
 
-    const std::wstring plug = root + L"\\bin\\64bit\\obs-beauty.dll";
-    const std::wstring shad = root + L"\\data\\shaders";
+    const std::wstring binDir   = root + L"\\bin\\64bit";
+    const std::wstring plug     = binDir + L"\\obs-beauty.dll";
+    const std::wstring ortDll   = binDir + L"\\onnxruntime.dll";
+    const std::wstring modelDir = binDir + L"\\models";
+    const std::wstring model    = modelDir + L"\\yunet.onnx";
+    const std::wstring notices  = root + L"\\THIRD-PARTY-NOTICES.md";
+    const std::wstring shad     = root + L"\\data\\shaders";
     const std::wstring selfCopy = root + L"\\uninstall.exe";
     const wchar_t* KEY = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\obs-beauty";
 
@@ -199,7 +228,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     if (!uninstall && !quiet &&
         GetFileAttributesW(plug.c_str()) != INVALID_FILE_ATTRIBUTES) {
         int r = MessageBoxW(nullptr,
-            L"已安装 OBS Beauty GPU（obs-beauty 3.0.1）。\n\n"
+            L"已安装 OBS Beauty GPU（obs-beauty " BEAUTY_SETUP_VER L"）。\n\n"
             L"是(Y)  = 卸载\n"
             L"否(N)  = 重新安装（覆盖）\n"
             L"取消    = 退出",
@@ -210,11 +239,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 
     if (uninstall) {
         DeleteFileW(plug.c_str());
+        DeleteFileW(ortDll.c_str());
+        DeleteFileW(notices.c_str());
         DeleteFileW(selfCopy.c_str());
+        // models 整个删掉：yunet.onnx 是安装包带的，用户也可能手工放过可选的
+        // 分割/手部模型 —— 卸载的语义就是「回到没装过」，不挑着留。
+        removeTree(modelDir);
         removeTree(shad);
         removeTree(root + L"\\data\\obs-plugins\\obs-beauty");
-        // 旧布局残留
+        // dll / models 都清掉后 bin\64bit 只剩空壳，一并不留
+        removeTree(root + L"\\bin");
+        // 旧布局残留（3.0.0 及以前装在 Program Files 的 obs-plugins\64bit）
         DeleteFileW(legacyDll.c_str());
+        DeleteFileW(L"C:\\Program Files\\obs-studio\\obs-plugins\\64bit\\onnxruntime.dll");
+        removeTree(legacyData + L"\\models");
         removeTree(legacyData + L"\\shaders");
         removeTree(legacyData);
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, KEY);
@@ -242,15 +280,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         return 0;
     }
 
-    makeDir(root + L"\\bin\\64bit");
+    makeDir(binDir);
+    makeDir(modelDir);
     makeDir(shad);
 
-    struct Item { int id; const wchar_t* file; };
+    // kind 决定落点，不要用 id 判断 —— 旧版靠 "id == 101 ? dll : shader" 二分，
+    // 每加一类载荷就得再改一处条件，正是这类写法让安装包长期漏带运行时。
+    enum { K_DLL, K_ORT, K_MODEL, K_NOTICE, K_SHADER };
+    struct Item { int id; const wchar_t* file; int kind; };
     const Item items[] = {
-        {101, L"obs-beauty.dll"},
-        {201, L"detail.hlsl"}, {202, L"mask.hlsl"}, {203, L"region.hlsl"},
-        {204, L"smooth.hlsl"}, {205, L"tone.hlsl"},  {206, L"warp.hlsl"},
+        {101, L"obs-beauty.dll",          K_DLL},
+        {102, L"onnxruntime.dll",         K_ORT},
+        {103, L"yunet.onnx",              K_MODEL},
+        {104, L"THIRD-PARTY-NOTICES.md",  K_NOTICE},
+        {201, L"detail.hlsl",             K_SHADER},
+        {202, L"mask.hlsl",               K_SHADER},
+        {203, L"region.hlsl",             K_SHADER},
+        {204, L"smooth.hlsl",             K_SHADER},
+        {205, L"tone.hlsl",               K_SHADER},
+        {206, L"warp.hlsl",               K_SHADER},
     };
+    const int kItems = (int)(sizeof(items) / sizeof(items[0]));
+
     // 与 7_install_gpu.ps1 对齐：机器上若还留着旧版 shader 副本，一并刷新，
     // 否则 OBS 可能挑中那份旧文件，出现「新增 uniform 找不到」的静默失效。
     const std::wstring legacyShaders[] = {
@@ -258,20 +309,58 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         root + L"\\bin\\data\\shaders",
         root + L"\\data\\obs-plugins\\obs-beauty\\shaders",
     };
+
+    auto dstOf = [&](const Item& it) -> std::wstring {
+        switch (it.kind) {
+        case K_DLL:    return plug;
+        case K_ORT:    return ortDll;
+        case K_MODEL:  return model;
+        case K_NOTICE: return notices;
+        default:       return shad + L"\\" + it.file;
+        }
+    };
+
     int okCount = 0;
+    std::wstring failed;
     for (const auto& it : items) {
         std::vector<unsigned char> blob;
-        if (!readRes(it.id, blob)) continue;
-        const std::wstring dst = (it.id == 101) ? plug : (shad + L"\\" + it.file);
-        if (!writeFile(dst, blob)) continue;
+        if (!readRes(it.id, blob) || blob.empty()) {
+            failed += std::wstring(L"\n  · 资源缺失：") + it.file;
+            continue;
+        }
+        const std::wstring dst = dstOf(it);
+        if (!writeFile(dst, blob)) {
+            failed += std::wstring(L"\n  · 写入失败：") + dst;
+            continue;
+        }
         ++okCount;
-        if (it.id != 101) {
+        if (it.kind == K_SHADER) {
             for (const auto& ld : legacyShaders)
                 if (GetFileAttributesW(ld.c_str()) != INVALID_FILE_ATTRIBUTES)
                     writeFile(ld + L"\\" + it.file, blob);
         }
     }
-    if (okCount < 7) { msg(L"安装失败：资源写出不完整（DLL / 着色器）。"); return 4; }
+    // 一个都不能少：缺 dll 是装了个空壳，缺 onnxruntime/yunet 是「装了能开、
+    // 但人脸检测起不来」——后者不会报错，只是安静地退化，比直接失败更难查。
+    if (okCount < kItems) {
+        std::wstring m = L"安装未完成：只写出 " + std::to_wstring(okCount) + L" / "
+                       + std::to_wstring(kItems) + L" 个文件。" + failed
+                       + L"\n\n常见原因：杀软拦截写盘，或 OBS 未完全退出占用 dll。";
+        msg(m.c_str());
+        return 4;
+    }
+
+    // 写盘自检：不只看返回值，重新 stat 一遍三个关键文件。
+    const std::wstring must[] = { plug, ortDll, model };
+    for (const auto& p : must) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fad) ||
+            (fad.nFileSizeHigh == 0 && fad.nFileSizeLow == 0)) {
+            std::wstring m = L"安装后自检失败：文件不存在或为空\n  " + p;
+            msg(m.c_str());
+            return 4;
+        }
+    }
 
     // 卸载器 = 本 exe 自身副本
     wchar_t self[MAX_PATH] = {0};
@@ -283,8 +372,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     HKEY k;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, KEY, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr)
         == ERROR_SUCCESS) {
-        const wchar_t* name = L"OBS Beauty GPU (obs-beauty 3.0.1)";
-        const wchar_t* ver = L"3.0.1";
+        const wchar_t* name = L"OBS Beauty GPU (obs-beauty " BEAUTY_SETUP_VER L")";
+        const wchar_t* ver  = BEAUTY_SETUP_VER;
         std::wstring un = L"\"" + selfCopy + L"\" --uninstall";
         RegSetValueExW(k, L"DisplayName", 0, REG_SZ, (const BYTE*)name,
                        (DWORD)((wcslen(name) + 1) * sizeof(wchar_t)));
@@ -300,8 +389,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         RegCloseKey(k);
     }
 
-    wchar_t done[512];
-    swprintf(done, 512, L"安装完成：\n%s\n\n共写入 %d 个文件。\n启动 OBS → 源 → 滤镜 → + → Beauty (GPU)。",
+    wchar_t done[768];
+    swprintf(done, 768,
+             L"安装完成（obs-beauty " BEAUTY_SETUP_VER L"）：\n%s\n\n"
+             L"共写入 %d 个文件，含 ONNX Runtime 与人脸模型 —— 无需再手工放文件。\n"
+             L"再次运行本程序即可卸载。\n\n"
+             L"启动 OBS → 源 → 滤镜 → + → Beauty (GPU)。",
              plug.c_str(), okCount);
     msg(done);
     return 0;

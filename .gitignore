@@ -24,6 +24,13 @@
 # 它曾被误当源码入库，导致「改了源码但忘了重打包」时出现旧 shader 副本。唯一手写源是
 # 01_源码/shaders/，另外三处（安装包 / ProgramData 装机目录 / D:\obs_beauty_gpu）全是生成物。
 07_安装包/shaders/
+# 安装包的其余载荷与生成的版本头：全部由 build_setup.ps1 从仓库别处拷来，
+# 源头分别是 06_离线验证/(onnxruntime.dll, models/yunet.onnx)、根目录的
+# THIRD-PARTY-NOTICES.md 与 01_源码/beauty_params.h。留在包里只会制造
+# 「改了源却漏了副本」的假 diff。（*.dll 已被上一行的 07_安装包/*.dll 覆盖）
+07_安装包/yunet.onnx
+07_安装包/THIRD-PARTY-NOTICES.md
+07_安装包/setup_ver.h
 
 # 离线验证运行时依赖（onnxruntime / core_probe 等第三方程序，体积大，非源码）
 06_离线验证/*.dll
@@ -37,6 +44,24 @@
 # 命中的是数据文件（.raw/.png），脚本（_*.py）不在规则内。
 06_离线验证/_*.raw
 06_离线验证/_*.png
+# 探针还会吐 .rgba / .bin（分割掩码、中间帧）与 .txt（选点日志）。
+# 掩码是真人素材的派生数据，和 goldens 同口径：只在本机留。
+# 脚本（_*.py）不在规则内 —— 判据脚本要入库，否则文档里的引用指向空气。
+06_离线验证/_*.rgba
+06_离线验证/_*.bin
+06_离线验证/_*.txt
+
+# 第三方 ONNX 模型（合计约 140 MB，非源码）。yunet.onnx 例外：生产路径必需，
+# 已在库内，用否定规则放行 —— 父目录未被排除，所以 ! 能生效。
+06_离线验证/models/*.onnx
+!06_离线验证/models/yunet.onnx
+
+# 探针 / 分割实验的临时目录与备份
+06_离线验证/backup/
+06_离线验证/onnx_probe/
+06_离线验证/segtest/
+06_离线验证/*.bak_chin*
+07_安装包/backup/
 
 # 回归台的输入帧与四条基准（含 .bak 备份）都由真人素材派生，帧内是可辨认的人脸，
 # 属个人数据。只在本机保留、不入库；首次 clone 后需自备素材重采（含 * 是为了

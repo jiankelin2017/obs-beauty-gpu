@@ -37,7 +37,7 @@ status: Active
 | SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
 | 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
 | 多实例引擎槽决策 | [`adr/adr-multi-instance-slots.md`](adr/adr-multi-instance-slots.md) | adr | Active | 3.2.2 | Jian | 2026-11-06 | 3.0.0 / 3.0.1 决策 + 3.2.2 worker 重启加固；证据见 `CHANGELOG.md` |
-| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.2.2 | Jian | 2026-11-05 | 3.0.1 决策；`Setup.exe` 端到端安装 / 卸载未实跑 |
+| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.2.2 | Jian | 2026-11-06 | 3.0.1 决策；3.2.2 补端到端安装 / 卸载实跑记录与「载荷缺失」同类缺陷 |
 | 分割不用于遮挡决策 | [`adr/adr-seg-not-for-occlusion.md`](adr/adr-seg-not-for-occlusion.md) | adr | Active | 3.2.2 | Jian | 2026-11-05 | 替代 `04_文档/结论_分割对手遮脸无效_20261105.md`（原文已归档） |
 | CPU/GPU 共用 faceGeom | [`adr/adr-cpu-gpu-same-mask.md`](adr/adr-cpu-gpu-same-mask.md) | adr | Active（归纳 · 待人工确认） | 3.2.2 | Jian | 2026-11-05 | 归纳自 3 篇修复记录，**非原始决策** |
 

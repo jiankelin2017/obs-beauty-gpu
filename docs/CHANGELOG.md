@@ -27,8 +27,34 @@ status: Active
 | 新增 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | 登记 ONNX Runtime / YuNet / BiSeNet / MediaPipe / 手部模型的许可与分发状态；顺带纠正一处口径：YuNet 模型目录是 MIT，而 `opencv_zoo` **仓库根是 Apache-2.0**，两者不能混用 |
 | `07_安装包/models/` 下 15.5 MB 手部模型移入 `07_安装包/backup/` | 打包脚本从未收录、生产路径也不加载，属死重 |
 
-**怎么回退**：历史重写前的完整仓库镜像在 `D:\插件\_obs_beauty_history_20261106.bundle`
-（`git clone` 该 bundle 即可恢复含个人数据的旧历史）。**该 bundle 内含人脸图像，验证完请删除。**
+**怎么回退**：历史重写前的完整仓库镜像曾是 `D:\插件\_obs_beauty_history_20261106.bundle`，
+**已于 2026-11-06 20:50 按用户要求删除**（它含人脸图像，留着本身就是风险）。
+重写后的仓库只少了「个人数据文件」与一个只往 `05_验证/out/` 加文件的空提交，其余 80 个提交内容逐字节不变，
+因此不需要那份镜像也能正常工作。
+
+## 维护（2026-11-06 · 安装包一键化，重编 dll）
+
+**`BEAUTY_BUILD_STR` 仍为 3.2.2**，画面行为与上一构建完全相同；这一轮改的是**怎么装**和**装完是否可用**。
+
+| 改动 | 影响谁 |
+|---|---|
+| `Setup.exe` 补齐运行载荷：`onnxruntime.dll`（11.6 MB）与 `yunet.onnx`（232 KB）内嵌进包，安装时落到 `<root>\bin\64bit\` 与 `\models\` | **新装机器不用再手工拷文件**。此前装完能开滤镜，但人脸检测起不来 —— 不报错，只是安静地退化成全帧磨皮，最难查的那种 |
+| 版本号改为构建时从 `beauty_params.h` 注入 | 旧包把 `3.0.1` 写死在三处（弹窗、注册表 `DisplayName` / `DisplayVersion`），dll 已到 3.2.2 而"应用和功能"里还显示 3.0.1。现在单一来源，dll 版本不一致时打包直接失败 |
+| 安装包体积 1.5 MB → **12.7 MB** | 全部来自那 11.8 MB 运行时与模型；这是"一键可用"的必要代价 |
+| 卸载会清 `models\` 与 `bin\`，并移除 `THIRD-PARTY-NOTICES.md` | 卸载后回到"没装过"的状态。**注意：手工放进 `models\` 的其它模型（如 `selfie_multiclass_256.onnx`）也会一起删除** |
+| 卸载不再要求 OBS 存在 | 先卸 OBS 再卸插件，此前会直接退出、插件残留 |
+| 安装后自检三个关键文件的存在与大小 | 写盘被杀软拦下时当场报错，不再"装完了但缺文件" |
+| `obs-beauty.cpp` 的 `BEAUTY_THUMB_DUMP` 落盘改 `GetTempPathW` + `_wfopen` **随本次重编生效** | 上一轮只改了源码没重编，交付的 dll 里仍是旧路径；本次 dll 已重编，`Administrator` 字符串归零 |
+| 安装包不再重复嵌同一份 dll（旧的无用 `id 1` 资源） | 省 645 KB |
+
+**交付**：dll `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`；
+`Setup.exe 12,727,808 B / MD5 6ECEB3096C8A6DC21C155EFD5C61FCCB`。
+`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（安装包载荷项已扩到 10 个内嵌资源）。
+
+**怎么验**：双击 `Setup.exe` → 装完直接开 OBS 加滤镜，**不手工放任何文件** → 镜头前有人时，
+日志里 `frame#N drawn … faces=` 应出现非 0，`px=` 不再是 `-1`。若恒为 `faces=0` 且 `px=-1`，
+说明模型没到位（回到「全帧磨皮」的降级态）。
+卸载：再双击一次 `Setup.exe` 选"是"。
 
 ## 3.2.2（2026-11-06 · 修复：删掉美颜滤镜再加回来，该槽的美颜会彻底失效）
 
@@ -43,8 +69,11 @@ status: Active
 | 新增离线判据 `06_离线验证/_slot_cycle_probe.py` | 模拟「删掉再加回来」，再用无脸画面判定 worker 是否真的重启。**对照实验已做**：撤掉修复那一行，同一脚本跑出 60 帧 `faces=1` 全挂（正是「效果冻住」的样子）；加回修复后第 2 帧即归 0 |
 
 **装到哪**：`%PROGRAMDATA%\obs-studio\plugins\obs-beauty\bin\64bit\obs-beauty.dll`
-（本次交付 `635,904 B / MD5 95C390D2DEDD474E1471E00C9C70311E`，上一版备份为同目录 `obs-beauty_3.2.1.dll`；
-安装包 `Setup.exe 1,538,048 B / 4796355CF29F510011B47D555E4A2AFE` 已同批重打，`check_release.py --strict` **12 PASS / 0 FAIL**）
+（3.2.2 首次交付 `635,904 B / MD5 95C390D2DEDD474E1471E00C9C70311E`；
+同日重编后为 `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`，
+差别仅来自 `BEAUTY_THUMB_DUMP` 落盘改宽字符路径，画面行为不变，详见上一节；
+上一版备份为同目录 `obs-beauty_3.2.1.dll`。安装包已重打成 12.7 MB 的一键包，
+`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**）
 
 **回退**：把 `obs-beauty_3.2.1.dll` 改名覆盖回 `obs-beauty.dll`。
 

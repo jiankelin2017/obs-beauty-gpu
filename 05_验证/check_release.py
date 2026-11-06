@@ -25,8 +25,11 @@
     5. 着色器      源码 / 安装包 / 装机 / solo 目录 四份 6 个 .hlsl 全部逐字节相同
     6. 开关表      开关总表.md ⊆ 源码 getenv()，且「源码有、表里没有、别的文档提到」= 0
     7. 安装路径    setup.cpp 的 plug/shad 必须由 %PROGRAMDATA% 插件根派生（3.0.1 修 N13 第二种形态）
+                   3.2.2 起判据改为「赋值链可追到 root」：允许 binDir 这类中间变量，
+                   但 plug 必须落在 bin\64bit 下、且不得是 Program Files 字面量
     8. 安装包版本串 Setup.exe 内真的含当前版本（ASCII / UTF-16LE）
-    9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 6 个 shader，与 07_安装包 payload 逐字节相同
+    9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 运行时 + 人脸模型 + 许可 +
+                   6 个 shader，与磁盘权威副本逐字节相同（3.2.2 起 5 类 10 项）
 
     7-9 是 3.0.1 新增：3.0.0 时 Setup.exe 只被检查「文件存在」，于是它装到
     Program Files 旧目录（OBS 32.x 根本不加载）也能一路 9 PASS 发布出去。
@@ -252,9 +255,27 @@ SETUP_CPP = os.path.join(ROOT, "07_安装包", "setup.cpp")
 # setup.rc 的资源 id -> 文件名（顺序与 rc 保持一致）
 SETUP_RCDATA = {
     101: "obs-beauty.dll",
+    102: "onnxruntime.dll",
+    103: "yunet.onnx",
+    104: "THIRD-PARTY-NOTICES.md",
     201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
     204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
 }
+
+
+def setup_payload_disk(name):
+    """内嵌资源对应的磁盘权威副本。
+
+    104 以仓库根的那份为准（它入库、受审查）；07_安装包/ 下的副本是构建时
+    拷进去的中间物，比它自己没有意义。
+    """
+    if name == "obs-beauty.dll":
+        return PKG_DLL
+    if name == "THIRD-PARTY-NOTICES.md":
+        return os.path.join(ROOT, name)
+    if name.endswith(".hlsl"):
+        return os.path.join(ROOT, "07_安装包", "shaders", name)
+    return os.path.join(ROOT, "07_安装包", name)
 
 
 def read_setup_resources():
@@ -296,16 +317,48 @@ def read_setup_resources():
         k.FreeLibrary(mod)
 
 
+def _wstring_expr(text, name):
+    """取 `const std::wstring <name> = <expr>;` 的右值表达式，没有则 None。"""
+    m = re.search(r"const\s+std::wstring\s+%s\s*=\s*([^;]+);" % re.escape(name),
+                  text)
+    return m.group(1).strip() if m else None
+
+
+def _derives_from_root(text, name, depth=0):
+    """name 的赋值表达式能否一路追到 root。
+
+    允许经中间变量（3.2.2 把 bin 目录抽成了 binDir），否则把 `plug = root + ...`
+    内联或拆开都会让闸门误判 —— 判据该是「派生自 %PROGRAMDATA% 插件根」这个
+    语义，不是某一种写法。
+    """
+    if depth > 3:
+        return False
+    e = _wstring_expr(text, name)
+    if e is None:
+        return False
+    if re.search(r"\broot\b", e):
+        return True
+    for ref in re.findall(r"\b([A-Za-z_]\w*)\b", e):
+        if ref != name and _derives_from_root(text, ref, depth + 1):
+            return True
+    return False
+
+
 def check_setup(ver):
     # (7) 路径：plug / shad 必须由 ProgramData 插件根派生，不能是旧布局
     if not os.path.isfile(SETUP_CPP):
         add("FAIL", "安装路径", "找不到 %s" % SETUP_CPP)
     else:
         t = read_text(SETUP_CPP)
+        plug_e = _wstring_expr(t, "plug") or ""
+        bin_e = _wstring_expr(t, "binDir") or ""
         ok = ("ProgramData" in t
               and "obs-studio\\\\plugins\\\\obs-beauty" in t
-              and re.search(r"const std::wstring plug\s*=\s*root", t)
-              and re.search(r"const std::wstring shad\s*=\s*root", t))
+              and _derives_from_root(t, "plug")
+              and _derives_from_root(t, "shad")
+              and "obs-beauty.dll" in plug_e
+              and ("\\\\bin\\\\64bit" in plug_e or "\\\\bin\\\\64bit" in bin_e)
+              and "Program Files" not in plug_e)
         if ok:
             add("PASS", "安装路径",
                 "setup.cpp 的 plug/shad 由 %PROGRAMDATA%\\obs-studio\\plugins\\obs-beauty 派生，与装机脚本一致")
@@ -329,8 +382,7 @@ def check_setup(ver):
         return
     bad = []
     for rid, name in SETUP_RCDATA.items():
-        disk = (PKG_DLL if name == "obs-beauty.dll"
-                else os.path.join(ROOT, "07_安装包", "shaders", name))
+        disk = setup_payload_disk(name)
         if not os.path.isfile(disk):
             bad.append("%s 磁盘副本缺失" % name)
         elif hashlib.md5(res[rid]).hexdigest().upper() != md5(disk):
@@ -339,7 +391,8 @@ def check_setup(ver):
         add("FAIL", "安装包载荷", "；".join(bad))
     else:
         add("PASS", "安装包载荷",
-            "Setup.exe 内嵌 dll + 6 个 shader 与 07_安装包 payload 逐字节相同")
+            "Setup.exe 内嵌 %d 项（dll + 运行时 + 人脸模型 + 许可 + 6 shader）"
+            "与磁盘副本逐字节相同" % len(SETUP_RCDATA))
 
 
 # ---------------------------------------------------------------------- main

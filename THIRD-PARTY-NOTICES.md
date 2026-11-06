@@ -10,8 +10,8 @@
 
 | 组件 | 版本 | 许可 | 用途 | 是否入库 | 是否随安装包分发 | 依据 |
 |---|---|---|---|---|---|---|
-| ONNX Runtime | 1.20.1（API 版本 20） | MIT | 模型推理（YuNet / 分割 / 手部） | 否（`06_离线验证/onnxruntime.dll`，已被 `.gitignore` 挡住） | **否**——当前 `Setup.exe` 不含，属已知分发缺口 | 上游 Microsoft/onnxruntime 仓库 LICENSE |
-| YuNet 人脸检测模型 | 2023mar | MIT | 生产路径必需：人脸框 + 5 关键点 | **是**：`06_离线验证/models/yunet.onnx`<br>SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` | **否**——同属分发缺口 | `opencv/opencv_zoo` 下 `models/face_detection_yunet/LICENSE` 明确写「本目录所有文件为 MIT」；注意**仓库根目录是 Apache-2.0，与本目录不同**，引用时别混。上游训练方 `ShiqiYu/libfacedetection.train` |
+| ONNX Runtime | 1.20.1（API 版本 20） | MIT | 模型推理（YuNet / 分割 / 手部） | 否（`06_离线验证/onnxruntime.dll`，已被 `.gitignore` 挡住） | **是**：3.2.2 起内嵌进 `Setup.exe`，落到 `<root>\bin\64bit\` | 上游 `microsoft/onnxruntime` 仓库 LICENSE |
+| YuNet 人脸检测模型 | 2023mar | MIT | 生产路径必需：人脸框 + 5 关键点 | **是**：`06_离线验证/models/yunet.onnx`<br>SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` | **是**：3.2.2 起内嵌，落到 `<root>\bin\64bit\models\` | `opencv/opencv_zoo` 下 `models/face_detection_yunet/LICENSE` 明确写「本目录所有文件为 MIT」，版权行 `Copyright (c) 2020 Shiqi Yu`；注意**仓库根目录是 Apache-2.0，与本目录不同**，引用时别混。上游训练方 `ShiqiYu/libfacedetection.train` |
 
 ## 二、仅离线实验使用（生产路径默认不加载）
 
@@ -48,8 +48,81 @@
 `ONNX Runtime` / `MediaPipe` / `BiSeNet` 字样是**技术选型说明与归属标注**，必须保留：
 删掉它们不会减少任何风险，反而会让 MIT / Apache-2.0 要求的署名消失。
 
+## 六、随安装包分发的第三方二进制（3.2.2 起）
+
+`Setup.exe` 把下列文件作为 RCDATA 内嵌，安装时写出，卸载时删除：
+
+| 落盘位置 | 源文件 | 许可 |
+|---|---|---|
+| `<root>\bin\64bit\onnxruntime.dll` | `06_离线验证/onnxruntime.dll` | MIT |
+| `<root>\bin\64bit\models\yunet.onnx` | `06_离线验证/models/yunet.onnx` | MIT |
+| `<root>\THIRD-PARTY-NOTICES.md` | 本文件 | —— |
+
+`<root>` = `C:\ProgramData\obs-studio\plugins\obs-beauty`。
+
+两个 MIT 组件都要求「在软件的所有副本或实质部分中保留上述版权声明与许可声明」，
+所以本文件必须随装随附 —— 它不是可选说明，而是再分发的前提条件。
+
+### ONNX Runtime
+
+```
+MIT License
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### YuNet（`models/face_detection_yunet/LICENSE`）
+
+```
+MIT License
+
+Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+> ONNX Runtime 官方发布包另带一份 `ThirdPartyNotices.txt`，覆盖它自身链接的
+> 其他组件（如 abseil、protobuf 等）。本轮只分发 `onnxruntime.dll` 主库，
+> 未随附该文件 —— 对外公开发布前应补上，见「待办」。
+
 ## 待办
 
 - [ ] 根目录缺自有 `LICENSE`：本仓库自身以何种许可对外，尚未确定。
-- [ ] 安装包未分发 `onnxruntime.dll` 与 `yunet.onnx`，装机后需手工放置；若改为随包
-      分发，则必须一并附上本文件与 ONNX Runtime 的 `ThirdPartyNotices.txt`。
+- [ ] 未随附 ONNX Runtime 官方 `ThirdPartyNotices.txt`（覆盖其内部依赖）。
+      从上游 release 压缩包原样取出即可，不要手写。
+- [ ] `07_安装包/models/` 已清空，`build_setup.ps1` 也不再引用该目录，
+      可择机删除整个文件夹。
