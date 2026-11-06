@@ -3,10 +3,14 @@
 // which setup.cpp never reads -- dropped to stop paying for it twice.
 // 102/103 = runtime + face model, so a fresh install works without manual copies.
 // 104 = third-party license text (MIT requires it when redistributing the above).
+// 105 = this project's own license (GPL-2.0). Ships with the installer so the
+//       recipient has the terms, and because GPL requires the license text to
+//       accompany distribution.
 101 RCDATA "obs-beauty.dll"
 102 RCDATA "onnxruntime.dll"
 103 RCDATA "yunet.onnx"
 104 RCDATA "THIRD-PARTY-NOTICES.md"
+105 RCDATA "LICENSE"
 201 RCDATA "shaders\\detail.hlsl"
 202 RCDATA "shaders\\mask.hlsl"
 203 RCDATA "shaders\\region.hlsl"

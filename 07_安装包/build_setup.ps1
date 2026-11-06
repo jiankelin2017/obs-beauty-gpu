@@ -101,6 +101,10 @@ Copy-Item (Need-File (Join-Path $offDir "models\yunet.onnx") "yunet.onnx").FullN
           (Join-Path $pkgDir "yunet.onnx") -Force
 Copy-Item (Need-File (Join-Path $root "THIRD-PARTY-NOTICES.md") "notices").FullName `
           (Join-Path $pkgDir "THIRD-PARTY-NOTICES.md") -Force
+# This project's own EULA. "All rights reserved" is only meaningful if the
+# recipient can actually read it, so it ships with the installer.
+Copy-Item (Need-File (Join-Path $root "LICENSE") "LICENSE").FullName `
+          (Join-Path $pkgDir "LICENSE") -Force
 
 $pkgShaders = Join-Path $pkgDir "shaders"
 if (-not (Test-Path $pkgShaders)) { New-Item -ItemType Directory -Force -Path $pkgShaders | Out-Null }

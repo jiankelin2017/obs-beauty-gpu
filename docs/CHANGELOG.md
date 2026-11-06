@@ -46,9 +46,10 @@ status: Active
 | 安装后自检三个关键文件的存在与大小 | 写盘被杀软拦下时当场报错，不再"装完了但缺文件" |
 | `obs-beauty.cpp` 的 `BEAUTY_THUMB_DUMP` 落盘改 `GetTempPathW` + `_wfopen` **随本次重编生效** | 上一轮只改了源码没重编，交付的 dll 里仍是旧路径；本次 dll 已重编，`Administrator` 字符串归零 |
 | 安装包不再重复嵌同一份 dll（旧的无用 `id 1` 资源） | 省 645 KB |
+| 新增根目录 `LICENSE`：**GPL-2.0**（与 OBS 宿主同一许可） | 此前仓库无任何许可文件。现在明确：可自由使用、修改、再分发（含商用），但**分发修改版必须同样以 GPL-2.0 开源**并保留版权声明。选 GPL-2.0 是因为插件动态链接 `libobs`（OBS 本身即 GPL-2.0），分发时许可层面不存在冲突。第三方组件（ONNX Runtime / YuNet 的 MIT）不受影响，仍在 `THIRD-PARTY-NOTICES.md` 单独声明 —— MIT 与 GPL 兼容。`LICENSE` 随安装包落到装机目录 |
 
 **交付**：dll `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`；
-`Setup.exe 12,727,808 B / MD5 6ECEB3096C8A6DC21C155EFD5C61FCCB`。
+`Setup.exe 12,748,800 B / MD5 CF87EC1629D82CD4D865693B7F439C07`。
 `check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（安装包载荷项已扩到 10 个内嵌资源）。
 
 **怎么验**：双击 `Setup.exe` → 装完直接开 OBS 加滤镜，**不手工放任何文件** → 镜头前有人时，

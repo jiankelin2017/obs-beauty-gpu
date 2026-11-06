@@ -30,6 +30,7 @@
 # 「改了源却漏了副本」的假 diff。（*.dll 已被上一行的 07_安装包/*.dll 覆盖）
 07_安装包/yunet.onnx
 07_安装包/THIRD-PARTY-NOTICES.md
+07_安装包/LICENSE
 07_安装包/setup_ver.h
 
 # 离线验证运行时依赖（onnxruntime / core_probe 等第三方程序，体积大，非源码）

@@ -26,7 +26,7 @@ supersedes: 04_文档/README.md（已归档）
 | 3.2.1 改了什么 | 「仅色彩层」诊断补 `geomOnly` 字段并直接写出结论（`px=-1` 无有效掩码 / `px=0 且 geomOnly=1` 正常 / `px=0 且 geomOnly=0` 异常） |
 | 3.2.0 改了什么 | 新增**自动输入方向认定**（`BEAUTY_AUTO_ROT`）：采集卡输出横躺、场景项旋转成竖屏时，插件自己在 90°/270° 上试出正确方向并补偿。修「磨皮冻在横屏坐标、拉参数不响应、美白失效」。另修 `warmUp()` 不幂等 |
 | 3.0.1 修了什么 | 安装包路径改 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty`、槽位失败路径悬空钩子、worker 释放竞态、命令注入面、闸门补 3 条断言 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
-| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 12,727,808 B / 6ECEB3096C8A6DC21C155EFD5C61FCCB`（一键包，内含 onnxruntime + yunet + 许可）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
+| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 12,748,800 B / CF87EC1629D82CD4D865693B7F439C07`（一键包，内含 onnxruntime + yunet + LICENSE + 第三方声明）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
 | 安装方式 | 双击 `07_安装包/Setup.exe` 即装完可用，**不再需要手工放 `onnxruntime.dll` / `yunet.onnx`**；再双击一次即卸载（目录与注册表一并清除） |
 | 离线回归 | 4 条 golden 逐字节相同；方向判据 `06_离线验证/_autorot_probe.py`（3 例全 PASS）；槽位循环判据 `06_离线验证/_slot_cycle_probe.py`（PASS，且已做「撤掉修复必挂」的反向对照） |
 | 多机位自动化 | 4 个独立源各挂 1 滤镜 → `slot=0/1/2/3 活跃实例=1/2/3/4`；删一路、槽复用、无黑屏 / 条纹 / 崩溃 |
@@ -105,3 +105,29 @@ py -3.12 05_验证\check_release.py --strict
 `design/` 每模块 1 篇、`guides/` 每场景 1 篇、`reference/` 每主题 1 篇、`adr/` 一事一篇、
 `archive/` 隔离存放；主目录每类只留当前版，命名 `类型-主题.md`，禁止 `final_v3_副本` 一类命名。
 新增文档只能放规定位置。
+
+## 7. 许可
+
+**本项目以 GNU General Public License v2.0 发布。** 完整条款见仓库根目录
+[`LICENSE`](../LICENSE)（GPL-2.0 全文 + 本项目的适用范围说明）。
+
+简单说：你可以自由使用、修改、再分发，包括商用；但**如果你分发修改后的版本，
+必须同样以 GPL-2.0 开源**，并保留版权声明与"无担保"声明。这与 OBS Studio
+宿主的许可一致，所以对外分发插件在许可层面不存在冲突。
+
+> 版本口径：本文件声明的是 **GPL-2.0 only**（不含"或任何更高版本"）。
+> 若你希望允许下游自行升级到 GPL-3.0，把 `LICENSE` 头部那句改成
+> `... either version 2 of the License, or (at your option) any later version.`
+> 即可 —— 这是 GPL-2.0-or-later 的写法。
+
+第三方组件的许可与本许可并行，不因本许可而改变：
+
+| 组件 | 许可 | 说明 |
+|---|---|---|
+| ONNX Runtime | MIT（Microsoft） | 随安装包分发，许可全文在 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md)。MIT 与 GPL 兼容 |
+| YuNet 人脸检测模型 | MIT（Shiqi Yu） | 同上 |
+| BiSeNet / MediaPipe / 手部模型 | MIT / Apache-2.0 | 仅本地实验使用，不入库、不分发 |
+| OBS Studio（宿主） | GPL-2.0 | 本插件以动态链接方式使用 `libobs`，与本项目同许可 |
+
+商标说明：本插件是独立第三方插件，与 OBS Project / OBS Studio 官方无隶属、
+赞助或背书关系；"OBS" 为其权利人的商标，此处仅用于说明兼容性。

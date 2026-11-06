@@ -258,6 +258,7 @@ SETUP_RCDATA = {
     102: "onnxruntime.dll",
     103: "yunet.onnx",
     104: "THIRD-PARTY-NOTICES.md",
+    105: "LICENSE",
     201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
     204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
 }
@@ -267,11 +268,11 @@ def setup_payload_disk(name):
     """内嵌资源对应的磁盘权威副本。
 
     104 以仓库根的那份为准（它入库、受审查）；07_安装包/ 下的副本是构建时
-    拷进去的中间物，比它自己没有意义。
+    拷进去的中间物，比它自己没有意义。105（LICENSE）同理。
     """
     if name == "obs-beauty.dll":
         return PKG_DLL
-    if name == "THIRD-PARTY-NOTICES.md":
+    if name in ("THIRD-PARTY-NOTICES.md", "LICENSE"):
         return os.path.join(ROOT, name)
     if name.endswith(".hlsl"):
         return os.path.join(ROOT, "07_安装包", "shaders", name)
