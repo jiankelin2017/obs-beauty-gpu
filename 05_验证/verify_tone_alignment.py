@@ -12,8 +12,19 @@
 """
 import io, os, re, sys
 
-SRC = "D:/插件/OBS美颜源码/01_源码/beauty_freq.cpp"
-HLS = "D:/插件/OBS美颜GPU版/01_源码/shaders/tone.hlsl"
+# 仓库根：本文件在 05_验证/ 下，退一级即根目录。三个路径全部相对根解析，脚本
+# 不再写死任何本机绝对路径（原先写死了两个不同磁盘上的项目目录）。
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# CPU 主源在另一个工程里，必须由调用方指定：--src 或环境变量 BEAUTY_CPU_SRC。
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BEAUTY_CPU_SRC", "")
+HLS = os.path.join(_ROOT, "01_源码", "shaders", "tone.hlsl")
+
+if not SRC or not os.path.isfile(SRC):
+    sys.exit("缺少 CPU 主源 beauty_freq.cpp 的路径：\n"
+             "    python verify_tone_alignment.py <beauty_freq.cpp>\n"
+             "或设置环境变量 BEAUTY_CPU_SRC。")
+if not os.path.isfile(HLS):
+    sys.exit("找不到 tone.hlsl：" + HLS)
 
 # ---------------------------------------------------------------- 解析 C++ 源
 def parse_cpp_array(path, name, n):

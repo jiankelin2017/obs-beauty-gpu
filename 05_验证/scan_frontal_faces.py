@@ -7,8 +7,7 @@
 相同的检测器打分。
 
 用法：
-    py -3 05_验证/scan_frontal_faces.py                 # 扫默认目录
-    py -3 05_验证/scan_frontal_faces.py <目录> [目录...]
+    py -3 05_验证/scan_frontal_faces.py <目录> [目录...]   # 目录必填
     py -3 05_验证/scan_frontal_faces.py --top 10 <目录>
 
 判据（三档，全部来自模型输出的 5 个关键点，不含任何人工调参）：
@@ -26,14 +25,14 @@ import sys
 
 import cv2
 
-DEFAULT_DIRS = [
-    r"C:/Users/Administrator/Pictures",
-    r"C:/Users/Administrator/Desktop",
-    r"C:/Users/Administrator/Documents",
-    r"C:/Users/Administrator/Downloads",
-]
+# 默认不扫任何目录：早先这里写死了本机的 Pictures/Desktop/Documents/Downloads，
+# 既把用户目录结构写进了仓库，也让「不带参数跑一下」变成扫私人文件。现在必须显式
+# 给目录（或设 BEAUTY_SCAN_DIRS，多个用 os.pathsep 分隔）。
+_ENV_DIRS = os.environ.get("BEAUTY_SCAN_DIRS", "")
+DEFAULT_DIRS = [p for p in _ENV_DIRS.split(os.pathsep) if p.strip()]
 MODEL_CANDIDATES = [
-    r"D:/插件/OBS美颜GPU版/06_离线验证/models/yunet.onnx",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "06_离线验证", "models", "yunet.onnx"),
     r"C:/ProgramData/obs-studio/plugins/obs-beauty/bin/64bit/models/yunet.onnx",
 ]
 EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
@@ -172,7 +171,10 @@ def main(argv):
     ap.add_argument("--min-frac", type=float, default=0.25,
                     help="主脸框高占图高的最小比例，默认 0.25")
     a = ap.parse_args(argv[1:])
-    scan(a.dirs or DEFAULT_DIRS, a.top, a.min_frac)
+    dirs = a.dirs or DEFAULT_DIRS
+    if not dirs:
+        ap.error("必须指定至少一个待扫描目录（或设 BEAUTY_SCAN_DIRS）")
+    scan(dirs, a.top, a.min_frac)
     return 0
 
 

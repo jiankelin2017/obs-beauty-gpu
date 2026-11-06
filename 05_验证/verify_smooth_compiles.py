@@ -28,8 +28,9 @@ smooth.hlsl 真编译门禁。
 """
 import io, os, re, subprocess, sys, tempfile
 
-HLS = sys.argv[1] if len(sys.argv) > 1 else \
-    "D:/插件/OBS美颜GPU版/01_源码/shaders/smooth.hlsl"
+HLS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "01_源码", "shaders", "smooth.hlsl")
 FXC = "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/fxc.exe"
 
 txt = io.open(HLS, "r", encoding="utf-8").read()

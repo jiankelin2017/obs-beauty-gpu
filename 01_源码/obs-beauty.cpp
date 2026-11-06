@@ -5934,9 +5934,18 @@ static bool beauty_thumb_readback(struct beauty_filter *f)
 	 * 数字 —— 只有把图拿出来看才能一次定位。 */
 	if (!f->thumb_dumped && getenv("BEAUTY_THUMB_DUMP")) {
 		f->thumb_dumped = true;
-		// 路径必须是纯 ASCII：fopen 走 ANSI 代码页，中文目录在这里直接失败。
-		FILE *fp = fopen("C:/Users/Administrator/AppData/Local/Temp/thumb_dump.rgba",
-				 "wb");
+		/* 落盘位置取系统临时目录，不写死任何用户路径（早先写死过某个本机
+		 * %LOCALAPPDATA%，换机器必然失败，也把用户名带进了源码）。
+		 * 必须走宽字符：fopen 用 ANSI 代码页，中文用户名下的临时目录会
+		 * 打不开；GetTempPathW + _wfopen 才是 UTF-16 全通。 */
+		FILE *fp = nullptr;
+		wchar_t tmpdir[MAX_PATH] = {0};
+		wchar_t tpath[MAX_PATH] = {0};
+		const DWORD tn = GetTempPathW(MAX_PATH, tmpdir);
+		if (tn > 0 && tn < MAX_PATH &&
+		    swprintf_s(tpath, MAX_PATH, L"%sobs_beauty_thumb_dump.rgba",
+			       tmpdir) > 0)
+			fp = _wfopen(tpath, L"wb");
 		if (fp) {
 			fwrite(f->thumb_buf, 1, row * S, fp);
 			fclose(fp);

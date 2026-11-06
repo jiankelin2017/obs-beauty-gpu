@@ -8,8 +8,7 @@
 
     python 05_验证/make_assets.py <照片路径>
 
-不带参数时用默认那张（本机存在才可用）：
-    C:/Users/Administrator/Pictures/A7300538.jpg
+不带参数会直接报用法（脚本不预设任何个人照片路径）。
 
 产出（05_验证/assets/，已 gitignore）：
     face_720p.png       1280x720   720p 对拍素材
@@ -35,7 +34,10 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "assets")
 
-DEFAULT_SRC = r"C:/Users/Administrator/Pictures/A7300538.jpg"
+# 原片由调用方给：素材是从一张本机照片裁出来的，**不写死任何个人目录**
+# （早先这里写死过 Pictures 下的相机原文件名，等于把本机路径与拍摄文件名
+# 一起提交进仓库）。缺参时直接报用法，不再猜。
+# 取景框 BOX 是按原片 2624x3936 定的，换片源要同比例重取。
 # 原图 2624x3936 上的取景框（16:9）
 BOX = (0, 340, 2624, 1816)
 
@@ -78,7 +80,10 @@ def make_single_face_4k(src, box, canvas=(3840, 2160)):
 
 
 def main(argv):
-    src_path = argv[1] if len(argv) > 1 else DEFAULT_SRC
+    if len(argv) < 2:
+        sys.exit("用法: python make_assets.py <照片路径>\n"
+                 "（素材由本机照片裁剪而来，属个人数据，脚本不设默认照片）")
+    src_path = argv[1]
     if not os.path.isfile(src_path):
         sys.exit("找不到照片: %s\n用法: python make_assets.py <照片路径>" % src_path)
     os.makedirs(ASSETS, exist_ok=True)

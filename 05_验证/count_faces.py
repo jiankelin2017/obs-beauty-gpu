@@ -28,9 +28,11 @@ import sys
 import cv2
 import numpy as np
 
-DEFAULT_DIRS = [r"D:/插件/OBS美颜GPU版/05_验证/assets"]
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+DEFAULT_DIRS = [os.path.join(_ROOT, "05_验证", "assets")]
 MODEL_CANDIDATES = [
-    r"D:/插件/OBS美颜GPU版/06_离线验证/models/yunet.onnx",
+    os.path.join(_ROOT, "06_离线验证", "models", "yunet.onnx"),
     r"C:/ProgramData/obs-studio/plugins/obs-beauty/bin/64bit/models/yunet.onnx",
 ]
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")

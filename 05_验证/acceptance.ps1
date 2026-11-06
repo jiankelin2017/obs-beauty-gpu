@@ -10,7 +10,9 @@ $env:PYTHONUTF8 = "1"
 $prevEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$py   = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+# python 解释器：优先用环境变量 BEAUTY_PY 指定的绝对路径（换机器时无需改脚本，
+# 也不再把某个内部运行时目录写死在仓库里），否则用 PATH 上的 py 启动器。
+$py = if ($env:BEAUTY_PY) { $env:BEAUTY_PY } else { "py" }
 $rows = @()
 function Row($name, $ok, $detail) {
     $script:rows += [pscustomobject]@{ Test = $name; Result = $(if ($ok) { "PASS" } else { "FAIL" }); Detail = $detail }

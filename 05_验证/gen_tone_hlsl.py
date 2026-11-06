@@ -282,7 +282,8 @@ hlsl = HEADER % (
     signed_arr_str("ROSE_B", ROSE_B, "    "),
 )
 
-out_dir = "D:/插件/OBS美颜GPU版/01_源码/shaders"
+out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "01_源码", "shaders")
 os.makedirs(out_dir, exist_ok=True)
 out_path = os.path.join(out_dir, "tone.hlsl")
 io.open(out_path, "w", encoding="utf-8", newline="\n").write(hlsl)

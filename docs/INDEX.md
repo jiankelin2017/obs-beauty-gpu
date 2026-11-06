@@ -21,6 +21,7 @@ status: Active
 |---|---|---|---|---|---|---|---|
 | 现状入口 | [`README.md`](README.md) | README | Active | 3.2.2 | Jian | 2026-11-06 | 替代根 `README.md`、`04_文档/README.md` |
 | 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.2.2 | Jian | 2026-11-06 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
+| 第三方组件与许可 | [`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | NOTICES | Active | 3.2.2 | Jian | 2026-11-06 | 新建：登记 ONNX Runtime / YuNet / BiSeNet / MediaPipe / 手部模型的许可、入库与分发状态 |
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
 | 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.2.2 | Jian | 2026-11-06 | 原 `04_文档/开关总表.md` |

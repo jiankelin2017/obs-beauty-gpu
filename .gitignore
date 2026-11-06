@@ -38,6 +38,13 @@
 06_离线验证/_*.raw
 06_离线验证/_*.png
 
+# 回归台的输入帧与四条基准（含 .bak 备份）都由真人素材派生，帧内是可辨认的人脸，
+# 属个人数据。只在本机保留、不入库；首次 clone 后需自备素材重采（含 * 是为了
+# 连 *.raw.2.17.2bak 这类备份一起挡住，否则一次 git add -A 就会漏进来）。
+# 重采方式见 docs/guides/guide-offline-regression.md「素材与基准」。
+06_离线验证/goldens/*.raw
+06_离线验证/goldens/*.raw.*
+
 # 02_构建 下部署前手工 Copy-Item 出来的旧 dll 备份（obs-beauty_before_*.dll 等）
 02_构建/backup/
 
