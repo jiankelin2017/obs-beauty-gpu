@@ -101,8 +101,8 @@ Copy-Item (Need-File (Join-Path $offDir "models\yunet.onnx") "yunet.onnx").FullN
           (Join-Path $pkgDir "yunet.onnx") -Force
 Copy-Item (Need-File (Join-Path $root "THIRD-PARTY-NOTICES.md") "notices").FullName `
           (Join-Path $pkgDir "THIRD-PARTY-NOTICES.md") -Force
-# This project's own EULA. "All rights reserved" is only meaningful if the
-# recipient can actually read it, so it ships with the installer.
+# This project's own license (GPL-2.0). GPL requires the license text to
+# accompany distribution, so it ships with the installer.
 Copy-Item (Need-File (Join-Path $root "LICENSE") "LICENSE").FullName `
           (Join-Path $pkgDir "LICENSE") -Force
 
