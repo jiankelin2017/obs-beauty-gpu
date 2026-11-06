@@ -8,6 +8,9 @@
 #    onnxruntime.dll           inference runtime  (~11.5 MB, MIT)
 #    yunet.onnx                face detection model (~232 KB, MIT)
 #    THIRD-PARTY-NOTICES.md    license text for the two above
+#    LICENSE                   this project's own license (GPL-2.0)
+#    onnxruntime-ThirdPartyNotices.txt
+#                              ORT's own notices (its internal deps)
 #    shaders\*.hlsl            the 6 GPU shaders (from 01_*/shaders)
 #    setup.manifest            UAC elevation manifest
 #
@@ -29,7 +32,8 @@
 #  instead of being written out.
 #
 #  NOTE: setup.rc refers to "obs-beauty.dll", "onnxruntime.dll", "yunet.onnx",
-#  "THIRD-PARTY-NOTICES.md" and "shaders\*.hlsl" with RELATIVE paths, so rc.exe
+#  "THIRD-PARTY-NOTICES.md", "LICENSE", "onnxruntime-ThirdPartyNotices.txt" and
+#  "shaders\*.hlsl" with RELATIVE paths, so rc.exe
 #  must run with the working directory set to this folder. The copies are
 #  refreshed from their source folders on every run so the package can never
 #  ship a stale artifact.
@@ -105,6 +109,13 @@ Copy-Item (Need-File (Join-Path $root "THIRD-PARTY-NOTICES.md") "notices").FullN
 # accompany distribution, so it ships with the installer.
 Copy-Item (Need-File (Join-Path $root "LICENSE") "LICENSE").FullName `
           (Join-Path $pkgDir "LICENSE") -Force
+
+# ONNX Runtime's own third-party notice (covers what ORT links internally:
+# abseil, protobuf, ...). THIRD-PARTY-NOTICES.md only covers ORT itself.
+# Taken VERBATIM from the upstream tag matching the dll we ship -- never
+# hand-edited, the file is Microsoft's text.
+Copy-Item (Need-File (Join-Path $root "third_party\onnxruntime-1.20.1-ThirdPartyNotices.txt") "ort notices").FullName `
+          (Join-Path $pkgDir "onnxruntime-ThirdPartyNotices.txt") -Force
 
 $pkgShaders = Join-Path $pkgDir "shaders"
 if (-not (Test-Path $pkgShaders)) { New-Item -ItemType Directory -Force -Path $pkgShaders | Out-Null }

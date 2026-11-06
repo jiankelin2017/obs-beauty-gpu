@@ -16,7 +16,7 @@
 
 | 组件 | 版本 | 许可 | 用途 | 是否入库 | 是否随安装包分发 | 依据 |
 |---|---|---|---|---|---|---|
-| ONNX Runtime | 1.20.1（API 版本 20） | MIT | 模型推理（YuNet / 分割 / 手部） | 否（`06_离线验证/onnxruntime.dll`，已被 `.gitignore` 挡住） | **是**：3.2.2 起内嵌进 `Setup.exe`，落到 `<root>\bin\64bit\` | 上游 `microsoft/onnxruntime` 仓库 LICENSE |
+| ONNX Runtime | 1.20.1（API 版本 20） | MIT | 模型推理（YuNet / 分割 / 手部） | 否（`06_离线验证/onnxruntime.dll`，已被 `.gitignore` 挡住） | **是**：3.2.2 起内嵌进 `Setup.exe`，落到 `<root>\bin\64bit\`；**另随附其官方 `ThirdPartyNotices.txt`**（覆盖 ORT 内部链接的依赖），见第六节 | 上游 `microsoft/onnxruntime` 仓库 LICENSE；官方声明取自 tag `v1.20.1`（与 dll 内唯一版本串 `1.20.1` 对应），SHA256 `cf7342f7ba482ef715ae58f5f497a8d3564fa255164175aea324cd293c5701a0` |
 | YuNet 人脸检测模型 | 2023mar | MIT | 生产路径必需：人脸框 + 5 关键点 | **是**：`06_离线验证/models/yunet.onnx`<br>SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` | **是**：3.2.2 起内嵌，落到 `<root>\bin\64bit\models\` | `opencv/opencv_zoo` 下 `models/face_detection_yunet/LICENSE` 明确写「本目录所有文件为 MIT」，版权行 `Copyright (c) 2020 Shiqi Yu`；注意**仓库根目录是 Apache-2.0，与本目录不同**，引用时别混。上游训练方 `ShiqiYu/libfacedetection.train` |
 
 ## 二、仅离线实验使用（生产路径默认不加载）
@@ -43,11 +43,18 @@
 ## 四、宿主与集成边界
 
 - **OBS Studio**（GPL-2.0）：本插件以 OBS 插件形式动态链接 `libobs`，自身源码不含
-  OBS 代码。插件是否构成 GPL 意义上的衍生作品、以及对外分发时的义务，**需自行
-  评估或咨询法律意见**，本文件不作结论。
-  （2026-11-06 补注：本项目自身已选定 GPL-2.0，见 `LICENSE`。因此无论上述问题
-  如何认定，分发路径都落在 GPL 之内 —— 这不改变「是否衍生作品」这个法律判断，
-  只是让两种认定导向同一套义务。）
+  OBS 代码。
+
+  「插件链接 `libobs` 是否构成 GPL 意义上的衍生作品」在业界没有统一结论（插件
+  接口、进程边界、独立程序等说法并存），本文件不对此下判断。但**本项目自身已选定
+  GPL-2.0**（见 `LICENSE`），因此这个问题在本项目上不再产生分歧：
+
+  | 若认定为衍生作品 | 若认定为独立作品 |
+  |---|---|
+  | 必须以 GPL-2.0 分发 → 本项目正是 GPL-2.0 | 可自选许可 → 本项目自愿选 GPL-2.0 |
+
+  两条路径导向同一套对外义务，故无需赌这个判断。**这一豁免只对「本项目」成立**：
+  若你要基于本插件改出闭源商业版本，上述认定问题会立刻重新变成实质风险。
 - **obs-websocket / obs-multi-rtmp / obs-browser / 插件中心**：只是验证日志里出现过的
   同机第三方插件，与本插件无代码或分发关系，此处仅作说明。
 
@@ -66,6 +73,8 @@
 | `<root>\bin\64bit\onnxruntime.dll` | `06_离线验证/onnxruntime.dll` | MIT |
 | `<root>\bin\64bit\models\yunet.onnx` | `06_离线验证/models/yunet.onnx` | MIT |
 | `<root>\THIRD-PARTY-NOTICES.md` | 本文件 | —— |
+| `<root>\LICENSE` | 仓库根 `LICENSE` | GPL-2.0（本项目自身） |
+| `<root>\onnxruntime-ThirdPartyNotices.txt` | `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt` |  Microsoft 原文，逐字未改 |
 
 `<root>` = `C:\ProgramData\obs-studio\plugins\obs-beauty`。
 
@@ -125,16 +134,28 @@ SOFTWARE.
 ```
 
 > ONNX Runtime 官方发布包另带一份 `ThirdPartyNotices.txt`，覆盖它自身链接的
-> 其他组件（如 abseil、protobuf 等）。本轮只分发 `onnxruntime.dll` 主库，
-> 未随附该文件 —— 对外公开发布前应补上，见「待办」。
+> 其他组件（如 abseil、protobuf 等）——**上表两份 MIT 文本并不覆盖这部分**。
+> 2026-11-06 起已随附：原文件存于 `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt`
+> （6,508 行 / 338,538 B，逐字未改），安装时落到 `<root>\onnxruntime-ThirdPartyNotices.txt`。
+> 来源 `raw.githubusercontent.com/microsoft/onnxruntime/v1.20.1/ThirdPartyNotices.txt`，
+> 校验 `SHA256 cf7342f7ba482ef715ae58f5f497a8d3564fa255164175aea324cd293c5701a0`。
+> 换 ORT 版本时按同一 tag 规则重新取，**不要手写、不要摘编** —— 这份清单是
+> Microsoft 的法定义务履行文本，改写即失去意义。
 
 ## 待办
 
 - [x] 根目录自有 `LICENSE`：**已补**，2026-11-06 定为 **GPL-2.0**（与 OBS 宿主同许可），
       条款见仓库根目录 `LICENSE`。本文件与其并行 —— 本文件管「别人的代码」，
       `LICENSE` 管「本项目的代码」。
-- [ ] 第四节对「插件链接 libobs 是否构成衍生作品」原写「需自行评估」。选定 GPL-2.0 后
-      这一疑虑基本消解（同许可），但**该段文字仍保留原判断**，未改写为结论。
-- [ ] 未随附 ONNX Runtime 官方 `ThirdPartyNotices.txt`（覆盖其内部依赖）。
-      从上游 release 压缩包原样取出即可，不要手写。
-- [ ] `07_安装包/models/` 已清空并删除，`build_setup.ps1` 也不再引用该目录。
+- [x] 第四节「插件链接 libobs 是否构成衍生作品」原写「需自行评估」。2026-11-06 改写为
+      **两分支对照表**：不改原法律判断，只说明选定 GPL-2.0 后两种认定导向同一套义务。
+- [x] 随附 ONNX Runtime 官方 `ThirdPartyNotices.txt`：**已补**，原文存
+      `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt`，随包落 `<root>\`，
+      闸门载荷项同批收录。换 ORT 版本需同步换这份文件。
+- [x] `07_安装包/models/` 已清空并删除，`build_setup.ps1` 不再引用该目录。
+
+> 剩下唯一已知缺口：`07_安装包/backup/` 里还留着两份手部模型（Apache-2.0，
+> PINTO0309）与几个旧版 dll 备份。它们被 `.gitignore` 挡住、不进安装包，
+> 但**整个 `07_安装包/` 文件夹对外拷贝时会一起带出去** —— 若要走这条路径，
+> 需先附上 `PINTO0309/hand-gesture-recognition-using-onnx` 的许可文本，
+> 或干脆把 `backup/` 删掉。

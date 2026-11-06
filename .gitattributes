@@ -1,2 +1,7 @@
 # 统一行尾，消除 Windows 下 LF→CRLF 的提交噪声
 * text=auto eol=crlf
+
+# 例外：third_party/ 下是逐字未改的上游法律文本，行尾也算内容。
+# 一旦被 eol 转换，文件就不再是「原文」，声明里记的 SHA256 也随之失效。
+# -text 让 git 按二进制处理：不转换、不合并、不做 diff 归一化。
+third_party/* -text

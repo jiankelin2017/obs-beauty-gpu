@@ -28,8 +28,9 @@
                    3.2.2 起判据改为「赋值链可追到 root」：允许 binDir 这类中间变量，
                    但 plug 必须落在 bin\64bit 下、且不得是 Program Files 字面量
     8. 安装包版本串 Setup.exe 内真的含当前版本（ASCII / UTF-16LE）
-    9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 运行时 + 人脸模型 + 许可 +
-                   6 个 shader，与磁盘权威副本逐字节相同（3.2.2 起 5 类 10 项）
+    9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 运行时 + 人脸模型 +
+                   本文件 + ORT 官方声明 + 本项目 LICENSE + 6 个 shader，与磁盘
+                   权威副本逐字节相同（共 12 项；数量取自 SETUP_RCDATA，不写死）
 
     7-9 是 3.0.1 新增：3.0.0 时 Setup.exe 只被检查「文件存在」，于是它装到
     Program Files 旧目录（OBS 32.x 根本不加载）也能一路 9 PASS 发布出去。
@@ -259,6 +260,7 @@ SETUP_RCDATA = {
     103: "yunet.onnx",
     104: "THIRD-PARTY-NOTICES.md",
     105: "LICENSE",
+    106: "onnxruntime-ThirdPartyNotices.txt",
     201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
     204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
 }
@@ -268,12 +270,16 @@ def setup_payload_disk(name):
     """内嵌资源对应的磁盘权威副本。
 
     104 以仓库根的那份为准（它入库、受审查）；07_安装包/ 下的副本是构建时
-    拷进去的中间物，比它自己没有意义。105（LICENSE）同理。
+    拷进去的中间物，比它自己没有意义。105（LICENSE）同理；106 是 ORT 官方原文，
+    权威副本在 third_party/（同样入库、受审查），07_安装包/ 下的同名文件是拷贝。
     """
     if name == "obs-beauty.dll":
         return PKG_DLL
     if name in ("THIRD-PARTY-NOTICES.md", "LICENSE"):
         return os.path.join(ROOT, name)
+    if name == "onnxruntime-ThirdPartyNotices.txt":
+        return os.path.join(ROOT, "third_party",
+                            "onnxruntime-1.20.1-ThirdPartyNotices.txt")
     if name.endswith(".hlsl"):
         return os.path.join(ROOT, "07_安装包", "shaders", name)
     return os.path.join(ROOT, "07_安装包", name)
@@ -392,7 +398,8 @@ def check_setup(ver):
         add("FAIL", "安装包载荷", "；".join(bad))
     else:
         add("PASS", "安装包载荷",
-            "Setup.exe 内嵌 %d 项（dll + 运行时 + 人脸模型 + 许可 + 6 shader）"
+            "Setup.exe 内嵌 %d 项（dll + 运行时 + 人脸模型 + 两份第三方声明"
+            " + 本项目 LICENSE + 6 shader）"
             "与磁盘副本逐字节相同" % len(SETUP_RCDATA))
 
 

@@ -40,17 +40,21 @@ status: Active
 |---|---|
 | `Setup.exe` 补齐运行载荷：`onnxruntime.dll`（11.6 MB）与 `yunet.onnx`（232 KB）内嵌进包，安装时落到 `<root>\bin\64bit\` 与 `\models\` | **新装机器不用再手工拷文件**。此前装完能开滤镜，但人脸检测起不来 —— 不报错，只是安静地退化成全帧磨皮，最难查的那种 |
 | 版本号改为构建时从 `beauty_params.h` 注入 | 旧包把 `3.0.1` 写死在三处（弹窗、注册表 `DisplayName` / `DisplayVersion`），dll 已到 3.2.2 而"应用和功能"里还显示 3.0.1。现在单一来源，dll 版本不一致时打包直接失败 |
-| 安装包体积 1.5 MB → **12.7 MB** | 全部来自那 11.8 MB 运行时与模型；这是"一键可用"的必要代价 |
+| 安装包体积 1.5 MB → **12.7 MB**（再补 ORT 官方声明后 **13.1 MB**） | 全部来自那 11.8 MB 运行时、模型与 0.34 MB 第三方声明；这是"一键可用 + 合规"的必要代价 |
 | 卸载会清 `models\` 与 `bin\`，并移除 `THIRD-PARTY-NOTICES.md` | 卸载后回到"没装过"的状态。**注意：手工放进 `models\` 的其它模型（如 `selfie_multiclass_256.onnx`）也会一起删除** |
 | 卸载不再要求 OBS 存在 | 先卸 OBS 再卸插件，此前会直接退出、插件残留 |
 | 安装后自检三个关键文件的存在与大小 | 写盘被杀软拦下时当场报错，不再"装完了但缺文件" |
 | `obs-beauty.cpp` 的 `BEAUTY_THUMB_DUMP` 落盘改 `GetTempPathW` + `_wfopen` **随本次重编生效** | 上一轮只改了源码没重编，交付的 dll 里仍是旧路径；本次 dll 已重编，`Administrator` 字符串归零 |
 | 安装包不再重复嵌同一份 dll（旧的无用 `id 1` 资源） | 省 645 KB |
 | 新增根目录 `LICENSE`：**GPL-2.0**（与 OBS 宿主同一许可） | 此前仓库无任何许可文件。现在明确：可自由使用、修改、再分发（含商用），但**分发修改版必须同样以 GPL-2.0 开源**并保留版权声明。选 GPL-2.0 是因为插件动态链接 `libobs`（OBS 本身即 GPL-2.0），分发时许可层面不存在冲突。第三方组件（ONNX Runtime / YuNet 的 MIT）不受影响，仍在 `THIRD-PARTY-NOTICES.md` 单独声明 —— MIT 与 GPL 兼容。`LICENSE` 随安装包落到装机目录 |
+| 安装包随附 ONNX Runtime 官方 `ThirdPartyNotices.txt`（6,508 行 / 338,538 B，逐字未改），落到 `<root>\onnxruntime-ThirdPartyNotices.txt` | 此前只声明了 ORT 本身的 MIT，**漏了 ORT 内部链接的 abseil / protobuf 等**。原文存 `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt`，取自上游 tag `v1.20.1`（与 dll 内唯一版本串 `1.20.1` 对应），SHA256 记在 `THIRD-PARTY-NOTICES.md`。换 ORT 版本须同步换这份文件 |
+| `THIRD-PARTY-NOTICES.md` 第四节改写：新增「无论是否认定为衍生作品，两种认定导向同一套义务」的分支对照 | 原文写「需自行评估」，与已选定 GPL-2.0 的事实脱节。改写**不下法律结论**，只说明选定同许可后该判断不再产生分歧；并注明若基于本插件改闭源商业版，该问题会重新变成实质风险 |
+| `THIRD-PARTY-NOTICES.md` 待办三条全部关闭 | 含一条早已完成却未勾选的（`07_安装包/models/` 已删）。另补记唯一残留：`07_安装包/backup/` 里的手部模型若随文件夹对外拷贝，需附 PINTO0309 的 Apache-2.0 文本 |
 
 **交付**：dll `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`；
-`Setup.exe 12,748,800 B / MD5 CF87EC1629D82CD4D865693B7F439C07`。
-`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（安装包载荷项已扩到 10 个内嵌资源）。
+`Setup.exe 13,089,792 B / MD5 86F769B7C502C3199D5257A09F17C8A1`。
+`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（安装包载荷项已扩到 12 个内嵌资源：
+dll + 运行时 + 模型 + 两份第三方声明 + 本项目 LICENSE + 6 shader）。
 
 **怎么验**：双击 `Setup.exe` → 装完直接开 OBS 加滤镜，**不手工放任何文件** → 镜头前有人时，
 日志里 `frame#N drawn … faces=` 应出现非 0，`px=` 不再是 `-1`。若恒为 `faces=0` 且 `px=-1`，
@@ -73,7 +77,7 @@ status: Active
 （3.2.2 首次交付 `635,904 B / MD5 95C390D2DEDD474E1471E00C9C70311E`；
 同日重编后为 `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`，
 差别仅来自 `BEAUTY_THUMB_DUMP` 落盘改宽字符路径，画面行为不变，详见上一节；
-上一版备份为同目录 `obs-beauty_3.2.1.dll`。安装包已重打成 12.7 MB 的一键包，
+上一版备份为同目录 `obs-beauty_3.2.1.dll`。安装包已重打成 13.1 MB 的一键包，
 `check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**）
 
 **回退**：把 `obs-beauty_3.2.1.dll` 改名覆盖回 `obs-beauty.dll`。
