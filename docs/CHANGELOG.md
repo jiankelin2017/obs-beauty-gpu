@@ -15,6 +15,28 @@ status: Active
 > 逐轮实测、踩坑经过、内部调参一律在 [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md)。
 > 版本号唯一出处是 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR`。
 
+## 维护（2026-11-06 · LICENSE 改为 FSF 原文，版权说明拆到 COPYRIGHT.md）
+
+**不涉及版本号，`BEAUTY_BUILD_STR` 仍为 3.2.2，dll 逐字节不变。** 这一轮只动许可文件与安装包。
+
+| 改动 | 影响谁 |
+|---|---|
+| `LICENSE` 换成 **FSF GPL-2.0 原文**（17,984 B / 338 行 / SHA256 `edaef632…b233f6`，逐字节未改） | 此前 `LICENSE` 头部有 44 行自定义前言（版权行 + 中英双语范围说明）。GitHub 的许可识别是拿整个文件与官方原文做全文比对，混入自定义段落就匹配不上，项目被归为 **"Other"** —— 仓库页没有 GPL-2.0 徽章，别人按许可筛选也搜不到。**法律效力本来就没问题，改的是可识别性** |
+| 新增 [`COPYRIGHT.md`](../COPYRIGHT.md)：版权行、版本口径（2.0 only）、适用范围（覆盖哪些、不覆盖哪些第三方）、改 "or later" 的具体写法 | 这些内容从 LICENSE 头部移出。以后要改授权声明，改这个文件即可，不必碰许可正文（GPL 正文本身要求原样分发） |
+| 安装包新增内嵌资源 `id 107`，`COPYRIGHT.md` 落到 `<root>\COPYRIGHT.md`，卸载一并删除 | 装机目录现在同时有 `LICENSE` 与 `COPYRIGHT.md`。GPL 要求分发时随附许可文本，版权与范围说明跟着一起走才不会各说各话 |
+| `check_release.py` 新增断言：`LICENSE` 的 SHA256 必须等于 FSF 原文 | 这类改动只动文本、代码评审几乎看不出来，必须由闸门兜住。已做反向对照：给 `LICENSE` 加 3 行头，闸门立刻 FAIL 并指名"版权行请放 COPYRIGHT.md" |
+| `.gitattributes` 对 `LICENSE` 设 `-text` | 仓库全局是 `eol=crlf`，一旦 LF 被转成 CRLF，文件就不再是原文，SHA256 与上面那条断言一起失效 |
+
+**交付**：dll 未变 `645,632 B / MD5 ABF4413811F00C2E6EE1B9E14D0B84F5`；
+`Setup.exe 13,089,792 → 13,091,840 B / MD5 E81A99881257904B5B7E68D3AB0D2B60`
+（+2,048 B：`LICENSE` 由 20,134 → 17,984 B 少 2,150 B，新增 `COPYRIGHT.md` 3,796 B，
+`THIRD-PARTY-NOTICES.md` 因补一行落盘清单微增，其余是 PE 节对齐）。
+`check_release.py --strict` **12 PASS / 0 WARN / 0 FAIL**（内嵌载荷项 12 → 13 项）。
+
+**怎么验**：`sha256sum LICENSE` 应为 `edaef632…b233f6`；装完看 `<root>` 下
+`LICENSE`（17,984 B）与 `COPYRIGHT.md`（3,796 B）都在；GitHub 仓库页右侧应出现
+GPL-2.0 徽章（推送后由 GitHub 重新识别，通常几分钟内生效）。
+
 ## 维护（2026-11-06 · 仓库清理：个人数据出库、第三方声明补齐）
 
 **不涉及版本号，`BEAUTY_BUILD_STR` 仍为 3.2.2，dll 与安装包逐字节不变。** 这一轮改的是仓库本身。

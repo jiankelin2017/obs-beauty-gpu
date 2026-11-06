@@ -30,7 +30,8 @@
     8. 安装包版本串 Setup.exe 内真的含当前版本（ASCII / UTF-16LE）
     9. 安装包载荷   直接从 Setup.exe 的 RCDATA 读回 dll + 运行时 + 人脸模型 +
                    本文件 + ORT 官方声明 + 本项目 LICENSE + 6 个 shader，与磁盘
-                   权威副本逐字节相同（共 12 项；数量取自 SETUP_RCDATA，不写死）
+                   权威副本逐字节相同，且 LICENSE 必须是 FSF 原文
+                   （项数取自 SETUP_RCDATA，不写死）
 
     7-9 是 3.0.1 新增：3.0.0 时 Setup.exe 只被检查「文件存在」，于是它装到
     Program Files 旧目录（OBS 32.x 根本不加载）也能一路 9 PASS 发布出去。
@@ -261,9 +262,16 @@ SETUP_RCDATA = {
     104: "THIRD-PARTY-NOTICES.md",
     105: "LICENSE",
     106: "onnxruntime-ThirdPartyNotices.txt",
+    107: "COPYRIGHT.md",
     201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
     204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
 }
+
+# gnu.org/licenses/old-licenses/gpl-2.0.txt 的 sha256（17,984 B / 338 行）。
+# LICENSE 必须与它逐字节一致 —— GitHub、SPDX、企业合规扫描器都拿全文做匹配，
+# 前面多一段版权行或范围说明就会被归为 "Other"，GPL-2.0 徽章与检索全部失效。
+# 这类改动只动文本、评审时几乎看不出来，所以必须由闸门兜住。
+GPL2_SHA256 = "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
 
 
 def setup_payload_disk(name):
@@ -275,7 +283,7 @@ def setup_payload_disk(name):
     """
     if name == "obs-beauty.dll":
         return PKG_DLL
-    if name in ("THIRD-PARTY-NOTICES.md", "LICENSE"):
+    if name in ("THIRD-PARTY-NOTICES.md", "LICENSE", "COPYRIGHT.md"):
         return os.path.join(ROOT, name)
     if name == "onnxruntime-ThirdPartyNotices.txt":
         return os.path.join(ROOT, "third_party",
@@ -394,13 +402,26 @@ def check_setup(ver):
             bad.append("%s 磁盘副本缺失" % name)
         elif hashlib.md5(res[rid]).hexdigest().upper() != md5(disk):
             bad.append("%s 内嵌≠磁盘" % name)
+
+    # LICENSE 的「内容对不对」也要查：内嵌==磁盘只保证两份一样，两份都错就一起错。
+    lic_path = os.path.join(ROOT, "LICENSE")
+    if not os.path.isfile(lic_path):
+        bad.append("LICENSE 缺失")
+    else:
+        with open(lic_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        if digest != GPL2_SHA256:
+            bad.append("LICENSE 不是 FSF GPL-2.0 原文（sha256 %s…）——"
+                       "版权行与范围说明请放 COPYRIGHT.md，加在 LICENSE 头部"
+                       "会让 GitHub 把项目识别成 Other" % digest[:16])
+
     if bad:
         add("FAIL", "安装包载荷", "；".join(bad))
     else:
         add("PASS", "安装包载荷",
             "Setup.exe 内嵌 %d 项（dll + 运行时 + 人脸模型 + 两份第三方声明"
-            " + 本项目 LICENSE + 6 shader）"
-            "与磁盘副本逐字节相同" % len(SETUP_RCDATA))
+            " + 本项目 LICENSE + COPYRIGHT + 6 shader）"
+            "与磁盘副本逐字节相同，且 LICENSE 为 FSF 原文" % len(SETUP_RCDATA))
 
 
 # ---------------------------------------------------------------------- main

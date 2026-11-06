@@ -5,3 +5,7 @@
 # 一旦被 eol 转换，文件就不再是「原文」，声明里记的 SHA256 也随之失效。
 # -text 让 git 按二进制处理：不转换、不合并、不做 diff 归一化。
 third_party/* -text
+
+# LICENSE 同理：它必须是 FSF 原文的逐字节副本（17,984 B / LF），
+# 被 eol 转换后 SHA256 对不上，GitHub 的许可识别也可能因此落到 Other。
+LICENSE -text

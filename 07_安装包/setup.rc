@@ -9,12 +9,16 @@
 // 106 = ONNX Runtime's OWN third-party notices (abseil, protobuf, ...).
 //       THIRD-PARTY-NOTICES.md covers ORT itself; this covers ORT's deps.
 //       Verbatim copy of the upstream file, never edited.
+// 107 = COPYRIGHT.md. 105 must stay byte-identical to the FSF text or GitHub
+//       classifies the project as "Other", so the copyright line and the
+//       scope note live here instead of at the top of LICENSE.
 101 RCDATA "obs-beauty.dll"
 102 RCDATA "onnxruntime.dll"
 103 RCDATA "yunet.onnx"
 104 RCDATA "THIRD-PARTY-NOTICES.md"
 105 RCDATA "LICENSE"
 106 RCDATA "onnxruntime-ThirdPartyNotices.txt"
+107 RCDATA "COPYRIGHT.md"
 201 RCDATA "shaders\\detail.hlsl"
 202 RCDATA "shaders\\mask.hlsl"
 203 RCDATA "shaders\\region.hlsl"

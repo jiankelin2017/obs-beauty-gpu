@@ -213,6 +213,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     const std::wstring notices  = root + L"\\THIRD-PARTY-NOTICES.md";
     const std::wstring ortNotes = root + L"\\onnxruntime-ThirdPartyNotices.txt";
     const std::wstring lic      = root + L"\\LICENSE";
+    const std::wstring crHold   = root + L"\\COPYRIGHT.md";
     const std::wstring shad     = root + L"\\data\\shaders";
     const std::wstring selfCopy = root + L"\\uninstall.exe";
     const wchar_t* KEY = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\obs-beauty";
@@ -245,6 +246,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         DeleteFileW(notices.c_str());
         DeleteFileW(ortNotes.c_str());
         DeleteFileW(lic.c_str());
+        DeleteFileW(crHold.c_str());
         DeleteFileW(selfCopy.c_str());
         // models 整个删掉：yunet.onnx 是安装包带的，用户也可能手工放过可选的
         // 分割/手部模型 —— 卸载的语义就是「回到没装过」，不挑着留。
@@ -290,7 +292,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 
     // kind 决定落点，不要用 id 判断 —— 旧版靠 "id == 101 ? dll : shader" 二分，
     // 每加一类载荷就得再改一处条件，正是这类写法让安装包长期漏带运行时。
-    enum { K_DLL, K_ORT, K_MODEL, K_NOTICE, K_LICENSE, K_ORTNOTICE, K_SHADER };
+    enum { K_DLL, K_ORT, K_MODEL, K_NOTICE, K_LICENSE, K_ORTNOTICE, K_COPYRIGHT, K_SHADER };
     struct Item { int id; const wchar_t* file; int kind; };
     const Item items[] = {
         {101, L"obs-beauty.dll",          K_DLL},
@@ -299,6 +301,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         {104, L"THIRD-PARTY-NOTICES.md",  K_NOTICE},
         {105, L"LICENSE",                 K_LICENSE},
         {106, L"onnxruntime-ThirdPartyNotices.txt", K_ORTNOTICE},
+        {107, L"COPYRIGHT.md",            K_COPYRIGHT},
         {201, L"detail.hlsl",             K_SHADER},
         {202, L"mask.hlsl",               K_SHADER},
         {203, L"region.hlsl",             K_SHADER},
@@ -323,6 +326,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         case K_MODEL:  return model;
         case K_NOTICE: return notices;
         case K_LICENSE: return lic;
+        case K_COPYRIGHT: return crHold;
         case K_ORTNOTICE: return ortNotes;
         default:       return shad + L"\\" + it.file;
         }

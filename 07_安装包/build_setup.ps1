@@ -8,7 +8,12 @@
 #    onnxruntime.dll           inference runtime  (~11.5 MB, MIT)
 #    yunet.onnx                face detection model (~232 KB, MIT)
 #    THIRD-PARTY-NOTICES.md    license text for the two above
-#    LICENSE                   this project's own license (GPL-2.0)
+#    LICENSE                   this project's own license (GPL-2.0), verbatim
+#                              FSF text -- byte-identical on purpose, see below
+#    COPYRIGHT.md              copyright line + scope note; kept OUT of LICENSE
+#                              because GitHub matches LICENSE against the
+#                              official text and classifies anything else as
+#                              "Other", losing the GPL-2.0 badge entirely
 #    onnxruntime-ThirdPartyNotices.txt
 #                              ORT's own notices (its internal deps)
 #    shaders\*.hlsl            the 6 GPU shaders (from 01_*/shaders)
@@ -32,7 +37,8 @@
 #  instead of being written out.
 #
 #  NOTE: setup.rc refers to "obs-beauty.dll", "onnxruntime.dll", "yunet.onnx",
-#  "THIRD-PARTY-NOTICES.md", "LICENSE", "onnxruntime-ThirdPartyNotices.txt" and
+#  "THIRD-PARTY-NOTICES.md", "LICENSE", "COPYRIGHT.md",
+#  "onnxruntime-ThirdPartyNotices.txt" and
 #  "shaders\*.hlsl" with RELATIVE paths, so rc.exe
 #  must run with the working directory set to this folder. The copies are
 #  refreshed from their source folders on every run so the package can never
@@ -107,8 +113,13 @@ Copy-Item (Need-File (Join-Path $root "THIRD-PARTY-NOTICES.md") "notices").FullN
           (Join-Path $pkgDir "THIRD-PARTY-NOTICES.md") -Force
 # This project's own license (GPL-2.0). GPL requires the license text to
 # accompany distribution, so it ships with the installer.
+# LICENSE is the unmodified FSF text -- do not prepend a copyright header here,
+# or the file stops matching the official text and GitHub drops the badge.
 Copy-Item (Need-File (Join-Path $root "LICENSE") "LICENSE").FullName `
           (Join-Path $pkgDir "LICENSE") -Force
+# The copyright line and the scope note that used to sit at the top of LICENSE.
+Copy-Item (Need-File (Join-Path $root "COPYRIGHT.md") "COPYRIGHT.md").FullName `
+          (Join-Path $pkgDir "COPYRIGHT.md") -Force
 
 # ONNX Runtime's own third-party notice (covers what ORT links internally:
 # abseil, protobuf, ...). THIRD-PARTY-NOTICES.md only covers ORT itself.

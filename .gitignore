@@ -31,6 +31,7 @@
 07_安装包/yunet.onnx
 07_安装包/THIRD-PARTY-NOTICES.md
 07_安装包/LICENSE
+07_安装包/COPYRIGHT.md
 # ORT 官方声明：权威副本在 third_party/（入库），包内这份是构建时拷的
 07_安装包/onnxruntime-ThirdPartyNotices.txt
 07_安装包/setup_ver.h

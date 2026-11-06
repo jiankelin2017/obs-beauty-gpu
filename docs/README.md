@@ -26,7 +26,7 @@ supersedes: 04_文档/README.md（已归档）
 | 3.2.1 改了什么 | 「仅色彩层」诊断补 `geomOnly` 字段并直接写出结论（`px=-1` 无有效掩码 / `px=0 且 geomOnly=1` 正常 / `px=0 且 geomOnly=0` 异常） |
 | 3.2.0 改了什么 | 新增**自动输入方向认定**（`BEAUTY_AUTO_ROT`）：采集卡输出横躺、场景项旋转成竖屏时，插件自己在 90°/270° 上试出正确方向并补偿。修「磨皮冻在横屏坐标、拉参数不响应、美白失效」。另修 `warmUp()` 不幂等 |
 | 3.0.1 修了什么 | 安装包路径改 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty`、槽位失败路径悬空钩子、worker 释放竞态、命令注入面、闸门补 3 条断言 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
-| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 13,089,792 B / 2E3537A10D644CC4F655381C01204A04`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE，共 12 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
+| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**645,632 B / `ABF4413811F00C2E6EE1B9E14D0B84F5`**）；`Setup.exe 13,091,840 B / E81A99881257904B5B7E68D3AB0D2B60`（一键包，内含 onnxruntime + yunet + 两份第三方声明 + GPL-2.0 LICENSE + COPYRIGHT.md，共 13 项内嵌资源）；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
 | 安装方式 | 双击 `07_安装包/Setup.exe` 即装完可用，**不再需要手工放 `onnxruntime.dll` / `yunet.onnx`**；再双击一次即卸载（目录与注册表一并清除） |
 | 离线回归 | 4 条 golden 逐字节相同；方向判据 `06_离线验证/_autorot_probe.py`（3 例全 PASS）；槽位循环判据 `06_离线验证/_slot_cycle_probe.py`（PASS，且已做「撤掉修复必挂」的反向对照） |
 | 多机位自动化 | 4 个独立源各挂 1 滤镜 → `slot=0/1/2/3 活跃实例=1/2/3/4`；删一路、槽复用、无黑屏 / 条纹 / 崩溃 |
@@ -108,17 +108,28 @@ py -3.12 05_验证\check_release.py --strict
 
 ## 7. 许可
 
-**本项目以 GNU General Public License v2.0 发布。** 完整条款见仓库根目录
-[`LICENSE`](../LICENSE)（GPL-2.0 全文 + 本项目的适用范围说明）。
+**本项目以 GNU General Public License v2.0 发布。** 许可分成两个文件，都随安装包落到
+装机目录：
+
+| 文件 | 内容 | 可否修改 |
+|---|---|---|
+| [`LICENSE`](../LICENSE) | GPL-2.0 全文，**与 FSF 原文逐字节一致**（17,984 B / SHA256 `edaef632…b233f6`） | 不可改。GPL 正文要求原样分发 |
+| [`COPYRIGHT.md`](../COPYRIGHT.md) | 版权行、版本口径（2.0 only）、适用范围、第三方边界 | 可改 |
 
 简单说：你可以自由使用、修改、再分发，包括商用；但**如果你分发修改后的版本，
 必须同样以 GPL-2.0 开源**，并保留版权声明与"无担保"声明。这与 OBS Studio
 宿主的许可一致，所以对外分发插件在许可层面不存在冲突。
 
 > 版本口径：本文件声明的是 **GPL-2.0 only**（不含"或任何更高版本"）。
-> 若你希望允许下游自行升级到 GPL-3.0，把 `LICENSE` 头部那句改成
+> 若你希望允许下游自行升级到 GPL-3.0，把 `COPYRIGHT.md` 里那句改成
 > `... either version 2 of the License, or (at your option) any later version.`
-> 即可 —— 这是 GPL-2.0-or-later 的写法。
+> 即可 —— 这是 GPL-2.0-or-later 的写法，`LICENSE` 本身不用动。
+
+> **为什么拆成两个文件**：GitHub、SPDX 与企业合规扫描器判断许可的方式，是把
+> `LICENSE` 与官方原文做全文比对。文件里只要混入自定义段落（哪怕只是一行版权行），
+> 匹配就失败，项目会被归为 "Other" —— 仓库页没有 GPL-2.0 徽章，别人按许可筛选
+> 也搜不到。本条由闸门断言兜住：`LICENSE` 的 SHA256 必须是 FSF 原文，
+> 否则 `check_release.py` 直接 FAIL。
 
 第三方组件的许可与本许可并行，不因本许可而改变：
 

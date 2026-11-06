@@ -5,7 +5,8 @@
 时，请按各组件许可原文逐条核对。
 
 > **本文件只管「别人的代码」。** 本项目自身代码的授权另见仓库根目录
-> [`LICENSE`](LICENSE)（GPL-2.0）。两者并行、互不覆盖：`LICENSE` 不会把第三方
+> [`COPYRIGHT.md`](COPYRIGHT.md)（版权行 + 适用范围）与 [`LICENSE`](LICENSE)
+> （GPL-2.0 原文）。两者并行、互不覆盖：本项目许可不会把第三方
 > 组件的许可收窄或改写 —— 它们仍是 MIT / Apache-2.0；反过来，第三方许可也不会
 > 改变本项目自身的 GPL-2.0 条款。MIT 与 Apache-2.0 均与 GPL 兼容，因此整个包
 > 可以按 GPL-2.0 分发，前提是保留下面这些版权声明。
@@ -76,7 +77,8 @@
 | `<root>\bin\64bit\onnxruntime.dll` | `06_离线验证/onnxruntime.dll` | MIT |
 | `<root>\bin\64bit\models\yunet.onnx` | `06_离线验证/models/yunet.onnx` | MIT |
 | `<root>\THIRD-PARTY-NOTICES.md` | 本文件 | —— |
-| `<root>\LICENSE` | 仓库根 `LICENSE` | GPL-2.0（本项目自身） |
+| `<root>\LICENSE` | 仓库根 `LICENSE` | GPL-2.0 原文（本项目自身，逐字节未改） |
+| `<root>\COPYRIGHT.md` | 仓库根 `COPYRIGHT.md` | 本项目版权行 + 适用范围 |
 | `<root>\onnxruntime-ThirdPartyNotices.txt` | `third_party/onnxruntime-1.20.1-ThirdPartyNotices.txt` |  Microsoft 原文，逐字未改 |
 
 `<root>` = `C:\ProgramData\obs-studio\plugins\obs-beauty`。
