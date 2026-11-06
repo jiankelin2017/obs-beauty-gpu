@@ -4,7 +4,7 @@ title: 分割探针（离线直调 skinsegRun）
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 06_离线验证/segtest/README.md

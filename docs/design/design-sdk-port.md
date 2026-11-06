@@ -4,7 +4,7 @@ title: 方案 E：SDK 更优设计向 GPU 版的移植（复刻）开发方案
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/方案E_SDK更优设计移植开发方案.md

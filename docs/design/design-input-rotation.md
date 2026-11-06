@@ -4,7 +4,7 @@ title: 方案 B：插件支持输入旋转（2.10.0）
 version: 0.2.0
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/方案B_输入旋转开发计划.md

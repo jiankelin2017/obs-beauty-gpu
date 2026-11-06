@@ -4,7 +4,7 @@ title: 复刻 SDK：美白（色彩三段）改成整帧色彩变换，不再乘
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/复刻SDK_美白整帧色彩变换_20261105.md

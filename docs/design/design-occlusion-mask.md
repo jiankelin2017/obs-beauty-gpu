@@ -4,7 +4,7 @@ title: 方案 D：遮挡感知皮肤掩码（复刻思路 + 实现逻辑）
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/方案D_遮挡感知掩码设计.md

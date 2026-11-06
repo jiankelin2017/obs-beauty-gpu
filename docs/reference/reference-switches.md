@@ -4,7 +4,7 @@ title: BEAUTY_* 开关总表（默认值 / 影响 / 回退）
 version: 0.1.2
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/开关总表.md

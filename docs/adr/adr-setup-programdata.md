@@ -4,7 +4,7 @@ title: ADR · 安装路径统一到 ProgramData 并由闸门强制校验
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 无（新增决策记录）

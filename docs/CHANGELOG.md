@@ -4,7 +4,7 @@ title: 用户可见变更
 version: 0.1.6
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 ---

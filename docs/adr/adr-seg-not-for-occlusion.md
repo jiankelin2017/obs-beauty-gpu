@@ -4,7 +4,7 @@ title: ADR · 人脸分割不用于解决手遮脸溢出
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/结论_分割对手遮脸无效_20261105.md（原文已归档）

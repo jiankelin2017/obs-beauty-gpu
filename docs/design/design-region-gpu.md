@@ -4,7 +4,7 @@ title: 方案 A · 五官段（REGION）GPU 化设计
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/方案A_五官GPU设计.md

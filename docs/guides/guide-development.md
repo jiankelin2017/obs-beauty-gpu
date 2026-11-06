@@ -4,7 +4,7 @@ title: 开发流程与优化计划
 version: 0.1.4
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/开发流程与优化计划.md

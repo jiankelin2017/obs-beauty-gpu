@@ -4,7 +4,7 @@ title: 文档总表
 version: 0.1.7
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 ---
@@ -166,12 +166,12 @@ status: Active
 
 | 批 | 聚类 | 状态 |
 |---|---|---|
-| 1 | G1/G2 骨架 + 入口 | **已落地**（commit `bb4dfba`） |
-| 2 | G3/G9 参考与工具 | **已落地**（commit `8deeaac`） |
+| 1 | G1/G2 骨架 + 入口 | **已落地**（commit `914f388`） |
+| 2 | G3/G9 参考与工具 | **已落地**（commit `f68d716`） |
 | 3 | G4/G5/G6 设计稿 | **已落地**（单独 commit） |
 | 4 | G7/G8 决策与变更 | **已落地**（单独 commit） |
 | 5 | G10 过程日志与回档快照归档 | **已落地**（单独 commit） |
-| 6 | 防腐化机制建议 | **已落地**：6.1 模板 + 6.2 元数据规范（commit `09c91ef`）；6.3 提交闸门 + 6.4 定期巡检（单独 commit，见 §6） |
+| 6 | 防腐化机制建议 | **已落地**：6.1 模板 + 6.2 元数据规范（commit `24aeaf6`）；6.3 提交闸门 + 6.4 定期巡检（单独 commit，见 §6） |
 
 ## 6. 维护规则（模板、元数据、提交闸门与巡检）
 
@@ -204,7 +204,7 @@ title: <一句话标题>
 version: 0.1.0
 last_updated: <YYYY-MM-DD>
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: <被替代的旧文档；无则写「无」>
@@ -252,7 +252,7 @@ ADR 骨架：沿用上述 YAML 头（`doc_type: adr`，文件名 `adr-<主题>.m
 | `version` | 该文档每次改动 | 普通修订 +0.0.1；与插件版本号无关 |
 | `last_updated` | 该文档每次改动 | 实际改动日期 `YYYY-MM-DD` |
 | `applies_to` | 产品发版时 | 全库统一，当前 `3.0.1` |
-| `repo_baseline` | 产品发版时 | **文档治理 commit 不推进**；当前恒为 `bb4dfba` |
+| `repo_baseline` | 产品发版时 | **文档治理 commit 不推进**；当前恒为 `914f388` |
 | `status` | 归档时 | 只用 `Active` / `Deprecated`；Draft 走文首标注，不扩枚举 |
 | `supersedes` | 归档 / 合并时 | 必填，形成可追溯链；无替代写「无」 |
 | `maintainer` | — | 统一 `Jian` |
@@ -290,7 +290,7 @@ ADR 骨架：沿用上述 YAML 头（`doc_type: adr`，文件名 `adr-<主题>.m
 | 巡检项 | 判据 |
 |---|---|
 | 总表对账 | `docs/` 主动区 `.md` 数量与 §1 / §2 登记数一致，没有未登记的 Active 文档 |
-| 元数据一致 | 所有 Active 文档 `repo_baseline` 同为 `bb4dfba`（发版时统一推进）、`applies_to` 一致；无「改了内容却没升 `version`」 |
+| 元数据一致 | 所有 Active 文档 `repo_baseline` 同为 `914f388`（发版时统一推进）、`applies_to` 一致；无「改了内容却没升 `version`」 |
 | 链接与归档区 | 主动区相对链接断链 0；`archive/` 正文无改动；运行时产物没被误放进 `docs/` |
 | 闸门复跑 | `--strict` 12 PASS；`docs/archive/` 仍被排除；开关表 63 条仍与源码双向一致 |
 | 未跟踪产物 | 只记录数量与位置变化，**不自动清理**；确需清理另行列清单确认 |

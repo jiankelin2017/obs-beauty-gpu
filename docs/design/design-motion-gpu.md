@@ -4,7 +4,7 @@ title: 方案C：运动判定搬 GPU、检测输入只在提交帧回读（2.11.
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/方案C_运动判定搬GPU设计.md

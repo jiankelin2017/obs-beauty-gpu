@@ -4,7 +4,7 @@ title: ADR · 每滤镜实例独占一个引擎槽
 version: 0.1.1
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 无（新增决策记录）

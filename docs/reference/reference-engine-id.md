@@ -4,7 +4,7 @@ title: 引擎 core 与 gpu 是什么关系
 version: 0.1.1
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 根 GPU_CPU_对比报告.md

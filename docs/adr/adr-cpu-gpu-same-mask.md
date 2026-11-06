@@ -4,7 +4,7 @@ title: ADR · CPU 与 GPU 掩码共用同一份 faceGeom
 version: 0.1.0
 last_updated: 2026-11-05
 applies_to: 3.0.1
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 无（归纳性决策记录）

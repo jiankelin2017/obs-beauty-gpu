@@ -4,7 +4,7 @@ title: OBS 美颜 GPU 版 · 现状入口
 version: 0.1.3
 last_updated: 2026-11-06
 applies_to: 3.2.2
-repo_baseline: bb4dfba
+repo_baseline: 914f388
 maintainer: Jian
 status: Active
 supersedes: 04_文档/README.md（已归档）
