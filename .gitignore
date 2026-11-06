@@ -32,6 +32,15 @@
 # build_offline.ps1 的中间产物（每次重编逐次变化，入库只会制造无意义 diff）
 06_离线验证/obj_probe/
 
+# 离线探针的临时产物（每次运行重建）：_autorot / _slot 系列是从人脸素材派生的
+# 中间帧与掩码输入，既不该入库，也避免把生物特征派生数据提交上去。
+# 命中的是数据文件（.raw/.png），脚本（_*.py）不在规则内。
+06_离线验证/_*.raw
+06_离线验证/_*.png
+
+# 02_构建 下部署前手工 Copy-Item 出来的旧 dll 备份（obs-beauty_before_*.dll 等）
+02_构建/backup/
+
 # Python 字节码缓存
 __pycache__/
 

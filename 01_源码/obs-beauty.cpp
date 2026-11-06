@@ -651,6 +651,14 @@ struct beauty_filter {
 	int thumb_ox, thumb_oy;
 	bool thumb_prev_ok;        // 上一帧 chain_out_valid → 本帧可以只回读缩略图
 	bool thumb_frame;          // 本帧真的走了缩略图路径（钩子据此拒绝上传旧帧）
+	/* 3.2.1：上一帧是不是 geomOnly（只出几何、掩码由 GPU 重画）。
+	 *
+	 * 「仅色彩层」那行诊断里的 `引擎掩码 px` 在 geomOnly 帧上**结构上恒为 0** ——
+	 * cpu 侧一个像素都不落笔，px 根本没被累加。不分真假的话，这行会被读成
+	 * 「没有掩码 → 美白该失效」，而实际画面是好的。
+	 * 2026-11-06 就为这一条白查了一轮：日志 px=0 但用户目视美白有效。
+	 * 记在宿主侧而不是引擎侧，因为诊断发生在 process() 之前，拿不到本帧的 job。 */
+	int  last_geom_only;
 	// ---- 2.11.0（方案C）：运动判定搬 GPU + 缩略图按提交帧回读 -----------
 	// 问题：S7 之后静止时每 8 帧才提交一次检测，但 640×640 缩略图**每帧都回读**
 	// （1.6 MB），而它每帧唯一的用途是给运动判定采 256 个点。实测日志里
@@ -4816,6 +4824,7 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	/* 2.15.4：一次性「掩码路径」快照。用户报「能看到一块矩形」时，这一行直接
 	 * 指出走的是哪条路（CPU 掩码 / GPU 掩码 / 沿用 / 没掩码），不用再猜。
 	 * 只打一次，零成本。 */
+	f->last_geom_only = job.maskGeomOnly ? 1 : 0;   // 3.2.1：给「仅色彩层」诊断定性
 	if (!f->mask_path_logged) {
 		f->mask_path_logged = 1;
 		blog(LOG_INFO,
@@ -6359,14 +6368,25 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		const uint64_t nf = obs_get_total_frames();
 		if (nf - f->color_only_at >= 60) {
 			f->color_only_at = nf;
+			/* 3.2.1：补 geomOnly 与「px 该怎么读」的结论，别再靠猜。
+			 * px = -1 表示引擎手上压根没有有效掩码（没检出脸/没模型）；
+			 * px = 0 且 geomOnly = 1 表示掩码在 GPU 上重画，CPU 这份空是正常的。 */
+			const char *px_note = "";
+			if (mkpx0 < 0)
+				px_note = "｜px=-1：引擎无有效掩码（没检出脸或模型未就绪）";
+			else if (mkpx0 == 0 && f->last_geom_only)
+				px_note = "｜px=0 正常：geomOnly 帧，掩码在 GPU 上重画";
+			else if (mkpx0 == 0)
+				px_note = "｜px=0 异常：本帧该由 CPU 画掩码却一个像素都没落";
 			blog(LOG_INFO,
 			     "[" PLUGIN_NAME "] 仅色彩层：磨皮=0 清晰=%.0f 美白=%.0f "
-			     "红润=%.0f｜引擎掩码 px=%d 有脸=%d 无脸帧=%llu "
-			     "gpu_smooth=%d chain=%d",
+			     "红润=%.0f｜引擎掩码 px=%d 有脸=%d geomOnly=%d 无脸帧=%llu "
+			     "gpu_smooth=%d chain=%d%s",
 			     f->v[P_CLARITY], f->v[P_WHITEN], f->v[P_RED],
-			     mkpx0, mkfaces0,
+			     mkpx0, mkfaces0, f->last_geom_only,
 			     (unsigned long long)beautyCoreNoFaceFrames(),
-			     f->gpu_smooth_prod ? 1 : 0, f->chain_prod ? 1 : 0);
+			     f->gpu_smooth_prod ? 1 : 0, f->chain_prod ? 1 : 0,
+			     px_note);
 		}
 	}
 	/* 2.15.0：引擎判定「面板这一档方向检不到脸、已改用 0°」时，缩略图不能再按

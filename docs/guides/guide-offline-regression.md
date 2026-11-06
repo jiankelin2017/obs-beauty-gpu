@@ -1,9 +1,9 @@
 ---
 doc_type: guides
 title: 离线 CPU 引擎回归台
-version: 0.1.0
-last_updated: 2026-11-05
-applies_to: 3.0.1
+version: 0.1.1
+last_updated: 2026-11-06
+applies_to: 3.2.2
 repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
@@ -62,10 +62,61 @@ py -3.12 offline_regress.py run --frame goldens/frame_1280x720.raw --w 1280 --h 
 
 # PNG 转裸 RGBA8（换素材时用）
 py -3.12 offline_regress.py from-png my.png in.raw --w 1280 --h 720
+
+# 3.2.0 自动方向认定三判据（动检测 / 几何 / 输入方向相关代码必跑）
+py -3.12 _autorot_probe.py
 ```
 
 `--update` 会重采基准。**只在确认「CPU 输出变化正是这次想改的」之后才用**，
 否则等于把回归门禁关掉。
+
+## 方向认定判据（`_autorot_probe.py`，3.2.0 新增）
+
+这个脚本验的是 3.2.0 的「自动输入方向认定」：源被场景项转过 90°/270° 时，引擎能不能自己认出方向。
+它必须在本机的 `core_probe.dll` 上跑（同一份引擎代码），三条用例共用 720×1280 与 1280×720 两张素材：
+
+| 用例 | 素材 | 期望 |
+|---|---|---|
+| 躺脸 + 方向未声明 | `05_验证/assets/face_front_720p_r90.png` 缩放到 720×1280 | 120 帧内自动命中，之后 `faces=1` |
+| 正立脸 | `05_验证/assets/face_front_720p.png` 缩放在 1280×720 | 40 帧内始终 `effRot=0` 且 `faces=1`（不得误判） |
+| 纯色空画面 | 程序生成 | 120 帧内始终 `effRot=0`（没人时不得锁方向） |
+
+判据的设计意图：**第一条证明能力存在，第二条与第三条证明它不会乱动**。只测第一条是不够的 ——
+一个「永远返回 90°」的实现也能过第一条。
+
+跑之前不要设 `BEAUTY_INPUT_ROT` / `BEAUTY_AUTO_ROT` / `BEAUTY_AUTO_ROT_MISS`，
+否则测的是被环境变量改写过的行为。实测数据与真机验收见
+[`../design/design-input-rotation.md`](../design/design-input-rotation.md) §10.4。
+
+**已知边界**：只试 90° 和 270°，不试 180°（上下颠倒）。180° 的场合仍须手工设 `BEAUTY_INPUT_ROT=180`。
+
+## 槽位循环判据（`_slot_cycle_probe.py`，3.2.2 新增）
+
+验的是「删掉美颜滤镜再加回来，该槽的异步检测线程能不能重启」。缺陷本体在
+`startAsyncIfNeeded()`：`stopAsync()` 只置 `async_.quit = true` 从不复位，而 `releaseSlot()`
+刻意保留引擎对象（省模型预热），所以复用同一 `CoreEngine` 时新 worker 第一句就退出。
+详见 [`../adr/adr-multi-instance-slots.md`](../adr/adr-multi-instance-slots.md)。
+
+三步，**必须逐步按顺序**，因为判别位在第三步：
+
+| 步骤 | 做什么 | 期望 |
+|---|---|---|
+| 1 | 有脸素材（1280×720）连喂 60 帧 | `faces=1`（worker 活着、掩码有效） |
+| 2 | `BeautyCoreProbeSlotCycle()`：acquire → release → acquire | 返回 `slot=0`（引擎实例被复用，正是缺陷发生条件） |
+| 3 | 换**纯色无脸**画面再喂 60 帧 | `faces` 归 0（worker 活着 → 新检测判无脸 → 掩码被 `onDetectFailed` 清掉） |
+
+第三步为什么能当判别位：worker 死了的时候没人跑新检测，`maskFaces_` 会**停在上一轮**，
+`faces` 恒为 1 —— 这正是线上「效果冻住、拉参数不响应」的样子。
+
+两个必须知道的细节：
+
+- 脚本会自己把 `BEAUTY_ASYNC_DETECT` 设成 `1`。`BeautyCoreRun` 默认强制同步（否则逐字节对拍
+  会飘），而**同步路径根本没有这个线程**，不强制异步就等于没测。
+- `BeautyCoreProbeSlotCycle` 是 3.2.2 新加的探针导出。老 dll 没有它，脚本会直接报错退出 ——
+  先重跑 `build_offline.ps1`。
+
+**反向对照已实跑**：把 `async_.quit = false;` 那一行撤掉重编，同一脚本第三步 60 帧全为 1
+并报 FAIL。所以这个判据不是「跑了就算过」，它确实能抓到该缺陷。
 
 ## 素材与基准
 

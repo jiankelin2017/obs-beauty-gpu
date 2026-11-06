@@ -176,7 +176,7 @@ supersedes: 04_文档/开发流程与优化计划.md
 | 8 | 门禁判定 | `gate.py --skip-transfer --cmp`（口径 A）+ `ab_pair.py`（口径 C） | PASS/FAIL 表 | ✅ | **收益只认配对**；搬运项跨会话不可比，这条要写进流程卡 | 是 |
 | 9 | 稳定性长跑 | `soak_s2.py` 720p/4K 30 min，盯 device-lost | 帧数/异常 | ✅ | **S2** 已过 30 min（4K 54180 帧，§9.3.1）；**S3** 已补 4K 30 min（301 窗，§9.16，稳定性 PASS）；S4b1 是 4K 20 min×2。**S3 与 S4b 互斥**（S4b 以 `!stage_async` 为前提），不存在"组合跑"；实测 S3 在 2.8.0 默认组合下 4K 慢 1.53 ms → 不翻默认 | 是 |
 | 10 | 回滚演练 | 每个开关 `=0`（或 `=1`）实跑一次 | 回退证据 | ⚠️ 部分 | 新开关必须补。**无开关的变更**（S6 / 等价重构）回退口径是 `git revert`，演练方式改为「重跑 T1/T2 对拍」而不是拨开关 | 是 |
-| 11 | 文档/提交 | 本文 + `../reference/reference-switches.md` + `../CHANGELOG.md`，并同步 [`../INDEX.md`](../INDEX.md) 总表 + commit | 记录 | ✅ 2.11.0 起有闸门 | 新增开关同批进表（**63 条**，2026-11-05 复核）；`05_验证/check_release.py` 已把「dll 版本 == 源码宏」「装机/安装包 == 构建产物」「四份 shader 相同」「开关表 ↔ `getenv()`」全部自动化，并把 `docs/` 纳入语料（`archive/` 除外） | 否 |
+| 11 | 文档/提交 | 本文 + `../reference/reference-switches.md` + `../CHANGELOG.md`，并同步 [`../INDEX.md`](../INDEX.md) 总表 + commit | 记录 | ✅ 2.11.0 起有闸门 | 新增开关同批进表（**66 条**，2026-11-06 复核）；`05_验证/check_release.py` 已把「dll 版本 == 源码宏」「装机/安装包 == 构建产物」「四份 shader 相同」「开关表 ↔ `getenv()`」全部自动化，并把 `docs/` 纳入语料（`archive/` 除外） | 否 |
 | 12 | **发布前一致性闸门** | `py -3 05_验证/check_release.py --strict` | PASS/WARN/FAIL 九项 | ✅ 2.11.0 新增 | **必须在打 `Setup.exe` 之后跑**：它同时比三处 dll 与四份 shader，任何一处漏更新都当场 FAIL。历史教训 N13（2.9.1 装了一个月、`Setup.exe` 还停在 2.9.0）就是没这道闸 | 否 |
 
 **读表要点**

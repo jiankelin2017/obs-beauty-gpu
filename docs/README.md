@@ -1,9 +1,9 @@
 ---
 doc_type: README
 title: OBS 美颜 GPU 版 · 现状入口
-version: 0.1.1
-last_updated: 2026-11-05
-applies_to: 3.0.1
+version: 0.1.3
+last_updated: 2026-11-06
+applies_to: 3.2.2
 repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
@@ -13,19 +13,23 @@ supersedes: 04_文档/README.md（已归档）
 # OBS 美颜 GPU 版
 
 > **结论**：把五段人脸美颜从 CPU 整体搬到 GPU 的 OBS 视频滤镜（`obs_beauty_filter`）。
-> 当前可用版本 **3.0.1**，每个滤镜实例独占一个引擎槽，支持最多 8 路并发。
+> 当前可用版本 **3.2.2**，每个滤镜实例独占一个引擎槽，支持最多 8 路并发。
 > 全库总表 [`INDEX.md`](INDEX.md)｜历史证据 [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md)。
 
-## 1. 当前状态（3.0.1 / 2026-11-05）
+## 1. 当前状态（3.2.2 / 2026-11-06）
 
 | 项 | 结论 |
 |---|---|
-| 版本 | **3.0.1**（代码审查修复 · 普通升级），唯一出处 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR` |
+| 版本 | **3.2.2**（删滤镜再加回来的修复 + 三处内部缺陷补完），唯一出处 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR` |
 | 架构 | 3.0.0 起 `SlotState` 按槽隔离帧号 / 掩码轨迹 / 肤色 EMA / hook user / 异步 worker；修「A 镜头闪烁 + 侧机位无效果」的根因（进程单例引擎 + 文件级全局帧状态） |
+| 3.2.2 改了什么 | **修「删掉美颜滤镜再加回来 → 该槽异步检测线程永久死亡」**（`stopAsync()` 置 `quit` 后 `startAsyncIfNeeded()` 从不复位，新 worker 第一句就退出）。另修自动方向探测的数据竞争、`warmed_` 标记位置与 `release()` 复位 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
+| 3.2.1 改了什么 | 「仅色彩层」诊断补 `geomOnly` 字段并直接写出结论（`px=-1` 无有效掩码 / `px=0 且 geomOnly=1` 正常 / `px=0 且 geomOnly=0` 异常） |
+| 3.2.0 改了什么 | 新增**自动输入方向认定**（`BEAUTY_AUTO_ROT`）：采集卡输出横躺、场景项旋转成竖屏时，插件自己在 90°/270° 上试出正确方向并补偿。修「磨皮冻在横屏坐标、拉参数不响应、美白失效」。另修 `warmUp()` 不幂等 |
 | 3.0.1 修了什么 | 安装包路径改 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty`、槽位失败路径悬空钩子、worker 释放竞态、命令注入面、闸门补 3 条断言 → 见 [`CHANGELOG.md`](CHANGELOG.md) |
-| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（633,856 B / `068E03E5FBE2E21C1883A7F372828783`）；`Setup.exe 1,533,952 B / E945A0F86041050C6506A33B26F4A7FC`；`--strict` **12 PASS / 0 WARN / 0 FAIL** |
-| 离线回归 | 4 条 golden 逐字节相同 |
+| 交付一致性 | 构建 / 安装包 / 装机三处 dll 逐字节一致（**635,904 B / `95C390D2DEDD474E1471E00C9C70311E`**）；`Setup.exe 1,538,048 B / 4796355CF29F510011B47D555E4A2AFE`；`--strict` **12 PASS / 0 WARN / 0 FAIL**。装机侧旧版备份为同目录 `obs-beauty_3.2.1.dll` |
+| 离线回归 | 4 条 golden 逐字节相同；方向判据 `06_离线验证/_autorot_probe.py`（3 例全 PASS）；槽位循环判据 `06_离线验证/_slot_cycle_probe.py`（PASS，且已做「撤掉修复必挂」的反向对照） |
 | 多机位自动化 | 4 个独立源各挂 1 滤镜 → `slot=0/1/2/3 活跃实例=1/2/3/4`；删一路、槽复用、无黑屏 / 条纹 / 崩溃 |
+| 3.2.0 真机验收 | 2026-11-06 18:02 直播中（1080×1920@30，美颜+录制+推流同时）：日志 `自动方向探测命中 270°` → 38 ms 后 `count=1`；滑块恢复响应、美白可见；渲染帧平均 **5.8 ms**、因渲染延迟丢帧 **0/23620**、编码延迟跳过 **0/11407**、CPU **4.9%** |
 | **待人工确认** | 用真实 2–4 路摄像头分别调磨皮 / 美白 / 润色清晰，连续观察 A 镜头是否闪烁。自动化只证明上下文隔离与输出正常，画面观感需人眼判断 |
 
 **部署约束（必须记住）**
@@ -52,7 +56,7 @@ supersedes: 04_文档/README.md（已归档）
 | 多脸 | ≥2 张脸时缩略图检测与帧环绕开，收益归零 | 设计边界；素材统计多脸 1.59%，不立项 |
 | 开箱行为 | 磨皮出厂默认 **20**，装上就轻微改画面 | 要零影响把磨皮拖到 0 |
 | 构图 | 竖屏 / 横竖混用时观感像被拉伸 | 与滤镜无关，是 OBS 场景项几何；滤镜侧无解 |
-| 输入方向 | 设 90/270 而源其实正立 → YuNet 检不到脸 → 美颜全灭 | 2.15.0 起检不到脸自动退回 0° 并打 WARN；源侧躺而设 0/180 仍不覆盖 |
+| 输入方向 | 源被场景项转过 90°/270° 时，滤镜拿到的仍是**未旋转**的源纹理，YuNet 检不出躺倒的脸 | **3.2.0 起自动认定**：连续 20 次检测无脸 → 在同一帧上试 90°/270°，命中即补偿并打印 `自动方向探测命中 N°`。不需要手工设 `BEAUTY_INPUT_ROT`。**180°（上下颠倒）不在自动覆盖范围内**，仍须手工设。判定有误设 `BEAUTY_AUTO_ROT=0` 关闭 |
 | 掩码 | 2.15.0「掩码跟脸转」的 CPU↔GPU 逐像素等价**尚未实机对拍** | 只过编译校验；待办 `GPU_MASK_CMP=1` + `MASK_GEOM_ONLY=0` |
 | 性能妥协 | `DET_ADAPT_AGG=rms` 的代价越过人眼 JND（+6 灰阶档） | **默认 `max`，不翻**；要开就成套开 `rms + DET_ADAPT_STILL=4` |
 | 立项否决 | 「边界带闪烁」立项不成立（仿真片高估了它） | 静态真机输入下掩码 ΔD 全 0.00；勿把「检测框时域残差」当成闪烁根因 |
@@ -74,7 +78,7 @@ py -3.12 05_验证\check_release.py --strict
 
 - 装机前**必须关闭 OBS**（脚本会拒绝运行中装机，并自动备份旧 dll）。
 - 本机 `python` 是 Microsoft Store 别名，**验证脚本一律用 `py -3.12`**。
-- 健康三行判据：`init OK (v3.0.1, engine=gpu/2.0.0, …)`、六行 `xxx.hlsl 已加载`、
+- 健康三行判据：`init OK (v3.2.2, engine=gpu/2.0.0, …)`、六行 `xxx.hlsl 已加载`、
   一行 `引擎资源已预热 WxH`；`engine=` 到底代表什么见
   [`reference/reference-engine-id.md`](reference/reference-engine-id.md)。
 - 面板 22 项（1 总开关 + 14 滑块 + 7 选项），磨皮默认 **20**、其余 0；
@@ -86,6 +90,8 @@ py -3.12 05_验证\check_release.py --strict
 |---|---|---|
 | 发布闸门 | `py -3.12 05_验证/check_release.py --strict` | 版本单源 / 三处 dll / 四份 shader / 开关表 / Setup.exe 路径·版本串·载荷 |
 | 离线引擎 | `py -3.12 06_离线验证/offline_regress.py check` | CPU golden 四例（动引擎接口 / S4 / S7 必跑） |
+| 离线方向认定 | `py -3.12 06_离线验证/_autorot_probe.py` | 3.2.0 自动方向三判据：躺脸必须命中、正立脸不得误判、空画面不得误判（改 `beauty_core.cpp` 的检测/几何段必跑） |
+| 离线槽位循环 | `py -3.12 06_离线验证/_slot_cycle_probe.py` | 3.2.2：模拟「删掉滤镜再加回来」，用无脸画面判定 worker 是否真的重启（改 `startAsyncIfNeeded` / `stopAsync` / `releaseSlot` 必跑） |
 | 离线 shader | `05_验证/verify_{tone,smooth,region,detail,warp,mask}_compiles.py` | 编译 + 入口签名 |
 | 实机 | `verify_s1_correct.py` / `verify_region_samemask.py` / `verify_spot_pixels.py` | 逐像素 / 同掩码 / 祛斑像素量 |
 | 性能 | `s0_lock.py` → `gate.py --skip-transfer --cmp` → `ab_pair.py` | 收益只认同会话配对 A/B |

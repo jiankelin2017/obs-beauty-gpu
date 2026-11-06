@@ -1,9 +1,9 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.6
+version: 0.1.7
 last_updated: 2026-11-06
-applies_to: 3.0.1
+applies_to: 3.2.2
 repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
@@ -19,29 +19,37 @@ status: Active
 
 | 主题 | 路径 | 类型 | 状态 | 适用版本 | 维护人 | 最后核对 | 替代 / 归档 |
 |---|---|---|---|---|---|---|---|
-| 现状入口 | [`README.md`](README.md) | README | Active | 3.0.1 | Jian | 2026-11-05 | 替代根 `README.md`、`04_文档/README.md` |
-| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.0.1 | Jian | 2026-11-05 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
-| 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
-| 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
-| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/开关总表.md` |
-| 验证工具与坑 | [`guides/guide-verification.md`](guides/guide-verification.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `05_验证/README.md` |
-| 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
-| 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.0.1 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
-| 基线测量规程（历史） | [`reference/reference-baseline.md`](reference/reference-baseline.md) | reference | Active（历史参考） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/Phase0_基线测量规程.md` |
-| 掩码上 GPU 设计 | [`design/design-mask-gpu.md`](design/design-mask-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案A_5b2_掩码上GPU设计.md` |
-| 五官段 GPU 设计 | [`design/design-region-gpu.md`](design/design-region-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案A_五官GPU设计.md` |
-| 输入旋转 | [`design/design-input-rotation.md`](design/design-input-rotation.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案B_输入旋转开发计划.md` |
-| 运动判定搬 GPU | [`design/design-motion-gpu.md`](design/design-motion-gpu.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案C_运动判定搬GPU设计.md` |
-| 遮挡感知掩码（Draft） | [`design/design-occlusion-mask.md`](design/design-occlusion-mask.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案D_遮挡感知掩码设计.md` |
-| SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
-| 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.0.1 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
-| 多实例引擎槽决策 | [`adr/adr-multi-instance-slots.md`](adr/adr-multi-instance-slots.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 3.0.0 / 3.0.1 决策；证据见 `CHANGELOG.md` |
-| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 3.0.1 决策；`Setup.exe` 端到端安装 / 卸载未实跑 |
-| 分割不用于遮挡决策 | [`adr/adr-seg-not-for-occlusion.md`](adr/adr-seg-not-for-occlusion.md) | adr | Active | 3.0.1 | Jian | 2026-11-05 | 替代 `04_文档/结论_分割对手遮脸无效_20261105.md`（原文已归档） |
-| CPU/GPU 共用 faceGeom | [`adr/adr-cpu-gpu-same-mask.md`](adr/adr-cpu-gpu-same-mask.md) | adr | Active（归纳 · 待人工确认） | 3.0.1 | Jian | 2026-11-05 | 归纳自 3 篇修复记录，**非原始决策** |
+| 现状入口 | [`README.md`](README.md) | README | Active | 3.2.2 | Jian | 2026-11-06 | 替代根 `README.md`、`04_文档/README.md` |
+| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.2.2 | Jian | 2026-11-06 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
+| 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
+| 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
+| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.2.2 | Jian | 2026-11-06 | 原 `04_文档/开关总表.md` |
+| 验证工具与坑 | [`guides/guide-verification.md`](guides/guide-verification.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `05_验证/README.md` |
+| 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
+| 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
+| 基线测量规程（历史） | [`reference/reference-baseline.md`](reference/reference-baseline.md) | reference | Active（历史参考） | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/Phase0_基线测量规程.md` |
+| 掩码上 GPU 设计 | [`design/design-mask-gpu.md`](design/design-mask-gpu.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案A_5b2_掩码上GPU设计.md` |
+| 五官段 GPU 设计 | [`design/design-region-gpu.md`](design/design-region-gpu.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案A_五官GPU设计.md` |
+| 输入旋转 | [`design/design-input-rotation.md`](design/design-input-rotation.md) | design | Active | 3.2.2 | Jian | 2026-11-06 | 原 `04_文档/方案B_输入旋转开发计划.md`；§10 记 3.2.0 自动方向认定 |
+| 运动判定搬 GPU | [`design/design-motion-gpu.md`](design/design-motion-gpu.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案C_运动判定搬GPU设计.md` |
+| 遮挡感知掩码（Draft） | [`design/design-occlusion-mask.md`](design/design-occlusion-mask.md) | design | Active（Draft · 未接线） | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案D_遮挡感知掩码设计.md` |
+| SDK 更优设计移植（Draft） | [`design/design-sdk-port.md`](design/design-sdk-port.md) | design | Active（Draft · 未接线） | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/方案E_SDK更优设计移植开发方案.md` |
+| 美白整帧色彩变换 | [`design/design-tone-global.md`](design/design-tone-global.md) | design | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/复刻SDK_美白整帧色彩变换_20261105.md` |
+| 多实例引擎槽决策 | [`adr/adr-multi-instance-slots.md`](adr/adr-multi-instance-slots.md) | adr | Active | 3.2.2 | Jian | 2026-11-06 | 3.0.0 / 3.0.1 决策 + 3.2.2 worker 重启加固；证据见 `CHANGELOG.md` |
+| 安装路径与闸门决策 | [`adr/adr-setup-programdata.md`](adr/adr-setup-programdata.md) | adr | Active | 3.2.2 | Jian | 2026-11-05 | 3.0.1 决策；`Setup.exe` 端到端安装 / 卸载未实跑 |
+| 分割不用于遮挡决策 | [`adr/adr-seg-not-for-occlusion.md`](adr/adr-seg-not-for-occlusion.md) | adr | Active | 3.2.2 | Jian | 2026-11-05 | 替代 `04_文档/结论_分割对手遮脸无效_20261105.md`（原文已归档） |
+| CPU/GPU 共用 faceGeom | [`adr/adr-cpu-gpu-same-mask.md`](adr/adr-cpu-gpu-same-mask.md) | adr | Active（归纳 · 待人工确认） | 3.2.2 | Jian | 2026-11-05 | 归纳自 3 篇修复记录，**非原始决策** |
 
 > 批 2 起上表全部为 Active；批 3 起 `design/` 7 篇纳入总表，其中方案 D / E 是
 > **Draft · 未接线**，不可作为当前实现依据。`05_验证/`、`06_离线验证/` 下的脚本与数据仍在原目录，文档只是归位。
+>
+> **2026-11-06 版本口径**：适用版本列统一改为 3.2.2（3.2.x 只新增检测方向认定、一行日志、
+> 删滤镜再加回来的 worker 重启修复，未改动这些主题的主体实现）；`最后核对` 列保留各文档
+> **实际复核**的日期 —— 仍写 2026-11-05 的表示本次只做了版本口径对齐、未逐字复核。
+>
+> **2026-11-06 新增两篇待登记**：`06_离线验证/_slot_cycle_probe.py`（3.2.2 槽位循环判据，
+> 见 [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md)）、
+> `adr/adr-multi-instance-slots.md` §决策补 3.2.2 worker 重启条目。
 
 ## 2. archive 索引
 
@@ -265,7 +273,7 @@ ADR 骨架：沿用上述 YAML 头（`doc_type: adr`，文件名 `adr-<主题>.m
 | 1 | 元数据与版本 | 改过的每篇 Active 文档 YAML 头齐全；`version` 按 §6.2 递增、`last_updated` 为当天；`applies_to` / `repo_baseline` / `maintainer` 未被误改；归档件正文 `git diff` 为空 | 补齐字段 / 升修订位，只增不减、不跳号 |
 | 2 | 骨架与命名 | 新建或重写件套 §6.1 骨架且无「待补 / TODO」残留；命名 `类型-主题.md`；ADR 不带日期；Draft 有文首标注；主目录同主题只有 1 份 | 回 §6.1 重套骨架或改名 |
 | 3 | 总表与链接 | 新增 / 移动 / 归档的文档已登记进 §1 或 §2；§5 批次状态与实物一致；`docs/` 主动区相对链接断链 0 | 先补本表，再提交 |
-| 4 | 发布闸门 | `py -3.12 05_验证/check_release.py --strict` 必须 **12 PASS / 0 WARN / 0 FAIL**；`docs/archive/` 仍在语料排除列表内；开关表 63 条与源码双向一致 | 定位 FAIL 来源；不得靠删断言过关 |
+| 4 | 发布闸门 | `py -3.12 05_验证/check_release.py --strict` 必须 **12 PASS / 0 WARN / 0 FAIL**；`docs/archive/` 仍在语料排除列表内；开关表 66 条与源码双向一致 | 定位 FAIL 来源；不得靠删断言过关 |
 
 提交动作：用 `git add -u` + 显式 `git add -- docs/...`，**不用 `git add -A`**（仓库存在大量历史
 未跟踪产物，全量暂存会把它们卷进来）。按 A1，改 `check_release.py` 属文档治理配套：不动插件版本、

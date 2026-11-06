@@ -1,9 +1,9 @@
 ---
 doc_type: adr
 title: ADR · 每滤镜实例独占一个引擎槽
-version: 0.1.0
-last_updated: 2026-11-05
-applies_to: 3.0.1
+version: 0.1.1
+last_updated: 2026-11-06
+applies_to: 3.2.2
 repo_baseline: bb4dfba
 maintainer: Jian
 status: Active
@@ -36,6 +36,12 @@ OBS 对每个 `obs_beauty_filter` 实例分别回调 `render()`，多机位时�
 - 3.0.1 加固：槽位获取失败时 `create()` 立即直通，不留悬空 hook user；`render()` 早退判断提到
   `beautyCoreBindSlot()` 之前；`destroy()` 只在有效槽摘钩子；`beautyCoreReleaseSlot()` 在同一把
   `g_slotMutex` 内调用 `stopAsync()` 并清空 `SlotState`，消除 worker 释放竞态。
+- 3.2.2 加固：**槽复用必须能重启 worker**。`stopAsync()` 只置 `async_.quit = true`，从不复位；
+  而 `releaseSlot()` 刻意保留引擎对象（省掉约 2 秒模型预热），于是「删掉滤镜再加回来」拿回
+  同一个 `CoreEngine` 后，`startAsyncIfNeeded()` 新 spawn 的 worker 第一句 wait 谓词就满足
+  （`quit` 仍为真）当场 return —— 该槽异步检测永久死亡，掩码不再更新，脸内效果全灭，只有重启
+  OBS 能恢复。修法：重启前持锁复位 `quit`，同时清掉上一轮遗留的 `hasJob` / `working` / `ready`
+  （换过源之后那是另一路画面的帧与坐标，新实例不该继承）。
 
 ## 后果 / 边界
 
@@ -43,12 +49,16 @@ OBS 对每个 `obs_beauty_filter` 实例分别回调 `render()`，多机位时�
 - 每多一实例多加载一份 YuNet 模型并多占一份帧环内存。
 - **一源一滤镜是唯一受支持用法**；同一源串联多个美颜滤镜不受支持（OBS 滤镜链 + GPU 链尾直绘的固有表现），
   不算本决策要修的串扰。
-- 槽可复用：删掉一路后新实例会拿到空出的槽。
+- 槽可复用：删掉一路后新实例会拿到空出的槽；3.2.2 起复用时 worker 会真正重启（此前复用即失效）。
 - `BEAUTY_SEG=1` 的多实例边界**仍未解决**，默认关闭时不影响。
 
 ## 证据
 
-- [`../CHANGELOG.md`](../CHANGELOG.md) 3.0.0 / 3.0.1；[`../README.md`](../README.md) §2。
+- [`../CHANGELOG.md`](../CHANGELOG.md) 3.0.0 / 3.0.1 / 3.2.2；[`../README.md`](../README.md) §1。
+- 3.2.2 槽位循环判据：`py -3.12 06_离线验证/_slot_cycle_probe.py`。做法是「有脸 60 帧 → 槽位
+  acquire/release/acquire → 无脸 60 帧」，最后一步的 `faces` 是判别位：worker 活着则新检测判无脸、
+  掩码被清、`faces` 归 0；worker 死了则掩码停在上一轮、`faces` 恒为 1。**反向对照已实跑**：
+  撤掉 `quit` 复位那一行重编，同一脚本 60 帧全为 1 并报 FAIL。
 - 4 机位自动化复验：4 个独立源各挂 1 滤镜 → `slot=0/1/2/3`、活跃实例 `1/2/3/4`；
   删一路后其余正常、槽可复用、无崩溃与黑屏；离线回归 4 条 golden 逐字节相同。
 - 代码：`01_源码/beauty_core.cpp`、`01_源码/beauty_core.h`、`01_源码/obs-beauty.cpp`。

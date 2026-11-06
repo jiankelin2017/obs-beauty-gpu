@@ -485,6 +485,19 @@ struct SmoothCfg {
     // 「无掩码 = 全帧磨皮」的兜底路径。BEAUTY_NOFACE_SKIP=0 逐字节回到
     // 旧行为（无掩码 → 全帧兜底磨皮）。
     bool noFaceSkip = true;
+    /* 3.2.0（自动输入方向）：源被场景项转过 90° 时，YuNet 在躺倒的脸上检不出框，
+     * 掩码为空 → 磨皮/美白/红润整段静默失效。面板「输入方向」2.15.2 已删，
+     * 只剩 BEAUTY_INPUT_ROT 一条手工路；这里补一条自动路 —— 连续检不到脸时
+     * 在同一张输入图上试 90°/270°，命中即认定为有效方向。
+     *
+     * 开关：BEAUTY_AUTO_ROT=0 关闭（默认开）。关掉后行为与 3.1.x 逐字节一致。 */
+    bool autoRot = true;
+    // 连续多少次「检不到脸」的检测之后才开始试。默认 20 次 ≈ 1 秒（30fps、
+    // 异步每帧提交）；太小会在人刚走出画面时白试，太大则用户要多等一会儿。
+    int  autoRotMiss = 20;
+    // 一次试探之后的冷却（按检测次数算）。命中后不再试探（effRot 非 0），
+    // 这条只对「试了也没人」的情形生效：默认 60 次 ≈ 3 秒一次，代价可忽略。
+    int  autoRotCool = 60;
     // 异步路径的提交周期（帧）。0 = 每帧都提交。
     //
     // 为什么异步路径要每帧、而同步路径仍然是每 4 帧（见 kMaskEverySync）：
@@ -1493,6 +1506,21 @@ public:
             // （无掩码 → 全帧兜底磨皮，逐字节等于 CPU 版修复前的行为）。
             const char* nfs = getenv("BEAUTY_NOFACE_SKIP");
             if (nfs && *nfs) g_cfg.noFaceSkip = (nfs[0] != '0');
+            /* 3.2.0：自动输入方向。BEAUTY_AUTO_ROT=0 关掉（回到 3.1.x 的
+             * 「源躺着脸就检不到」行为，离线逐字节对拍要用它保持确定性）。
+             * 两个阈值留口子是为了真机上能当场调，不用重编译。 */
+            const char* ar = getenv("BEAUTY_AUTO_ROT");
+            if (ar && *ar) g_cfg.autoRot = (ar[0] != '0');
+            const char* arm = getenv("BEAUTY_AUTO_ROT_MISS");
+            if (arm && *arm) {
+                int v = atoi(arm);
+                if (v >= 3 && v <= 600) g_cfg.autoRotMiss = v;
+            }
+            const char* arc = getenv("BEAUTY_AUTO_ROT_COOL");
+            if (arc && *arc) {
+                int v = atoi(arc);
+                if (v >= 0 && v <= 6000) g_cfg.autoRotCool = v;
+            }
             // 异步提交周期：BEAUTY_MASK_EVERY=4 退回 3.1.7 的节奏（拖影回来，但省 CPU）。
             // 留这个口子是为了让真机能当场对比 0 / 1 / 2 / 4 四档，不用改代码重编译。
             const char* me = getenv("BEAUTY_MASK_EVERY");
@@ -1734,12 +1762,21 @@ public:
         // 2.10.0 方案 B：把本帧输入旋转存进成员，供 updateMask/buildMaskInto 的
         // 检测几何反变换使用（渲染与输出尺寸不变，只动几何）。
         inputRot_ = ((s.input_rot % 360) + 360) % 360;
+        /* 3.2.0（自动输入方向）：把「用户有没有声明方向」刷成原子量，供检测侧读。
+         * 不能让它去读 inputRot_ —— 那是每帧都可能被这里改写的普通成员，而
+         * buildMaskInto 在异步路径上跑在 worker 线程（见该函数头的并发约束）。 */
+        autoRotAllowed_.store(inputRot_ == 0, std::memory_order_relaxed);
         // 2.15.0：面板值一变就重新信任它（清掉上次「自动退回 0°」的结论），
         // 否则用户把 90 改成 270 之后引擎还按 0 跑，看起来像开关失灵。
         if (inputRot_ != cfgRot_) {
             cfgRot_ = inputRot_;
             effRot_.store(inputRot_, std::memory_order_relaxed);
             rotFallbackLogged_ = false;
+            /* 3.2.0：用户改了声明（含「从不设到设」），自动认定的结论一并作废 ——
+             * 否则手工填的 90 会被上一次自动探测的结果顶掉，看起来像开关失灵。
+             * 这里**只投一个信号**：计数器归检测侧自己清，渲染线程不直接写
+             * （见 rotAutoReset_ 的声明处）。 */
+            rotAutoReset_.store(true, std::memory_order_relaxed);
         }
 
         double blur = s.panel[P_BLUR];
@@ -2671,6 +2708,17 @@ public:
         maskValid_ = false;
         everHadMask_ = false;
         maskAge_ = 999;
+        /* 自动方向状态与预热标记一起复位（3.2.1 之后的审查补丁）。
+         *   · 计数器：上面 stopAsync() 已经 join，检测侧线程不存在，可以直接写。
+         *   · warmed_：不清它的话，重新启用时 ensureReady 会重新加载模型却**跳过**
+         *     预热，3.1.21 花力气消掉的「开滤镜卡首帧」（≈20 ms）就回来了 ——
+         *     那笔成本正落在用户拨开关的那一刻。 */
+        autoMiss_ = 0;
+        autoCool_ = 0;
+        autoProbeNext_ = 90;
+        autoProbeLogged_ = false;
+        rotAutoReset_.store(false, std::memory_order_relaxed);
+        warmed_ = false;
         // 3.1.21：持久线程池也要收掉。否则 OBS 卸载滤镜后 worker 线程还在，
         // 它们持有本 DLL 里的代码地址 —— 模块卸载时就是一次野跳转。
         beautycore::poolShutdown();
@@ -2716,6 +2764,18 @@ private:
     // 帧算歪，真机前几帧的掩码跟着错。这里只碰纯缓存与纯推理。
     void warmUp() {
         if (getenv("BEAUTY_NO_PREWARM")) return;   // A/B 用：跳过预热看首帧原始成本
+        /* 3.2.0：**预热必须幂等**。它原来没有保护，而 ensureReady() 的调用方
+         * 并不都只调一次 —— 离线台 core_probe 每次 BeautyCoreRun 都调一次
+         * ensureReady，于是每一帧都会：
+         *   · 把 mask_ 重置成固定 1920×1080（当前帧是 720×1280，尺寸对不上，
+         *     下一帧 updateMask 又整个重新分配一遍，等于每帧白烧 8 MB）；
+         *   · 把 maskAge_ 压回 999（每帧都重算检测，缓存全废）。
+         * 这两条以前藏在「离线台跑得慢」里，直到 3.2.0 的自动方向探测被
+         * 「mask_ 尺寸变化 → 重置计数器」这条规则每帧清零，才暴露出来：
+         * 计数器永远到不了阈值，探测一次都不会发生。
+         * OBS 里 ensureReady 只在 preheat 调一次，所以这个缺陷不影响线上，
+         * 但它会让离线台与生产行为分叉 —— 必须修。 */
+        if (warmed_) return;
         const int w = 1920, h = 1080;
         const size_t need = (size_t)w * h * 4;
         const size_t px = (size_t)w * h;
@@ -2746,6 +2806,11 @@ private:
             std::string e;
             face_.detect(&fake[0], 640, 360, dummy, e, 0.9f, 0.3f, 4);
         }
+        /* 幂等标记放在**全部做完之后**。上面几笔 assign 是 8 MB 级分配，可能抛
+         * bad_alloc；若先置标记再分配，一旦抛出去这个实例就永远不再预热，而首帧
+         * 成本照付 —— 比不幂等更糟。异常仍会向上冒（ensureReady 没有 try），
+         * 但至少下次调用会重试。 */
+        warmed_ = true;
     }
 
     // S7（2.8.0）：本帧该用多大的提交周期。
@@ -2942,6 +3007,14 @@ private:
             maskAge_ = 999;
             maskValid_ = false;      // 换分辨率等于重来：别拿旧尺寸的掩码凑合
             everHadMask_ = false;    // 新尺寸下第一帧按「透传」处理，见 process()
+            /* 3.2.0：换源/换分辨率就等于换机位，自动认定的方向不能再沿用 ——
+             * 竖屏机位认定 90° 之后切回横屏源，旧结论会让它每帧白转一次。
+             * 同样是**只投信号**：计数器由检测侧下一轮自己清，渲染线程直接写
+             * 会与 worker 里的 buildMaskInto 撞车（那是本函数唯一的两线程交汇点）。
+             * effRot_ 不同 —— 它是原子量，宿主每帧都要读，可以就地清。 */
+            rotAutoReset_.store(true, std::memory_order_relaxed);
+            if (inputRot_ == 0)
+                effRot_.store(0, std::memory_order_relaxed);
         }
 
         /* 2.7.0（S4b）：本帧有没有 GPU 缩略图。有就把「检测吃什么」从全帧 src
@@ -3019,9 +3092,14 @@ private:
 
     // 检测 + 肤色掩码 + 五官保护 + 包围盒，全部算进调用方给的缓冲。
     //
-    // 刻意做成**只读 src、不碰任何成员**的函数：异步化时它整段跑在 worker 线程上，
-    // 只要不碰成员就不存在数据竞争。这也是异步化能做得这么轻的原因 ——
-    // 不需要给磨皮链加锁。
+    // 并发契约（3.2.1 修正）：本函数在异步路径上整段跑在 worker 线程，同步路径
+    // 上跑在渲染线程 —— 两条路径由 asyncOn_ 互斥，所以**只要不碰两条线程都在动
+    // 的东西**就不需要加锁。它允许碰的只有「检测侧独占」的状态：
+    //   · face_ / 自动方向四个计数器（autoMiss_ 等，见字段声明处的约定）
+    //   · rotAutoReset_ / autoRotAllowed_ / effRot_ 三个原子量
+    // 它**不许**碰磨皮/色调/mask_ 之外的渲染侧字段。
+    // 3.2.0 当初把这条写成「不碰任何成员」，结果自动方向探测直接从渲染线程清
+    // 计数器 —— 契约与实现脱节，谁看注释都会漏掉那个竞争。措辞改准，比说得好听重要。
     //
     // ---- 2.7.0（S4b）：双坐标系 ----------------------------------------
     // 默认（geomW/geomH = 0、mapScale = 0）一切照旧：src 就是全帧，w/h 既是像素
@@ -3181,6 +3259,17 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
             maskOut.assign((size_t)gw * gh, 0);
         if (protectOut.size() != (size_t)gw * gh)
             protectOut.assign((size_t)gw * gh, 0);
+        /* 自动方向：消费渲染线程投递的「自动结论作废」信号（3.2.1 之后的审查补丁）。
+         * **这里是全工程唯一清那几个计数器的地方**（release() 除外，那里 worker
+         * 已经 join，可以直接写）—— 清点与用点都在同一条线程上，渲染线程只碰
+         * rotAutoReset_ 这一个原子量。3.2.0 曾在 updateMask 里直接清，那一帧
+         * worker 可能正在本函数里累加，属数据竞争。 */
+        if (rotAutoReset_.exchange(false, std::memory_order_relaxed)) {
+            autoMiss_ = 0;
+            autoCool_ = 0;
+            autoProbeNext_ = 90;
+            autoProbeLogged_ = false;
+        }
         // 5b-2：几何快照。count 归零是「没脸」的语义，宿主据此决定要不要跑 GPU 掩码。
         // ⚠ 肤色椭圆（cb/cr）**不能在这里记**：estimateSkinCenter() 在本函数后面才跑，
         // 落笔用的是更新后的中心。在这里记 = 拿到上一帧的中心，GPU 侧必然对不上
@@ -3219,6 +3308,13 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                 detOk = true;
                 ferr = e2;
                 setEffRot(0);
+                /* 3.2.0：这里可能是「自动探测认定的 90° 又不成立了」（人把相机摆正、
+                 * 或者换了机位）。判定在检测侧，所以直接就地清掉自动探测的状态，
+                 * 下一轮从 0 重新试 —— 不必绕 rotAutoReset_ 那个跨线程信号。 */
+                autoMiss_ = 0;
+                autoCool_ = 0;
+                autoProbeNext_ = 90;
+                autoProbeLogged_ = false;
                 if (!rotFallbackLogged_) {
                     rotFallbackLogged_ = true;
                     NALOG(BEAUTY_LOG_WARNING,
@@ -3229,6 +3325,75 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
             }
         }
         if (!detOk) {
+            /* 3.2.0（自动输入方向）：**用户没声明方向**（input_rot=0）而源被转过
+             * 90° 时，上面那条反向兜底救不了 —— 它只在 detRot≠0 时才跑，而这里
+             * detRot 一直是 0。这正是「竖屏摄像头美颜完全没效果」那条链：
+             *   OBS 场景项旋转只作用于显示合成 → 滤镜拿到的 in_tex 仍是横躺的
+             *   1920×1080 → YuNet 在躺脸上一个框都出不来 → 掩码为空 → 磨皮/美白/
+             *   红润全乘 0。用户看到的是「人明明是正的，美颜却毫无反应」。
+             *
+             * 宿主拿不到场景项的 transform（滤镜只看得见 target source 的纹理），
+             * 所以「源有没有被转」只能试。试法见下：连续 N 次检不到脸后，在**同一张
+             * 输入图**上各跑一次 90°/270° 的重采样检测；任一方向出脸，就把 effRot_
+             * 定为该角度，宿主读到 rot_match 变假 → 停用缩略图、改走全帧路径，
+             * 那条路从 2.13.1 起就支持按 effRot 旋转重采样 + invRotateFace 反变换
+             * （与用户手填 BEAUTY_INPUT_ROT 完全同一条代码路径）。
+             *
+             * 三条取舍，写在这里免得以后又当 bug 改：
+             *   · 命中后 **本帧仍返回 false**（丢 1 帧）。不复用探测出来的 pf 坐标：
+             *     mapped 路径的 pf 落在「缩略图再转 90°」的坐标系里，比 unscale 用的
+             *     「旋转后全帧」多一层，直接搬会算错；丢一帧（33ms）最省事且无错。
+             *   · 探测本身是**额外两次推理**（各 640×640），只在「已经检不到脸」的帧
+             *     上发生，且冷却 autoRotCool 次检测，正常人走开的场景不会烧推理。
+             *   · 只认 90/270，不试 180：YuNet 对倒立脸的召回本来就差，试了也多半白试，
+             *     而源被倒装接法几乎没有。
+             * BEAUTY_AUTO_ROT=0 可整段关掉。 */
+            const bool autoEligible =
+                g_cfg.autoRot &&
+                autoRotAllowed_.load(std::memory_order_relaxed) &&
+                effRot_.load(std::memory_order_relaxed) == 0;
+            if (autoEligible) {
+                if (autoCool_ > 0) {
+                    autoCool_--;
+                } else if (++autoMiss_ >= g_cfg.autoRotMiss) {
+                    autoMiss_ = 0;
+                    autoCool_ = g_cfg.autoRotCool;
+                    /* 这条用 DEBUG：人走开时探测会周期性重试，INFO 会按
+                     * 「每 20 次检测一条」刷日志。要看它就用 OBS 的 --verbose。 */
+                    NALOG(BEAUTY_LOG_DEBUG,
+                          "[美颜] 自动方向探测开始（连续 %d 次无脸，w=%d h=%d mapped=%d）",
+                          g_cfg.autoRotMiss, w, h, mapped ? 1 : 0);
+                    // 两个方向轮换着先试：源被转 +90° 和 −90° 都可能出现，
+                    // 固定先试 90 会让另一半用户每轮多付一次推理。
+                    const int first = autoProbeNext_;
+                    const int second = (first == 90) ? 270 : 90;
+                    autoProbeNext_ = second;
+                    const int cand[2] = {first, second};
+                    for (int c = 0; c < 2; c++) {
+                        std::vector<beautycore::FaceBox> pf;
+                        std::string pe;
+                        if (face_.detect(src, w, h, pf, pe, detConf, 0.3f, 4,
+                                         cand[c]) && !pf.empty()) {
+                            setEffRot(cand[c]);
+                            msgOut = ferr;   // 本帧仍然没有掩码
+                            facesOut = 0;
+                            if (!autoProbeLogged_) {
+                                autoProbeLogged_ = true;
+                                NALOG(BEAUTY_LOG_WARNING,
+                                      "[美颜] 连续 %d 次检不到脸，自动方向探测命中 %d°："
+                                      "本源的画面相对正立被转了 %d°，已自动补偿。"
+                                      "下一帧起改走全帧路径（不再用检测缩略图）。"
+                                      "若判定有误，设 BEAUTY_AUTO_ROT=0 关闭本功能。",
+                                      g_cfg.autoRotMiss, cand[c], cand[c]);
+                            }
+                            return false;
+                        }
+                        /* 探测也失败：保持 effRot=0，宿主继续走缩略图。
+                         * 不在这里写「试过都不行」的状态 —— 人可能只是暂时走开，
+                         * 冷却 autoRotCool 次之后本来就该再试。 */
+                    }
+                }
+            }
             msgOut = ferr;
             facesOut = 0;
             return false;
@@ -3923,6 +4088,23 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
 
     void startAsyncIfNeeded() {
         if (!asyncOn_ || asyncStarted_) return;
+        /* 3.2.2：stopAsync() 只把 quit 置真、从不复位 —— 而 releaseSlot() 恰好
+         * 是「停线程但留着引擎」：删掉滤镜再加回来时，槽位按最小空闲下标复用
+         * **同一个** CoreEngine 实例，startAsyncIfNeeded() 重新 spawn 的 worker
+         * 第一句 wait 谓词就满足（quit 仍为真），当场 return。此后该槽的异步检测
+         * 永久死亡：掩码不再更新，脸内效果全灭，只有重启 OBS 能恢复。
+         *
+         * 顺带把上一轮遗留的状态清干净：hasJob 是旧实例没来得及跑的活，ready 是
+         * 旧实例没被收走的结果 —— 换过源之后那是**另一路画面**的帧与坐标，新实例
+         * 继承它就会拿别人的掩码磨自己的脸。三者在无 worker 期间无人写入，
+         * 持锁清即可。 */
+        {
+            std::lock_guard<std::mutex> lk(async_.m);
+            async_.quit = false;
+            async_.hasJob = false;
+            async_.working = false;
+            async_.ready = false;
+        }
         asyncStarted_ = true;
         // 3.0.0：worker 是新建线程，thread_local 的 t_slot 默认是 0。必须把
         // 创建它的那个槽带过去，否则第二个实例的异步检测会去读写 slot 0 的
@@ -4288,6 +4470,29 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
     int  cfgRot_ = 0;
     std::atomic<int> effRot_{0};
     bool rotFallbackLogged_ = false;
+    // 3.2.0：warmUp() 的幂等标记（见那里的注释：离线台每帧调 ensureReady）
+    bool warmed_ = false;
+    /* 3.2.0（自动输入方向）：只在「用户没声明方向」（input_rot=0）时工作。
+     *   autoMiss_      连续「检不到脸」的检测次数，到阈值才试
+     *   autoCool_      冷却期剩余次数（试过一次后先歇一会儿，别把推理烧光）
+     *   autoProbeNext_ 下一次先试哪个角（90/270 轮换，避免只试一个方向）
+     *
+     * ⚠ 并发约定（3.2.1 修正）：这**四**个量只许在「跑 buildMaskInto 的那条
+     * 线程」上读写 —— 同步路径是渲染线程，异步路径是 worker，两者由 asyncOn_
+     * 互斥，所以它自己内部不存在竞争。但**渲染线程不许直接清它们**：updateMask
+     * 换分辨率那一帧，渲染线程与 worker 会同时对着这几个量动手（3.2.0 就是这么
+     * 写的，属 UB）。要清就投 rotAutoReset_ 这一个信号，由检测侧自己消费。
+     * 宿主需要读的方向仍然是 effRot_（原子量），不在这几个里。 */
+    int  autoMiss_ = 0;
+    int  autoCool_ = 0;
+    int  autoProbeNext_ = 90;
+    bool autoProbeLogged_ = false;
+    /* 渲染线程 → 检测侧的单向信号：换源/换分辨率/改声明方向 → 自动结论作废。
+     * 用 exchange 消费，天然只生效一次；两个线程各碰各的字段，没有共享写。 */
+    std::atomic<bool> rotAutoReset_{false};
+    /* 「用户没声明方向」= input_rot==0。由 process() 在渲染线程每帧刷新，
+     * buildMaskInto 在检测侧读 —— 免得它去读 inputRot_ 那个每帧都在变的普通成员。 */
+    std::atomic<bool> autoRotAllowed_{true};
     // 2.16.1：本帧强制走 CPU 掩码（钩子不会跑，见 process() 里的设置点）。
     bool forceCpuMask_ = false;
     // 3.1.21：本次「启用以来」是否成功产出过掩码。只看第一次 —— 用它区分

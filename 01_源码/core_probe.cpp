@@ -232,6 +232,14 @@ __declspec(dllexport) int __stdcall BeautyCoreGetMask(unsigned char* outMask, in
     return beautyCoreCopyMask(outMask, w, h) ? 1 : 0;
 }
 
+// 3.2.0（自动输入方向）：本帧**实际**使用的输入旋转（0/90/180/270）。
+// 存在的理由：自动探测是「连续 N 帧检不到脸 → 试 90/270 → 命中即改 effRot」，
+// 只看返回的 faces 分不清「这一帧还没探」和「探了没命中」，也看不出方向对不对。
+// 有了它，离线台可以在一份二进制上直接断言「第 k 帧之后 effRot 变成 90」。
+__declspec(dllexport) int __stdcall BeautyCoreGetEffectiveRot(void) {
+    return beautyCoreEffectiveRot();
+}
+
 // 锐化 / 全局锐化（0..100，与面板同尺度）。CoreEngine 0.6 起。
 __declspec(dllexport) void __stdcall BeautyCoreSetDetail(double face, double global) {
     g_sharpen = face;
@@ -385,6 +393,26 @@ __declspec(dllexport) int __stdcall BeautyCoreSegInit(void) {
 // 三种原因长得一模一样。调用方应立即拷贝，指针只在下一次调用前有效。
 __declspec(dllexport) const char *__stdcall BeautyCoreSegError(void) {
     return beautyCoreSegError();
+}
+
+// 3.2.2：模拟宿主「删掉滤镜再加回来」的完整槽位生命周期。
+// 离线台原先够不到这条路径，于是 releaseSlot→stopAsync 之后 worker 重启不了
+// 这个缺陷只能靠装机复现。顺序与宿主一致：
+//   acquire（占槽 + ensureReady）→ release（停 worker，模型刻意保留）
+//   → acquire（拿回同一个槽，引擎实例复用）→ 绑定当前线程
+// 返回最终槽号；<0 表示失败（-1 首次占槽失败 / -2 二次占槽失败）。
+// 注意：引擎对象不析构，所以第二次 acquire 拿到的必然是**同一个** CoreEngine，
+// 这正是缺陷发生的条件，也是本探针要覆盖的点。
+__declspec(dllexport) int __stdcall BeautyCoreProbeSlotCycle(void) {
+    std::string err;
+    const int s = beautyCoreAcquireSlot(err);
+    if (s < 0) return -1;
+    beautyCoreBindSlot(s);
+    beautyCoreReleaseSlot(s);
+    const int s2 = beautyCoreAcquireSlot(err);
+    if (s2 < 0) return -2;
+    beautyCoreBindSlot(s2);
+    return s2;
 }
 
 }  // extern "C"
