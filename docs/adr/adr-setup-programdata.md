@@ -48,7 +48,7 @@ supersedes: 无（新增决策记录）
 
 ## 证据
 
-- [`../CHANGELOG.md`](../CHANGELOG.md) 3.0.1；[`../README.md`](../README.md) §2 部署。
+- [`../CHANGELOG.md`](../CHANGELOG.md) 3.0.1；[`../README.md`](../README.md) §部署约束。
 - `03_装机/7_install_gpu.ps1`: `$plugRoot = "C:\ProgramData\obs-studio\plugins\obs-beauty"`。
 - `07_安装包/setup.cpp`；`05_验证/check_release.py --strict` → `PASS 12 / WARN 0 / FAIL 0`。
 - 交付快照：dll `633,856 B / MD5 068E03E5FBE2E21C1883A7F372828783`；

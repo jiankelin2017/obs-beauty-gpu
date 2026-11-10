@@ -25,6 +25,7 @@ status: Active
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
 | 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.2.2 | Jian | 2026-11-06 | 原 `04_文档/开关总表.md` |
+| 已知限制 | [`reference/reference-limits.md`](reference/reference-limits.md) | reference | Active | 3.2.4 | Jian | 2026-11-10 | 新建：由 `README.md` §3 迁出（主题名未改，承接旧 N1–N24 映射） |
 | 验证工具与坑 | [`guides/guide-verification.md`](guides/guide-verification.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `05_验证/README.md` |
 | 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
 | 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
@@ -132,35 +133,39 @@ status: Active
 | `§9.57` / `§9.57.1`（3.0.0 多实例隔离） | 同上；结论摘要见 `CHANGELOG.md` 3.0.0 |  |
 | `§9.58`（3.0.1 代码审查修复） | 同上；结论摘要见 `CHANGELOG.md` 3.0.1 |  |
 | `§9.52.x`（2.16.2–2.17.3 手遮眼实验） | 同上；结论摘要见 `CHANGELOG.md` 2.16.1 | 实验数据不随代码删除 |
-| `README §2` / `§3` / `§5`（旧引用） | `README.md` §2 / §3 / §5 | 节号在重写稿中保持对齐 |
+| `README §3`（旧引用，已知限制） | [`reference/reference-limits.md`](reference/reference-limits.md) | 2026-11-10 README 极简化，§3 整节迁出，**主题名未改**，按主题名检索 |
+| `README §2`（旧引用，能力） | `README.md` §能力 | 2026-11-10 极简化后节号取消，改按标题名 |
+| `README §5`（旧引用，验证） | [`guides/guide-verification.md`](guides/guide-verification.md) | 原表整表下沉到 guides，README 只留命令块 |
 | 源码 / 脚本注释里 19 处 `§9.x` | **不改** | B1：避免触发代码链与重编译 |
 
 ## 4. 旧 N 编号 → 新章节映射
 
-原根 `README.md` 的 N 编号有重复（N6 / N7 各出现两次）。重写后 §3 改为按主题分组，映射如下：
+原根 `README.md` 的 N 编号有重复（N6 / N7 各出现两次）。重写后 §3 改为按主题分组；
+2026-11-10 README 极简化，该节整节迁到 [`reference/reference-limits.md`](reference/reference-limits.md)，
+**主题名一字未改**，故下表只需换路径、无需换锚点：
 
 | 旧编号 | 原位置 | 去处 |
 |---|---|---|
 | N1 | §3.1 输入旋转静默失效 | **已修（2.13.1）** → `CHANGELOG.md` |
 | N2 | §3.1 五官段默认拿不到 | **已解决（2.14.0）** → `CHANGELOG.md` |
-| N3 | §3.1 多脸收益归零 | `README.md` §3「多脸」 |
-| N4 | §3.1 开箱即改画面 | `README.md` §3「开箱行为」 |
-| N5 | §3.1 竖屏观感像拉伸 | `README.md` §3「构图」 |
-| N6a | §3.1 输入方向设置不当 | `README.md` §3「输入方向」 |
+| N3 | §3.1 多脸收益归零 | [`reference-limits.md`](reference/reference-limits.md)「多脸」 |
+| N4 | §3.1 开箱即改画面 | [`reference-limits.md`](reference/reference-limits.md)「开箱行为」 |
+| N5 | §3.1 竖屏观感像拉伸 | [`reference-limits.md`](reference/reference-limits.md)「构图」 |
+| N6a | §3.1 输入方向设置不当 | [`reference-limits.md`](reference/reference-limits.md)「输入方向」 |
 | N6b | §3.2 S3 双缓冲 opt-in | `archive/PROGRESS-20261105.md`（按 §9.16 检索） |
-| N7a | §3.1 掩码跟脸转等价未对拍 | `README.md` §3「掩码」 |
+| N7a | §3.1 掩码跟脸转等价未对拍 | [`reference-limits.md`](reference/reference-limits.md)「掩码」 |
 | N7b | §3.2 4K 帧环 M1 1 灰阶差 | `archive/PROGRESS-20261105.md`（按 §9.5 检索） |
 | N8 | §3.2 `tskip` 偶发 | `archive/PROGRESS-20261105.md`（按 §9.5.4 检索） |
 | N9 | §3.2 S5 通道打包否决 | `archive/PROGRESS-20261105.md`（按 §9.12.2 检索）；决策在 `CHANGELOG.md` |
 | N10 | §3.2 S6 去两趟 Copy | **已完成（2.14.1）** → `CHANGELOG.md` |
 | N11 | §3.2 缩小检测输入已实现 | `archive/PROGRESS-20261105.md`（按 §9.5.3 / §9.29 检索） |
-| N11b | §3.2 方案C 收益依赖场景 | `README.md` §3「性能妥协」 |
-| N12 | §3.3 二进制不入库 | `README.md` §3「工程」 |
+| N11b | §3.2 方案C 收益依赖场景 | [`reference-limits.md`](reference/reference-limits.md)「性能妥协」 |
+| N12 | §3.3 二进制不入库 | [`reference-limits.md`](reference/reference-limits.md)「工程」 |
 | N13 | §3.3 安装包与构建产物脱节 | **已修（闸门 + 3.0.1 路径修复）** → `CHANGELOG.md` |
-| N14 | §3.3 边界带闪烁立项不成立 | `README.md` §3「立项否决」 |
+| N14 | §3.3 边界带闪烁立项不成立 | [`reference-limits.md`](reference/reference-limits.md)「立项否决」 |
 | N15 | §3.3 工具不校验 dll 版本 | **已修（闸门）** → `CHANGELOG.md` |
-| N16 / N17 | §3.3 UI 独立 dll / CPU 与 UI 源码不在本仓库 | `README.md` §3「工程」 |
-| N18–N24 | §3.4 验证工具 7 条坑 | `README.md` §3「工具坑」；逐条展开见 [`guides/guide-verification.md`](guides/guide-verification.md) |
+| N16 / N17 | §3.3 UI 独立 dll / CPU 与 UI 源码不在本仓库 | [`reference-limits.md`](reference/reference-limits.md)「工程」 |
+| N18–N24 | §3.4 验证工具 7 条坑 | [`reference-limits.md`](reference/reference-limits.md)「工具坑」；逐条展开见 [`guides/guide-verification.md`](guides/guide-verification.md) |
 
 ## 5. 治理批次进度
 
