@@ -32,6 +32,16 @@
 // 版本号由 build_setup.ps1 从 beauty_params.h 的 BEAUTY_BUILD_STR 提取后写入
 // setup_ver.h 注入。旧版把 "3.0.1" 写死在三处，dll 已经到 3.2.2 而弹窗与
 // 注册表还写着 3.0.1 —— 版本脱节的根源就是手抄。
+//
+// 3.2.4：把顶部「美颜」菜单模块也做成载荷（RCDATA 108）。
+//   3.2.3 为修「卸载不干净」把 purgeMenuModule() 同时挂到了安装路径上，而
+//   载荷里没有 obs-beauty-ui.dll —— 结果每次安装都是「删掉菜单模块 + 不补装」，
+//   用户装完顶部菜单栏就没有「美颜」入口（2026-11-10 用户报的 bug）。
+//   现在：面板随包分发到
+//     %PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll
+//   安装只清 Program Files 旧布局（includePluginData=false），ProgramData 那份
+//   由写盘覆盖；卸载仍全清，3.2.3 的语义保留。
+//   面板源码 01_源码/obs-beauty-ui.cpp，由 02_构建/build_ui.ps1 按 GPU 口径编。
 // ===========================================================================
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -150,23 +160,30 @@ static std::wstring pluginsDir()
 // 3.2.3：清掉顶层「美颜」菜单模块的残留。
 //
 // obs-beauty-ui.dll 自带 OBS_DECLARE_MODULE()，是一个与本滤镜并列的独立模块，
-// 它注册的是 OBS 顶部菜单栏的一个入口。这个 dll 从未被打进安装包（历史上是
-// 手工部署的），所以安装器从来不知道它的存在，卸载时自然也不会动它 ——
-// 用户看到的现象就是「插件已全面卸载，菜单还在」。
+// 它注册的是 OBS 顶部菜单栏的一个入口。
 //
-// 这里只按**固定文件名**删，不扫目录、不用通配符，因此不存在误伤同目录下
+// 3.2.4 起这个 dll **随安装包分发**（RCDATA 108），装在
+// %PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\ —— 于是本函数
+// 有了两种用法，靠 includePluginData 区分：
+//   * 卸载（true）  —— ProgramData 那份也要删，语义是「回到没装过」；
+//   * 安装（false） —— **只清 Program Files 旧布局**，ProgramData 那份不能碰：
+//                      3.2.3 就是在这里无条件删，而载荷里又没有这个 dll，
+//                      于是「装完顶部菜单栏没有美颜入口」（用户 2026-11-10 报的 bug）。
+//                      新版本由安装流程随后覆盖写入，不需要预先删。
+//
+// 只按**固定文件名**删，不扫目录、不用通配符，因此不存在误伤同目录下
 // 其它插件的可能。两种布局都覆盖：带子目录的正常布局，以及 dll 直接铺在
 // plugins\ 下的变体。
 //
 // 刻意**不碰** %APPDATA%\obs-studio\plugin_config\obs-beauty-ui：本程序以
 // 管理员提权运行，%APPDATA% 在这种上下文里指向哪个账户并不确定，删配置有
-// 误伤风险；而配置本身没有副作用，菜单模块都没了它也不会再生效。
+// 误伤风险；而配置本身没有副作用（面板的窗口几何记忆）。
 //
 // 返回 false 表示有项目没删掉（多半是被占用），由调用方决定怎么提示。
-static bool purgeMenuModule(const std::wstring& plugins)
+static bool purgeMenuModule(const std::wstring& plugins, bool includePluginData)
 {
     bool ok = true;
-    if (!plugins.empty()) {
+    if (includePluginData && !plugins.empty()) {
         if (GetFileAttributesW((plugins + L"\\obs-beauty-ui").c_str()) != INVALID_FILE_ATTRIBUTES)
             ok = removeTree(plugins + L"\\obs-beauty-ui") && ok;
         if (!DeleteFileW((plugins + L"\\obs-beauty-ui.dll").c_str())) {
@@ -271,6 +288,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     const std::wstring crHold   = root + L"\\COPYRIGHT.md";
     const std::wstring shad     = root + L"\\data\\shaders";
     const std::wstring selfCopy = root + L"\\uninstall.exe";
+    // 3.2.4：顶部「美颜」菜单模块（并列的第二个插件目录）。
+    // 落点遵循 OBS 的加载规则：plugins\<name>\bin\64bit\<name>.dll
+    const std::wstring uiDll    = plugins.empty()
+        ? std::wstring()
+        : plugins + L"\\obs-beauty-ui\\bin\\64bit\\obs-beauty-ui.dll";
     const wchar_t* KEY = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\obs-beauty";
 
     // 旧版（3.0.0 及以前）可能把文件装在 Program Files 布局里，卸载时一并清掉，
@@ -317,7 +339,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         removeTree(legacyData + L"\\shaders");
         removeTree(legacyData);
         // 3.2.3：菜单模块不随滤镜卸载，这里一并收尾（详见 purgeMenuModule 注释）
-        const bool menuPurged = purgeMenuModule(plugins);
+        const bool menuPurged = purgeMenuModule(plugins, true);
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, KEY);
         // 自己就在 <root>\uninstall.exe 里跑，删不掉自己所在的目录。
         // 交给一个脱离的 cmd：等 2 秒（本进程退出后）再删。root 已通过
@@ -351,18 +373,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         return 0;
     }
 
-    // 3.2.3：安装前先清掉旧的菜单模块。它与本滤镜是两套独立实现，并存时
-    // 用户点顶部「美颜」菜单看到的是旧模块的界面，而滤镜参数在滤镜属性页里
-    // —— 两个入口指向不同实现，比「只有一个入口」更难解释。
-    const bool uiCleared = purgeMenuModule(plugins);
+    // 3.2.4：安装只清 Program Files 旧布局（includePluginData=false）。
+    // 3.2.3 在这里无条件连 ProgramData 那份一起删，而载荷里并没有这个 dll ——
+    // 于是「装完顶部菜单栏就没有美颜入口」。现在面板本身是 108 号载荷，
+    // 由下面的写盘流程覆盖写入，安装前不需要（也不应该）删它。
+    const bool uiCleared = purgeMenuModule(plugins, false);
 
     makeDir(binDir);
     makeDir(modelDir);
     makeDir(shad);
+    // 面板模块是并列的第二个插件目录，OBS 按 plugins\<name>\bin\64bit\ 加载
+    if (!plugins.empty()) makeDir(plugins + L"\\obs-beauty-ui\\bin\\64bit");
 
     // kind 决定落点，不要用 id 判断 —— 旧版靠 "id == 101 ? dll : shader" 二分，
     // 每加一类载荷就得再改一处条件，正是这类写法让安装包长期漏带运行时。
-    enum { K_DLL, K_ORT, K_MODEL, K_NOTICE, K_LICENSE, K_ORTNOTICE, K_COPYRIGHT, K_SHADER };
+    enum { K_DLL, K_ORT, K_MODEL, K_NOTICE, K_LICENSE, K_ORTNOTICE, K_COPYRIGHT, K_UIDLL, K_SHADER };
     struct Item { int id; const wchar_t* file; int kind; };
     const Item items[] = {
         {101, L"obs-beauty.dll",          K_DLL},
@@ -372,6 +397,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         {105, L"LICENSE",                 K_LICENSE},
         {106, L"onnxruntime-ThirdPartyNotices.txt", K_ORTNOTICE},
         {107, L"COPYRIGHT.md",            K_COPYRIGHT},
+        {108, L"obs-beauty-ui.dll",       K_UIDLL},
         {201, L"detail.hlsl",             K_SHADER},
         {202, L"mask.hlsl",               K_SHADER},
         {203, L"region.hlsl",             K_SHADER},
@@ -398,6 +424,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         case K_LICENSE: return lic;
         case K_COPYRIGHT: return crHold;
         case K_ORTNOTICE: return ortNotes;
+        case K_UIDLL:  return uiDll;
         default:       return shad + L"\\" + it.file;
         }
     };
@@ -411,6 +438,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             continue;
         }
         const std::wstring dst = dstOf(it);
+        if (dst.empty()) {
+            // 只有 K_UIDLL 会走到这里（pluginsDir() 为空），路径拼不出来就别写
+            failed += std::wstring(L"\n  · 无法定位目标目录：") + it.file;
+            continue;
+        }
         if (!writeFile(dst, blob)) {
             failed += std::wstring(L"\n  · 写入失败：") + dst;
             continue;
@@ -432,8 +464,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         return 4;
     }
 
-    // 写盘自检：不只看返回值，重新 stat 一遍三个关键文件。
-    const std::wstring must[] = { plug, ortDll, model };
+    // 写盘自检：不只看返回值，重新 stat 一遍关键文件。
+    // 3.2.4 把面板 dll 也纳入：它缺失时滤镜照常工作，只是顶部「美颜」菜单
+    // 不出现 —— 正是这次要修的那个 bug，不能只在返回值上过关。
+    const std::wstring must[] = { plug, ortDll, model, uiDll };
     for (const auto& p : must) {
         WIN32_FILE_ATTRIBUTE_DATA fad{};
         if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fad) ||
@@ -474,14 +508,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     wchar_t done[768];
     swprintf(done, 768,
              L"安装完成（obs-beauty " BEAUTY_SETUP_VER L"）：\n%s\n\n"
-             L"共写入 %d 个文件，含 ONNX Runtime 与人脸模型 —— 无需再手工放文件。\n"
+             L"共写入 %d 个文件，含 ONNX Runtime、人脸模型与顶部「美颜」菜单模块 —— "
+             L"无需再手工放文件。\n"
              L"再次运行本程序即可卸载。\n\n"
-             L"启动 OBS → 源 → 滤镜 → + → Beauty (GPU)。",
+             L"启动 OBS → 源 → 滤镜 → + → Beauty (GPU)；\n"
+             L"或直接用菜单栏的「美颜」打开参数面板。",
              plug.c_str(), okCount);
     std::wstring doneMsg(done);
     if (!uiCleared)
-        doneMsg += L"\n\n注意：旧的「美颜」菜单模块未能完全清除，"
-                   L"OBS 菜单里可能仍可见该入口。请关闭 OBS 后重新运行本程序。";
+        doneMsg += L"\n\n注意：Program Files 下旧的「美颜」菜单模块副本未能清除"
+                   L"（通常是仍被进程占用）。它不影响本次安装，但建议关闭 OBS 后"
+                   L"重新运行本程序清一遍。";
     msg(doneMsg.c_str());
     return 0;
 }

@@ -737,7 +737,16 @@
 //        不会动它，于是「卸了但菜单还在」。修法：安装与卸载两条路径都按固定
 //        文件名清理它（plugins\obs-beauty-ui\、平铺同名 dll、Program Files
 //        旧布局），但不碰 plugin_config —— 提权进程下 %APPDATA% 指向不确定。
-#define BEAUTY_BUILD_STR "3.2.3"
+// 3.2.4（安装器修补，滤镜逻辑未变）：**装完顶部「美颜」菜单入口消失**。
+//        3.2.3 把 purgeMenuModule() 同时挂到了**安装**路径上，而安装包载荷里
+//        没有 obs-beauty-ui.dll —— 于是每次安装 = 删掉菜单模块 + 不补装，
+//        用户装完就看不到入口（3.2.3 的「卸不干净」被换成了「装不上」）。
+//        修法：面板源码 obs-beauty-ui.cpp 纳入本仓库，由 02_构建/build_ui.ps1
+//        按 GPU 口径编译（不定义 BEAUTY_UI_CPU_EDITION），作为安装包 108 号
+//        载荷装到 plugins\obs-beauty-ui\bin\64bit\；安装路径只清 Program Files
+//        旧布局，ProgramData 那份不再删；卸载仍全清（3.2.3 的语义保留）。
+//        面板版本号取本宏，与滤镜同源，不会再出现两边版本对不上的情况。
+#define BEAUTY_BUILD_STR "3.2.4"
 
 // 面板参数顺序（滤镜属性页滑块的顺序）
 enum {

@@ -144,6 +144,32 @@ if (Test-Path $dllDst) {
 }
 Copy-Item $dllSrc $dllDst -Force
 
+# --- 3.2.4: the top-level "Beauty" menu panel ---------------------------
+# obs-beauty-ui.dll is a SECOND, independent obs module (own
+# OBS_DECLARE_MODULE) that registers the top-level menu. It is not part of
+# this dll and cannot be -- see 02_*/build_ui.ps1. Optional here: a tree
+# where only build_gpu.ps1 has run simply has no panel yet, and that must not
+# block a dev install (the filter works fine without it).
+$uiSrc = $null
+$uiHit = Get-ChildItem $srcRoot -Recurse -Filter "obs-beauty-ui.dll" -ErrorAction SilentlyContinue |
+         Where-Object { $_.FullName -match '\\02_' } | Select-Object -First 1
+if ($uiHit) { $uiSrc = $uiHit.FullName }
+if ($uiSrc) {
+    $uiRoot = "C:\ProgramData\obs-studio\plugins\obs-beauty-ui"
+    $uiDst  = Join-Path $uiRoot "bin\64bit\obs-beauty-ui.dll"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $uiDst) | Out-Null
+    if (Test-Path $uiDst) {
+        $ubak = Join-Path $bakDir "obs-beauty-ui_$ts.dll"
+        Copy-Item $uiDst $ubak -Force
+        Write-Output "ui backup: $ubak"
+    }
+    Copy-Item $uiSrc $uiDst -Force
+    Write-Output "ui dll   : $uiDst"
+    Write-Output "ui md5   : $((Get-FileHash $uiDst -Algorithm MD5).Hash)  (build $((Get-FileHash $uiSrc -Algorithm MD5).Hash))"
+} else {
+    Write-Output "ui dll   : skipped (no obs-beauty-ui.dll under 02_* - run 02_*/build_ui.ps1 for the top menu)"
+}
+
 # --- install shaders (the half that used to be forgotten) ----------------
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 foreach ($f in $hlsl) { Copy-Item $f.FullName (Join-Path $dataDir $f.Name) -Force }

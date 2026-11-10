@@ -103,6 +103,12 @@ Set-Content -LiteralPath $verHeader -Encoding ascii -Value @(
 # ---- refresh the payload from its sources --------------------------------
 Copy-Item (Join-Path $buildDir "obs-beauty.dll") (Join-Path $pkgDir "obs-beauty.dll") -Force
 
+# 3.2.4: the top-level "Beauty" menu panel (a SEPARATE obs module). Built by
+# 02_*/build_ui.ps1. Shipping it is what makes the menu entry survive an
+# install -- 3.2.3 purged it on install while carrying no copy of its own.
+Copy-Item (Need-File (Join-Path $buildDir "obs-beauty-ui.dll") "obs-beauty-ui.dll").FullName `
+          (Join-Path $pkgDir "obs-beauty-ui.dll") -Force
+
 # Runtime + model: kept in the offline-verification folder because that is where
 # the probe harness also needs them. Same file, two consumers.
 Copy-Item (Need-File (Join-Path $offDir "onnxruntime.dll") "onnxruntime.dll").FullName `

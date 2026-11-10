@@ -57,6 +57,12 @@ SRC_DIR = os.path.join(ROOT, "01_源码")
 BUILD_DLL = os.path.join(ROOT, "02_构建", "obs-beauty.dll")
 PKG_DLL = os.path.join(ROOT, "07_安装包", "obs-beauty.dll")
 INSTALLED_DLL = r"C:\ProgramData\obs-studio\plugins\obs-beauty\bin\64bit\obs-beauty.dll"
+# 3.2.4：顶部「美颜」菜单面板（并列的第二个 obs 模块）。
+# 它由 02_构建/build_ui.ps1 编译 —— 漏编一次就是「版本串对、菜单却是旧的」，
+# 所以和滤镜 dll 一样要过「构建产物 vs 安装包」这道闸。
+BUILD_UI_DLL = os.path.join(ROOT, "02_构建", "obs-beauty-ui.dll")
+PKG_UI_DLL = os.path.join(ROOT, "07_安装包", "obs-beauty-ui.dll")
+INSTALLED_UI_DLL = r"C:\ProgramData\obs-studio\plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll"
 SOLO_SHADER_DIR = r"D:\obs_beauty_gpu\shaders"
 PARAMS_H = os.path.join(SRC_DIR, "beauty_params.h")
 # 文档治理后开关总表统一在 docs/reference/（正文表格语义不变）
@@ -263,6 +269,10 @@ SETUP_RCDATA = {
     105: "LICENSE",
     106: "onnxruntime-ThirdPartyNotices.txt",
     107: "COPYRIGHT.md",
+    # 3.2.4: the top-level "Beauty" menu panel. It is a separate obs module
+    # (own OBS_DECLARE_MODULE); without it in the package an install ends up
+    # with no menu entry -- the exact bug 3.2.3 shipped.
+    108: "obs-beauty-ui.dll",
     201: "detail.hlsl", 202: "mask.hlsl", 203: "region.hlsl",
     204: "smooth.hlsl", 205: "tone.hlsl", 206: "warp.hlsl",
 }
@@ -420,7 +430,7 @@ def check_setup(ver):
     else:
         add("PASS", "安装包载荷",
             "Setup.exe 内嵌 %d 项（dll + 运行时 + 人脸模型 + 两份第三方声明"
-            " + 本项目 LICENSE + COPYRIGHT + 6 shader）"
+            " + 本项目 LICENSE + COPYRIGHT + 顶部菜单面板 + 6 shader）"
             "与磁盘副本逐字节相同，且 LICENSE 为 FSF 原文" % len(SETUP_RCDATA))
 
 
@@ -462,6 +472,22 @@ def main():
             a, b = md5(PKG_DLL), md5(INSTALLED_DLL)
             add("PASS" if a == b else "FAIL", "安装包 vs 装机",
                 ("一致（%s）" % a) if a == b else ("脱节：安装包 %s ≠ 装机 %s" % (a, b)))
+
+    # 3.2.4：面板 dll（顶部「美颜」菜单）单独走一遍同样的三处比对。
+    # 它和滤镜 dll 是两次编译，最容易出现的翻车是「滤镜 bump 了、面板忘了重编」
+    # —— 面板自报的版本串还停在上一版，而文件名/时间戳看不出任何异常。
+    if not os.path.isfile(BUILD_UI_DLL):
+        add("WARN", "面板",
+            "找不到 %s —— 跑 02_构建/build_ui.ps1（顶部「美颜」菜单会缺失）"
+            % BUILD_UI_DLL)
+    else:
+        ui_size = os.path.getsize(BUILD_UI_DLL)
+        ui_md5 = md5(BUILD_UI_DLL)
+        check_build_contains(ver, BUILD_UI_DLL, "面板版本串")
+        check_same_dll(PKG_UI_DLL, "面板", ui_md5, ui_size, missing_level="WARN")
+        if not args.no_installed:
+            check_same_dll(INSTALLED_UI_DLL, "面板装机", ui_md5, ui_size,
+                           missing_level="WARN")
 
     check_shaders()
     check_switches()

@@ -1,9 +1,9 @@
 ---
 doc_type: CHANGELOG
 title: 用户可见变更
-version: 0.1.7
-last_updated: 2026-11-06
-applies_to: 3.2.3
+version: 0.1.8
+last_updated: 2026-11-10
+applies_to: 3.2.4
 repo_baseline: 914f388
 maintainer: Jian
 status: Active
@@ -14,6 +14,48 @@ status: Active
 > 只记**影响读者使用的变更**：装到哪、行为变没变、怎么回退。
 > 逐轮实测、踩坑经过、内部调参一律在 [`archive/PROGRESS-20261105.md`](archive/PROGRESS-20261105.md)。
 > 版本号唯一出处是 `01_源码/beauty_params.h` 的 `BEAUTY_BUILD_STR`。
+
+## 3.2.4（2026-11-10 · 修复：装完顶部「美颜」菜单入口消失）
+
+**滤镜行为与 3.2.3 完全相同；这一轮只改安装器载荷与面板分发方式，滤镜 dll 里只有版本字符串变了。**
+
+| 改动 | 对使用者的影响 |
+|---|---|
+| 3.2.3 把「装不上」换成了「装完没有」 | 3.2.3 为修「卸载不干净」，把 `purgeMenuModule()` 同时挂到了**安装**路径上，而安装包载荷里并没有 `obs-beauty-ui.dll` —— 于是每次安装 = 删掉菜单模块 + 不补装，用户装完顶部菜单栏就看不到「美颜」入口。这是本次要修的 bug |
+| 面板随安装包分发 | `obs-beauty-ui.dll` 作为第 108 号载荷（RCDATA）随包发出，装到 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\`。装完即有入口，重装/覆盖安装也不会再消失 |
+| 安装只清旧布局，卸载仍全清 | 安装路径只清 `Program Files` 下的旧副本（`includePluginData=false`），ProgramData 那份由写盘覆盖；卸载时三处布局照旧全清 —— 3.2.3「卸干净」的语义完整保留 |
+| 面板源码进入本仓库 | `01_源码/obs-beauty-ui.cpp` + `02_构建/build_ui.ps1`（不定义 `BEAUTY_UI_CPU_EDITION`，菜单标题「美颜(&A)」）。此前本仓库无法自行构建面板，只能手工部署 CPU 分支的产物 |
+| 版本号同源 | 面板的 `BEAUTY_UI_VERSION` 直接取 `BEAUTY_BUILD_STR`，与滤镜一处升、两处同步，不再出现面板角标与滤镜版本对不上 |
+
+**装到哪**：滤镜 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty\bin\64bit\obs-beauty.dll`；
+面板 `%PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll`
+
+**交付**：`obs-beauty.dll 645,632 B / MD5 9338367B318C75CAAD1C84F3D709AC07`（体积与 3.2.3
+相同，差异只是内嵌版本串 `3.2.3` → `3.2.4`）；`obs-beauty-ui.dll 218,112 B /
+MD5 B83C752563DE6A69C2201845D1D986A9`；`Setup.exe 13,316,096 B /
+MD5 19A623A124C804C06ADEAB08AAB43CBC`（13,096,960 → 13,316,096，增量即面板 dll 与
+新增写盘/自检逻辑）。`check_release.py --strict` **14 PASS / 1 WARN / 0 FAIL**
+（唯一 WARN 是本机没有 `D:\obs_beauty_gpu\shaders` 这个 solo 开发目录，与本版无关）。
+
+**怎么验**：装 3.2.4 → 打开 OBS → 顶部菜单栏应有「美颜」，点开「参数面板...」能连上
+滤镜实例；OBS 日志应有两行 —— `[obs-beauty-ui] 模块已加载 v3.2.4` 与
+`[obs-beauty-ui] 顶层菜单已添加`。卸载后该入口与
+`plugins\obs-beauty-ui` 目录应一并消失。
+
+**本轮真机实测（2026-11-10）**：装 3.2.4 → 启动 OBS，日志出现
+`[obs-beauty] filter registered as 'obs_beauty_filter' (v3.2.4)`、
+`[obs-beauty-ui] 模块已加载 v3.2.4`、`[obs-beauty-ui] 顶层菜单已添加`，
+截图确认菜单栏最右侧有「美颜(A)」；随后跑一次卸载 —— `plugins` 下
+`obs-beauty` 与 `obs-beauty-ui` 一并消失，`obs-multi-rtmp`、`obsplus` 完好
+（3.2.3 的卸载语义未回退）；再装一次，两个目录与两行日志原样复现 ——
+**「重装即丢入口」这条已闭环**。
+离线侧另有两项：`02_构建/verify-ui-imports.py` 对面板 dll 的全部 623 个导入符号
+逐个在 OBS 自带 DLL 里解析（`obs.dll 51 / obs-frontend-api.dll 1 / qt6widgets 470 /
+qt6core 88 / qt6gui 13` 全部 OK）；`check_release.py` 新增「面板版本串 / 面板 /
+面板装机」三项比对，专防「滤镜 bump 了、面板忘了重编」。
+
+**回退**：把 `obs-beauty_3.2.3.dll` 覆盖回 `obs-beauty.dll` 即可回到 3.2.3 的滤镜行为；
+若只想去掉顶部菜单入口，删掉 `plugins\obs-beauty-ui` 目录后重启 OBS。
 
 ## 3.2.3（2026-11-06 · 修复：卸载后 OBS 顶部「美颜」菜单仍在）
 
@@ -46,6 +88,21 @@ MD5 CB329D90EF19CE87DDE3A0DD749F369A`（+5,120 B 全部来自新增的清理逻�
 
 **回退**：把 `obs-beauty_3.2.2.dll` 覆盖回 `obs-beauty.dll`（菜单清理只发生在
 安装器里，回退 dll 不改变卸载行为）。
+
+**实机部署备注（2026-11-10，已被 3.2.4 推翻）**：下面这段记录的是 3.2.3 当时的实际
+行为与手工补装口径。**3.2.4 起不再需要手工补装** —— 面板已是安装包载荷，且安装路径
+不再删 ProgramData 那份。原文保留，用于解释 3.2.3 期间为什么会「装完就没入口」：
+
+> 因为「安装时也清一次」这条，凡是手工补装过 `obs-beauty-ui.dll` 的机器，再运行一次
+> 安装器就会被重新删掉。当时把它判为「既定行为」，是**误判**：载荷里没有这个 dll，
+> 删除后没有任何东西把它补回来，用户侧看到的就是功能入口消失。
+>
+> | 项 | 值 |
+> |---|---|
+> | 装到 | `%PROGRAMDATA%\obs-studio\plugins\obs-beauty-ui\bin\64bit\obs-beauty-ui.dll` |
+> | 用哪份 | GPU 分支编的面板（不带 `BEAUTY_UI_CPU_EDITION` 宏，菜单标题为「美颜(&A)」）。CPU 分支那份菜单叫「美颜·CPU(&A)」，配 GPU 滤镜会出现两个口径不一的入口，不要用 |
+> | 来源 | 3.2.3 时代面板源码只在 CPU 分支仓库；3.2.4 起已并入本仓库 `01_源码/obs-beauty-ui.cpp` |
+> | 校验 | `python 02_构建/verify-ui-imports.py <dll>` 须全 OK；面板靠遍历滤镜的 `obs_properties` 动态建控件，不含版本一致性校验，所以版本号与滤镜不一致不会导致面板失效，只影响标题显示 |
 
 ## 维护（2026-11-06 · LICENSE 改为 FSF 原文，版权说明拆到 COPYRIGHT.md）
 

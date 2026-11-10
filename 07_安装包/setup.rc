@@ -12,6 +12,11 @@
 // 107 = COPYRIGHT.md. 105 must stay byte-identical to the FSF text or GitHub
 //       classifies the project as "Other", so the copyright line and the
 //       scope note live here instead of at the top of LICENSE.
+// 108 = the top-level "Beauty" menu panel (obs-beauty-ui.dll). It is a SECOND,
+//       independent obs module with its own OBS_DECLARE_MODULE(); the filter
+//       dll cannot register that menu. 3.2.3 deleted it on install without
+//       carrying a copy, which is why the menu entry vanished -- it ships
+//       here from 3.2.4 on.
 101 RCDATA "obs-beauty.dll"
 102 RCDATA "onnxruntime.dll"
 103 RCDATA "yunet.onnx"
@@ -19,6 +24,7 @@
 105 RCDATA "LICENSE"
 106 RCDATA "onnxruntime-ThirdPartyNotices.txt"
 107 RCDATA "COPYRIGHT.md"
+108 RCDATA "obs-beauty-ui.dll"
 201 RCDATA "shaders\\detail.hlsl"
 202 RCDATA "shaders\\mask.hlsl"
 203 RCDATA "shaders\\region.hlsl"

@@ -9,6 +9,7 @@
 02_构建/build/
 02_构建/out/
 02_构建/obj/
+02_构建/obj_ui/
 
 # 装机备份 & 启动器调试产物（03_装机/7_install_gpu.ps1 会写 backup/，bat 会写调试 txt）
 03_装机/backup/
