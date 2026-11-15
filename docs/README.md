@@ -1,7 +1,7 @@
 ---
 doc_type: README
 title: OBS 美颜 GPU 版
-version: 0.2.1
+version: 0.2.2
 last_updated: 2026-11-15
 applies_to: 3.3.6
 repo_baseline: 914f388
@@ -18,8 +18,10 @@ supersedes: 04_文档/README.md（已归档）
 ## 装 / 卸
 
 双击 `07_安装包/Setup.exe` → 装完即用，**无需手工放 `onnxruntime.dll` / `yunet.onnx` / 菜单面板**。
-安装包**随本仓库一起分发**（不建 GitHub Release），仓库内这份 exe 即唯一下载件；
-当前包为 3.3.6，13,329,408 B，MD5 `36AF42C102A46FCE6B7D757BD6B14DAA`。
+安装包**随本仓库一起分发**，同一份文件也挂在
+[GitHub Release v3.3.6](https://github.com/jiankelin2017/obs-beauty-gpu/releases/tag/v3.3.6)
+附件 `OBS-Beauty-Setup-3.3.6.exe` 上；当前包为 3.3.6，13,329,408 B，
+MD5 `36AF42C102A46FCE6B7D757BD6B14DAA`。
 再双击一次即卸载（插件目录、顶部「美颜」面板模块、注册表一并清除）。
 装上后：源 → 滤镜 → `+` → Beauty (GPU)；顶部菜单栏「美颜」另有参数面板入口。
 

@@ -1,7 +1,7 @@
 ---
 doc_type: CHANGELOG
 title: 用户可见变更
-version: 0.2.5
+version: 0.2.6
 last_updated: 2026-11-15
 applies_to: 3.3.6
 repo_baseline: 914f388
@@ -18,8 +18,10 @@ status: Active
 ## 本次发布（2026-11-15 · 3.2.4 → 3.3.6）· 更新内容
 
 git 上此前只到 **3.2.4**；本次把 **3.3.0~3.3.6 共七版**源码一次性入库，并随仓库
-分发一键安装包 `07_安装包/Setup.exe`（本仓库不建 GitHub Release，仓库内这份 exe
-即唯一下载件）。装完即用，无需手工放 `onnxruntime.dll`、`yunet.onnx` 或顶部菜单面板。
+分发一键安装包 `07_安装包/Setup.exe`；同一份文件也挂在
+[GitHub Release v3.3.6](https://github.com/jiankelin2017/obs-beauty-gpu/releases/tag/v3.3.6)
+的附件 `OBS-Beauty-Setup-3.3.6.exe` 上（两者 MD5 相同）。装完即用，无需手工放
+`onnxruntime.dll`、`yunet.onnx` 或顶部菜单面板。
 
 | 版本 | 对使用者的影响 |
 |---|---|
@@ -31,7 +33,9 @@ git 上此前只到 **3.2.4**；本次把 **3.3.0~3.3.6 共七版**源码一次�
 | 3.3.5 | 头歪 ±45° 时美颜不再短暂失效：阈值减半重试 + ±30/45/60/75° 滚转搜索 + 粘住上次命中角度；立正↔歪头不再一帧跳过去 |
 | 3.3.6 | 发布整理：版本串对齐、安装包入库、文档口径同步、隐私素材零上传。**滤镜行为与 3.3.5 一致，无功能改动** |
 
-**下载**：仓库内 `07_安装包/Setup.exe`（13,329,408 B）。双击安装 → 装完即用；再双击一次即卸载。
+**下载**：[GitHub Release v3.3.6 附件](https://github.com/jiankelin2017/obs-beauty-gpu/releases/download/v3.3.6/OBS-Beauty-Setup-3.3.6.exe)
+`OBS-Beauty-Setup-3.3.6.exe`，或仓库内 `07_安装包/Setup.exe`（同一文件，13,329,408 B）。
+双击安装 → 装完即用；再双击一次即卸载。
 OBS 需为使用 `%PROGRAMDATA%` 插件布局的版本（32.x 起）。
 
 **回退**：装旧包即可覆盖；或把 `03_装机\backup\` 里的旧 dll 覆盖回装机目录。只想关掉新能力
@@ -45,7 +49,7 @@ OBS 需为使用 `%PROGRAMDATA%` 插件布局的版本（32.x 起）。
 | 项 | 变化 |
 |---|---|
 | 源码 | 3.3.0~3.3.5 六版改动（此前只在本机工作区）一次性提交 |
-| 安装包 | 用 3.3.6 的两个 dll 重新打包 `Setup.exe`，并**直接入 git**（不建 Release） |
+| 安装包 | 用 3.3.6 的两个 dll 重新打包 `Setup.exe`，**直接入 git**，并同时作为 `v3.3.6` Release 附件分发 |
 | 文档 | README / INDEX / 两篇参考文档的 `applies_to` 与「当前版本」同步到 3.3.6 |
 | 隐私 | 真人素材派生的图片、帧、掩码全部排除在提交之外，`.gitignore` 补兜底规则 |
 
