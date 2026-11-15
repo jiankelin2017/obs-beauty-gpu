@@ -15,15 +15,6 @@ supersedes: 04_文档/README.md（已归档）
 > 把五段人脸美颜（磨皮 / 美白 / 美型 / 清晰 / 润色）从 CPU 搬到 GPU 的 OBS 视频滤镜，
 > 源 ID `obs_beauty_filter`。当前版本 **3.3.6**，每实例独占一个引擎槽，上限 8 路并发。
 
-## 装 / 卸
-
-双击 `07_安装包/Setup.exe` → 装完即用，**无需手工放 `onnxruntime.dll` / `yunet.onnx` / 菜单面板**。
-安装包**随本仓库一起分发**，同一份文件也挂在
-[GitHub Release v3.3.6](https://github.com/jiankelin2017/obs-beauty-gpu/releases/tag/v3.3.6)
-附件 `OBS-Beauty-Setup-3.3.6.exe` 上；当前包为 3.3.6，13,329,408 B，
-MD5 `36AF42C102A46FCE6B7D757BD6B14DAA`。
-再双击一次即卸载（插件目录、顶部「美颜」面板模块、注册表一并清除）。
-装上后：源 → 滤镜 → `+` → Beauty (GPU)；顶部菜单栏「美颜」另有参数面板入口。
 
 ## 本次更新（3.2.4 → 3.3.6）
 
