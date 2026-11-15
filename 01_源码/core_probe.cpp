@@ -120,6 +120,10 @@ __declspec(dllexport) int __stdcall BeautyCoreRun(
     s.panel[P_BIG_EYE] = g_shape[1];
     s.panel[P_CHIN] = g_shape[2];
     s.input_rot = g_inputRot;   // 2.13.1：默认 0 = 与原离线基准逐字节一致
+    // 3.3.0：离线一律按「显式方向」处理 —— 探测会多跑推理、还会改 rot，
+    // 对拍要求输入固定。g_inputRot=0 时 auto_rot 仍为 false，行为等价于旧的
+    // 「不旋转」，只是关掉了自动探测（离线本来也不需要）。
+    s.auto_rot = false;
 
     IBeautyEngine& e = beautyEngine();
     if (strcmp(e.id(), "core") != 0) {

@@ -292,9 +292,10 @@ void beautyCoreMaskStat(int* pixelsOut, int* facesOut);
 
 // 2.15.0：本帧**实际**使用的输入旋转（0/90/180/270），见 IBeautyEngine::effectiveRot。
 //
-// 宿主在**构建检测缩略图之前**读它：缩略图是按面板的 input_rot 转的，一旦引擎判定
-// 那一档检不到脸（退回 0），继续按错的方向转缩略图只会让检测永远失败。宿主看到这里
-// 返回的值与面板值不一致时，应当停用缩略图路径、改走全帧（全帧路径自带旋转重采样）。
+// 3.3.0（横竖屏适配）起用法变了：宿主在**构建检测缩略图之前**读它，并按这个值
+// 旋转缩略图，然后把同一个值随 beautyCoreSetThumbSource 交给引擎做几何反变换。
+// 旧约定（「与面板值不一致就停用缩略图」）已删除 —— 那会让竖装相机永久失去快路径，
+// 而旋转本身只是「怎么转这张图」，两边用同一个值就没有歧义。
 int beautyCoreEffectiveRot();
 
 // 2.15.1：掩码几何的当前生效配置（`shape=… roll=… feather=… neck=…`）。
@@ -496,6 +497,10 @@ struct BeautyDetailDiag {
 // ---------------------------------------------------------------------------
 enum {
     BEAUTY_WARP_MAX_FACES = 8,   // 与面板「人物个数」上限一致
+    // 3.3.0（多人适配）：GPU 掩码链 / 缩略图路径 / geomOnly 的**验证上限**。
+    // 只表示「这条快路径在 1..4 人上做过等价与性能验收」，不是数据结构上限 ——
+    // faces[] 仍按 8 存。超过这个数就整帧回退 CPU（画面正确，只是慢）。
+    BEAUTY_MASK_MAX_FACES = 4,
 };
 
 // flags 位定义必须与 beautycore 的 WARP_F_* 一致。
@@ -682,8 +687,14 @@ void beautyCoreSetMaskGeomOnly(bool on);
 // 全帧路径的帧仍会去读上一帧的缩略图。
 // ⚠ 缩略图模式强制走 geomOnly（没有全帧像素可画 CPU 掩码）：多脸 / shape 带 bit2
 // 时 buildMaskInto 直接返回 false，宿主必须整帧跳过并回退全帧 —— 不能当「全皮肤」。
+//
+// 3.3.0（横竖屏适配）：新增 rot —— 宿主构建这张缩略图时**实际用过**的输入方向
+// （0/90/180/270）。引擎在 mapped 路径上按它做 invRotateFace，而不是按 effRot_：
+// 后者可能在本帧 process 内部被自动探测改掉，两边用不同方向会让几何整体错 90°。
+// 传 0 等价于「构建时没转」，与 3.2.4 的调用方逐字节兼容（但新调用方必须传对）。
 void beautyCoreSetThumbSource(const unsigned char* p, int tw, int th,
-                              int fullW, int fullH, float scale, int ox, int oy);
+                              int fullW, int fullH, float scale, int ox, int oy,
+                              int rot);
 void beautyCoreClearThumbSource();
 
 // ---- 2.11.0（方案C）：运动判定搬 GPU，缩略图改成「按提交帧才回读」-----------

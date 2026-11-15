@@ -1,9 +1,9 @@
 ---
 doc_type: README
 title: OBS 美颜 GPU 版
-version: 0.2.0
-last_updated: 2026-11-10
-applies_to: 3.2.4
+version: 0.2.1
+last_updated: 2026-11-15
+applies_to: 3.3.6
 repo_baseline: 914f388
 maintainer: Jian
 status: Active
@@ -13,13 +13,22 @@ supersedes: 04_文档/README.md（已归档）
 # OBS 美颜 GPU 版
 
 > 把五段人脸美颜（磨皮 / 美白 / 美型 / 清晰 / 润色）从 CPU 搬到 GPU 的 OBS 视频滤镜，
-> 源 ID `obs_beauty_filter`。当前版本 **3.2.4**，每实例独占一个引擎槽，上限 8 路并发。
+> 源 ID `obs_beauty_filter`。当前版本 **3.3.6**，每实例独占一个引擎槽，上限 8 路并发。
 
 ## 装 / 卸
 
 双击 `07_安装包/Setup.exe` → 装完即用，**无需手工放 `onnxruntime.dll` / `yunet.onnx` / 菜单面板**。
+安装包**随本仓库一起分发**（不建 GitHub Release），仓库内这份 exe 即唯一下载件；
+当前包为 3.3.6，13,329,408 B，MD5 `36AF42C102A46FCE6B7D757BD6B14DAA`。
 再双击一次即卸载（插件目录、顶部「美颜」面板模块、注册表一并清除）。
 装上后：源 → 滤镜 → `+` → Beauty (GPU)；顶部菜单栏「美颜」另有参数面板入口。
+
+## 本次更新（3.2.4 → 3.3.6）
+
+git 上此前只到 3.2.4，本次把 3.3.0~3.3.6 七版一次性入库。要点：**1~4 人同框**、
+**竖屏方向全自动**、**相机 1080p 默认路径 1.84 → 0.70 ms/帧**、**头歪 ±45° 美颜不再掉**；
+3.3.6 本身只做发布整理，滤镜行为与 3.3.5 一致。逐版症状、根因、验证与回退见
+[`CHANGELOG.md`](CHANGELOG.md) 顶部「本次发布」。
 
 ## 部署约束
 
@@ -37,7 +46,7 @@ supersedes: 04_文档/README.md（已归档）
 | 正确性 | 五段与 CPU `maxdiff ≤1`；六配置整体 `maxdiff=0` |
 | 稳定性 | 4K 30 min / 54,180 帧零 D3D11 异常；画布切换 / 热重载 / 冷启动通过 |
 
-> 以上为 **2.14.x 基线（RTX 5060 Laptop、单脸），3.x 未重测**，不可当作 3.2.4 实测值引用。
+> 以上为 **2.14.x 基线（RTX 5060 Laptop、单脸），3.x 未重测**，不可当作 3.3.6 实测值引用。
 > 测量规程见 [`reference/reference-baseline.md`](reference/reference-baseline.md)。
 
 ## 构建与验证

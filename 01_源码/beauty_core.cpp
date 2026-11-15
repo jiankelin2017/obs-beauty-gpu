@@ -1102,6 +1102,11 @@ struct SlotState {
     int   thumbFullW = 0, thumbFullH = 0;
     float thumbScale = 0.0f;
     int   thumbOx = 0, thumbOy = 0;
+    // 3.3.0（横竖屏适配）：构建这张缩略图时用的输入方向（0/90/180/270）。
+    // 引擎在 mapped 路径上按**这个值**做几何反变换，而不是 effRot_ ——
+    // 后者可能在本帧 process 内部被自动探测改掉，两边用不同方向就会让掩码
+    // 整体错位 90°。由宿主经 beautyCoreSetThumbSource 显式传入。
+    int   thumbRot = 0;
     const unsigned char* motPx = nullptr;
     int   motW = 0, motH = 0;
     bool  duePending = false;
@@ -1159,6 +1164,7 @@ static std::mutex g_slotMutex;
 #define g_thumbScale      g_slots[slotIndex()].thumbScale
 #define g_thumbOx         g_slots[slotIndex()].thumbOx
 #define g_thumbOy         g_slots[slotIndex()].thumbOy
+#define g_thumbRot        g_slots[slotIndex()].thumbRot
 #define g_motPx           g_slots[slotIndex()].motPx
 #define g_motW            g_slots[slotIndex()].motW
 #define g_motH            g_slots[slotIndex()].motH
@@ -1762,10 +1768,12 @@ public:
         // 2.10.0 方案 B：把本帧输入旋转存进成员，供 updateMask/buildMaskInto 的
         // 检测几何反变换使用（渲染与输出尺寸不变，只动几何）。
         inputRot_ = ((s.input_rot % 360) + 360) % 360;
-        /* 3.2.0（自动输入方向）：把「用户有没有声明方向」刷成原子量，供检测侧读。
+        /* 3.2.0（自动输入方向）：把「允许自动探测吗」刷成原子量，供检测侧读。
          * 不能让它去读 inputRot_ —— 那是每帧都可能被这里改写的普通成员，而
-         * buildMaskInto 在异步路径上跑在 worker 线程（见该函数头的并发约束）。 */
-        autoRotAllowed_.store(inputRot_ == 0, std::memory_order_relaxed);
+         * buildMaskInto 在异步路径上跑在 worker 线程（见该函数头的并发约束）。
+         * 3.3.0：判据从「inputRot_ == 0」改成宿主显式下发的 s.auto_rot ——
+         * 显式方向（竖装相机钉死 90/270）下必须整段关掉自动探测。 */
+        autoRotAllowed_.store(s.auto_rot, std::memory_order_relaxed);
         // 2.15.0：面板值一变就重新信任它（清掉上次「自动退回 0°」的结论），
         // 否则用户把 90 改成 270 之后引擎还按 0 跑，看起来像开关失灵。
         if (inputRot_ != cfgRot_) {
@@ -2824,6 +2832,14 @@ private:
     // detAdaptHot 帧。这样最坏滞后是「运动开始的那一帧仍用旧掩码」，即 +1 帧，
     // 与 2.7.1 的 1 帧滞后同量级；反过来若也延迟进入，就会出现可见拖影。
     int detectPeriod(const unsigned char* src, int w, int h) {
+        /* 3.3.5：丢检期间把检测节奏压到 2 帧。头歪/侧脸时掩码一断就整段失效，
+         * 7 帧（约 230ms）才试一次的节奏跟不上头的动作 —— 用户看到的就是
+         * 「立正 ↔ 歪头」切换生硬、跳帧。丢检时加快，恢复后自动回到原节奏。 */
+        if (maskHold_ > 0) {
+            g_detPeriod = 2;
+            g_detDiff = -1;
+            return 2;
+        }
         // 2.11.0（方案C）：宿主喂了小图就优先用它。判据、阈值、块划分全部不变，
         // 变的只是「256 个采样点从哪来」——老路径从检测输入（640×640 缩略图或全帧）
         // 按步长点采样，新路径对 64×64 小图取格内最大 |Δ|。两条路径**不逐点等价**，
@@ -3044,7 +3060,7 @@ private:
                 const bool due = g_dueValue;
                 g_duePending = false;
                 if (due)
-                    submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy);
+                    submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy, thumb ? g_thumbRot : 0);
                 return maskValid_;
             }
             // 到了重算周期：提交一帧给 worker。周期 0 = 每帧提交。
@@ -3058,7 +3074,7 @@ private:
             const int every = detectPeriod(dsrc, dw, dh);
             if (maskAge_ >= every) {
                 maskAge_ = 0;
-                submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy);
+                submitAsync(dsrc, dw, dh, gW, gH, mScale, mOx, mOy, thumb ? g_thumbRot : 0);
             } else {
                 maskAge_++;
             }
@@ -3075,7 +3091,8 @@ private:
         int px = 0, faces = 0;
         BeautyMaskDiag dg;   // 5b-2：随 mask_ 一起换进来的几何
         if (!buildMaskInto(dsrc, dw, dh, mask_, protect_, bounds_, faces_, px, faces,
-                           msg, &dg, gW, gH, mScale, mOx, mOy)) {
+                           msg, &dg, gW, gH, mScale, mOx, mOy,
+                           thumb ? g_thumbRot : 0)) {
             return onDetectFailed(msg, face_.inputSize(), face_.lastBestScore());
         }
         maskDiag_ = dg;
@@ -3209,9 +3226,17 @@ private:
         if (idx >= (size_t)BEAUTY_WARP_MAX_FACES) return;
         MaskGeomTrack& t = g_maskTrack[idx];
         const float cx = sf.x + sf.w * 0.5f, cy = sf.y + sf.h * 0.5f;
-        const float a = (float)g_maskEma / 256.0f;
+        float a = (float)g_maskEma / 256.0f;
+        /* 3.3.5：大幅歪头（>14°）时不能按「人换了」去 snap —— 头是连续转的，
+         * snap 会让掩码在一帧里从正立跳到 45°，用户看到的就是「衔接生硬」。
+         * 这里改成**快速 EMA**（alpha 0.6，2~3 次更新跟到位），同时跳过位移 snap。 */
+        const float dot = rc * t.rc + rs * t.rs;
+        const float rollDelta = acosf((std::min)(1.0f, (std::max)(-1.0f, dot)));
+        const bool bigRoll = t.valid && rollDelta > 0.25f;
+        if (bigRoll)
+            a = 0.6f;
         bool snap = !t.valid;
-        if (!snap) {
+        if (!snap && !bigRoll) {
             if (fabsf(cx - t.cx) > 0.08f * sf.w) snap = true;
             if (fabsf(cy - t.cy) > 0.08f * sf.w) snap = true;
             if (fabsf(sf.w - t.w) > 0.15f * sf.w) snap = true;
@@ -3243,6 +3268,210 @@ private:
         sf.w = t.w;
         sf.h = t.h;
     }
+
+    /* ---- 3.3.5：滚转搜索（roll search）--------------------------------------
+     *
+     * 实测（2026-11-15，真实人脸裁切 900px、1920x1080 画布，引擎 rot=270）：
+     *     正立  → score 0.8+，检出
+     *     30°   → 0.471（低于高精度阈值 0.45 时刚好丢）
+     *     45°   → **0.122**，任何合理阈值都救不回来
+     * 用户报的「头歪 45° 美颜短暂失效」就是它：掩码 hold 6 轮（≈1.4s）后整段关掉，
+     * 头正回来又恢复。降阈值只覆盖到 ~30°，±45° 只能**把检测输入转回来**：
+     * 把 S×S 的检测输入转 ±45° 再推理，脸回到正立，检到后把框和 5 个关键点转回原坐标。
+     * 只在「掩码已经 hold 3 轮还检不到」时发生，正常帧一分钱不花。 */
+
+    // 把任意尺寸 RGBA 缩放并 letterbox 到 S×S，**同时应用方向 rot**（0/90/180/270）。
+    // 坐标约定必须与 beauty_face.cpp 的 letterboxRgbRot 完全一致 —— 这里产出的
+    // 是「旋转后的检测帧」，后续 un-letterbox 得到的就是 detect() 平时返回的坐标，
+    // 再交给 invRotateFace 换成源坐标。
+    static void prepDetInputRgbaRot(const unsigned char *src, int sw, int sh,
+                                    int S, int rot, std::vector<unsigned char> &out,
+                                    float &lsc, int &lox, int &loy)
+    {
+        const bool swap = (rot == 90 || rot == 270);
+        const int rw = swap ? sh : sw;
+        const int rh = swap ? sw : sh;
+        lsc = (std::min)((float)S / (float)rw, (float)S / (float)rh);
+        const int nw = (int)(rw * lsc + 0.5f);
+        const int nh = (int)(rh * lsc + 0.5f);
+        lox = (S - nw) / 2;
+        loy = (S - nh) / 2;
+        out.assign((size_t)S * S * 4, 0);
+        const float crx = (rw - 1) * 0.5f, cry = (rh - 1) * 0.5f;
+        const float csx = (sw - 1) * 0.5f, csy = (sh - 1) * 0.5f;
+        for (int y = 0; y < nh; y++) {
+            const float ry = (y + 0.5f) / lsc - 0.5f;
+            unsigned char *o = &out[(size_t)(loy + y) * S * 4 + (size_t)lox * 4];
+            for (int x = 0; x < nw; x++) {
+                const float rx = (x + 0.5f) / lsc - 0.5f;
+                const float dx = rx - crx, dy = ry - cry;
+                float sx, sy;
+                switch (rot) {
+                case 90:  sx = dy; sy = -dx; break;
+                case 180: sx = -dx; sy = -dy; break;
+                case 270: sx = -dy; sy = dx; break;
+                default:  sx = dx; sy = dy; break;
+                }
+                sx += csx;
+                sy += csy;
+                int x0 = (int)std::floor(sx);
+                const float wx = sx - x0;
+                int y0 = (int)std::floor(sy);
+                const float wy = sy - y0;
+                int x1 = x0 + 1, y1 = y0 + 1;
+                if (x0 < 0) x0 = 0;
+                if (x1 >= sw) x1 = sw - 1;
+                if (x0 >= sw) x0 = sw - 1;
+                if (y0 < 0) y0 = 0;
+                if (y1 >= sh) y1 = sh - 1;
+                if (y0 >= sh) y0 = sh - 1;
+                const unsigned char *r0 = src + (size_t)y0 * sw * 4;
+                const unsigned char *r1 = src + (size_t)y1 * sw * 4;
+                unsigned char *d = o + (size_t)x * 4;
+                for (int k = 0; k < 3; k++) {
+                    const float a = r0[(size_t)x0 * 4 + k] * (1 - wx) +
+                                    r0[(size_t)x1 * 4 + k] * wx;
+                    const float b = r1[(size_t)x0 * 4 + k] * (1 - wx) +
+                                    r1[(size_t)x1 * 4 + k] * wx;
+                    d[k] = (unsigned char)(a * (1 - wy) + b * wy + 0.5f);
+                }
+                d[3] = 255;
+            }
+        }
+    }
+
+    // 绕中心旋转 deg 度（expand，双线性，越界补黑）。
+    static void rotateRgbaAbout(const unsigned char *src, int w, int h,
+                                float deg, std::vector<unsigned char> &out,
+                                int &ow, int &oh)
+    {
+        const float r = deg * 3.14159265358979f / 180.0f;
+        const float c = std::cos(r), s = std::sin(r);
+        ow = (int)std::ceil(std::fabs(w * c) + std::fabs(h * s));
+        oh = (int)std::ceil(std::fabs(w * s) + std::fabs(h * c));
+        out.assign((size_t)ow * oh * 4, 0);
+        const float cx = w * 0.5f, cy = h * 0.5f;
+        const float ox = ow * 0.5f, oy = oh * 0.5f;
+        for (int y = 0; y < oh; y++) {
+            for (int x = 0; x < ow; x++) {
+                const float dx = x + 0.5f - ox, dy = y + 0.5f - oy;
+                const float sx = cx + (c * dx + s * dy);
+                const float sy = cy + (-s * dx + c * dy);
+                const int ix = (int)std::floor(sx), iy = (int)std::floor(sy);
+                if (ix < 0 || iy < 0 || ix >= w - 1 || iy >= h - 1)
+                    continue;
+                const float fx = sx - ix, fy = sy - iy;
+                const unsigned char *p00 = src + ((size_t)iy * w + ix) * 4;
+                const unsigned char *p10 = p00 + 4;
+                const unsigned char *p01 = p00 + (size_t)w * 4;
+                const unsigned char *p11 = p01 + 4;
+                unsigned char *d = &out[((size_t)y * ow + x) * 4];
+                for (int ch = 0; ch < 4; ch++) {
+                    const float v =
+                        p00[ch] * (1 - fx) * (1 - fy) + p10[ch] * fx * (1 - fy) +
+                        p01[ch] * (1 - fx) * fy + p11[ch] * fx * fy;
+                    d[ch] = (unsigned char)(std::min)(255.0f, (std::max)(0.0f, v));
+                }
+            }
+        }
+    }
+
+    // 旋转坐标系里的点 → 原坐标系（与 rotateRgbaAbout 互逆）。
+    static void mapBackPoint(float &x, float &y, int rw, int rh, int w, int h,
+                             float deg)
+    {
+        const float r = deg * 3.14159265358979f / 180.0f;
+        const float c = std::cos(r), s = std::sin(r);
+        const float dx = x - rw * 0.5f, dy = y - rh * 0.5f;
+        x = w * 0.5f + (c * dx + s * dy);
+        y = h * 0.5f + (-s * dx + c * dy);
+    }
+
+    /* ±45° 滚转搜索。mapped（宿主已 letterbox 成 S×S）时直接用；否则自己缩。
+     * 成功时 faces 已是**源坐标**（mapped 时是缩略图坐标，后续 unscale 照旧）。 */
+    bool detectRollSearch(const unsigned char *src, int w, int h,
+                          std::vector<beautycore::FaceBox> &faces,
+                          std::string &err, float conf, bool mapped, int detRot)
+    {
+        const int S = face_.inputSize();
+        if (S <= 0)
+            return false;
+        std::vector<unsigned char> base;
+        float lsc = 1.f;
+        int lox = 0, loy = 0;
+        if (mapped && w == S && h == S) {
+            base.assign(src, src + (size_t)w * h * 4);
+        } else {
+            prepDetInputRgbaRot(src, w, h, S, detRot, base, lsc, lox, loy);
+        }
+        const int bw = S, bh = S;
+        /* 3.3.5：按角度从小到大扫，第一个命中就收工。
+         * 实测 45° 的分数 0.122（阈值 0.45），60°/75° 只会更差 —— 只转 ±45°
+         * 覆盖不到「头歪得更狠」的情况（真机 13:00 那次抓到的仍有 78% 丢检）。
+         * 每次尝试 = 一次 640 旋转 + 一次推理（约 3 ms），只在丢检帧发生；
+         * 调用侧用 maskHold_ 窗口限制总次数，不会在「人不在」时无限扫。
+         *
+         * **粘住上次命中的角度**：头持续歪着时，每轮都从 30° 开始扫会白跑 2~6 次，
+         * 检测节奏被拖慢 → 掩码一会儿断一会儿回，用户看到的就是「衔接生硬、跳帧」。
+         * 上次在哪个角度命中，下一轮就先试它；正常检测一旦检到脸就把粘性清掉。 */
+        float cand[9];
+        int ncand = 0;
+        if (lastRollDeg_ != 0)
+            cand[ncand++] = (float)lastRollDeg_;
+        const float baseDegs[8] = {30.f,  -30.f, 45.f,  -45.f,
+                                   60.f,  -60.f, 75.f,  -75.f};
+        for (int i = 0; i < 8; i++) {
+            if (lastRollDeg_ != 0 &&
+                (float)lastRollDeg_ == baseDegs[i])
+                continue;
+            cand[ncand++] = baseDegs[i];
+        }
+        for (int t = 0; t < ncand; t++) {
+            const float deg = cand[t];
+            std::vector<unsigned char> rot;
+            int rw = 0, rh = 0;
+            rotateRgbaAbout(base.data(), bw, bh, deg, rot, rw, rh);
+            std::vector<beautycore::FaceBox> f2;
+            std::string e2;
+            if (!face_.detect(rot.data(), rw, rh, f2, e2, conf, 0.3f, 4, 0) ||
+                f2.empty())
+                continue;
+            for (auto &fb : f2) {
+                float xs[4] = {fb.x, fb.x + fb.w, fb.x + fb.w, fb.x};
+                float ys[4] = {fb.y, fb.y, fb.y + fb.h, fb.y + fb.h};
+                float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                for (int i = 0; i < 4; i++) {
+                    float X = xs[i], Y = ys[i];
+                    mapBackPoint(X, Y, rw, rh, bw, bh, deg);
+                    X = (X - lox) / lsc;
+                    Y = (Y - loy) / lsc;
+                    x0 = (std::min)(x0, X);
+                    y0 = (std::min)(y0, Y);
+                    x1 = (std::max)(x1, X);
+                    y1 = (std::max)(y1, Y);
+                }
+                fb.x = x0;
+                fb.y = y0;
+                fb.w = (std::max)(1.f, x1 - x0);
+                fb.h = (std::max)(1.f, y1 - y0);
+                if (fb.hasKps) {
+                    for (int k = 0; k < 5; k++) {
+                        float X = fb.kps[k * 2], Y = fb.kps[k * 2 + 1];
+                        mapBackPoint(X, Y, rw, rh, bw, bh, deg);
+                        fb.kps[k * 2] = (X - lox) / lsc;
+                        fb.kps[k * 2 + 1] = (Y - loy) / lsc;
+                    }
+                }
+            }
+            faces = f2;
+            lastRollDeg_ = (int)deg;
+            rollSweepBudget_ = 32;
+            err = e2;
+            return true;
+        }
+        return false;
+    }
+
 bool buildMaskInto(const unsigned char* src, int w, int h,
                        std::vector<unsigned char>& maskOut,
                        std::vector<unsigned char>& protectOut,
@@ -3251,7 +3480,8 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                        int& pxOut, int& facesOut, std::string& msgOut,
                        BeautyMaskDiag* diagOut = nullptr,
                        int geomW = 0, int geomH = 0,
-                       float mapScale = 0.0f, int mapOx = 0, int mapOy = 0) {
+                       float mapScale = 0.0f, int mapOx = 0, int mapOy = 0,
+                       int mapRot = 0) {
         const bool mapped = (mapScale > 0.0f) && geomW > 0 && geomH > 0;
         const int gw = mapped ? geomW : w;
         const int gh = mapped ? geomH : h;
@@ -3295,13 +3525,68 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
         const int detRot = mapped ? 0 : effRot;
         bool detOk = face_.detect(src, w, h, faces, ferr, detConf, 0.3f, 4, detRot) &&
                      !faces.empty();
+        /* 3.3.5：头歪 ±30°~±60°（或大侧脸）时 YuNet 的分数会掉到阈值以下。
+         * 掩码先靠 onDetectFailed 的 hold 撑 6 轮（约 1.4 秒），撑完就整段失效 ——
+         * 用户看到的是「头一歪，美颜短暂没了，头正回来又好了」。
+         * 这里在**掩码已经 hold 了几轮**的前提下降阈值再试一次：
+         *   · 只在丢检时多花一次推理，正常帧一分钱不花；
+         *   · 结果仍要求框宽在画面的 3%~80% 之间，防止把背景/桌面误检成脸；
+         *   · 找到就直接用（几何仍按关键点算，头歪多少掩码就转多少）。 */
+        if (detOk) {
+            rollSweepBudget_ = 32;
+            lastRollDeg_ = 0;   // 正常检到脸 → 清掉「粘住的角度」
+        }
+        if (!detOk && maskHold_ >= 3 && rollSweepBudget_ > 0) {
+            const float lowConf = detConf * 0.5f;
+            std::string e3;
+            if (face_.detect(src, w, h, faces, e3, lowConf, 0.3f, 4, detRot) &&
+                !faces.empty() && faces[0].w > w * 0.03f &&
+                faces[0].w < w * 0.8f) {
+                detOk = true;
+                ferr = e3;
+                if (!lowConfLogged_) {
+                    lowConfLogged_ = true;
+                    NALOG(BEAUTY_LOG_INFO,
+                          "[美颜] 头歪/侧脸时检测分数偏低，已降到 %.2f 继续跟踪"
+                          "（原阈值 %.2f）。只在丢检帧多跑一次推理。",
+                          lowConf, detConf);
+                }
+            }
+            /* 降阈值只覆盖到 ~30°（实测 30° = 0.471，45° = 0.122）。
+             * ±45° 级只能把检测输入转回来再检。 */
+            if (!detOk &&
+                detectRollSearch(src, w, h, faces, ferr, detConf, mapped, detRot)) {
+                detOk = true;
+                rollSweepBudget_ = 12;
+                if (!rollSearchLogged_) {
+                    rollSearchLogged_ = true;
+                    NALOG(BEAUTY_LOG_INFO,
+                          "[美颜] 头歪较大（±45° 级），已把检测输入转 ±45° 找回人脸"
+                          "（只在丢检帧发生，正常帧不花这份开销）。");
+                }
+            } else if (!detOk) {
+                /* 没扫到：消耗一次预算。预算是为了防止「人根本不在画面里」时
+                 * 每轮都白扫八个角度 —— 12 轮之后停手，等正常检测重新检到脸。 */
+                if (rollSweepBudget_ > 0)
+                    rollSweepBudget_--;
+            }
+        }
         /* 2.15.0：输入方向选错时（源正立、面板却填了 90°），YuNet 在躺倒的脸上
          * 一个框都出不来 —— 掩码为空 → 磨皮/美白**整段静默失效**，用户只看到
          * 「美颜没反应」。这里退一步再试一次「不旋转」：能检出就说明这一档方向与源
          * 不匹配，于是把本帧有效方向改成 0，并让宿主下一帧起别再转缩略图
          * （beautyCoreEffectiveRot）。
          * 只在「已经检不到」时多跑一次推理，正常帧一分钱不花。 */
-        if (!detOk && !mapped && detRot != 0) {
+        /* 3.3.0（横竖屏适配）：**显式方向不许被兜底改写**。
+         *
+         * 2.15.0 加这条兜底时，方向只能靠环境变量/旧面板设，用户选错就整段失效，
+         * 所以「检不到就退回 0°」是救命的。但它对显式声明方向的人是**反向**的：
+         * 竖装相机钉死 270° 后，只要有一次误检在 0° 上出了框，effRot_ 就被改成 0，
+         * 而 inputRot_ 还是 270 → rot_match 变假、detRot 变 0 → 之后整场都检不到脸，
+         * 美颜直接消失。所以这里按 autoRotAllowed_ 分流：自动档才允许改向，
+         * 显式档只记一条 WARN，让用户自己改面板。 */
+        const bool autoRotOn = autoRotAllowed_.load(std::memory_order_relaxed);
+        if (!detOk && !mapped && detRot != 0 && autoRotOn) {
             std::string e2;
             if (face_.detect(src, w, h, faces, e2, detConf, 0.3f, 4, 0) &&
                 !faces.empty()) {
@@ -3322,6 +3607,19 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                           "（画面正常；删掉 BEAUTY_INPUT_ROT 环境变量可消掉这条）",
                           detRot);
                 }
+            }
+        } else if (!detOk && !mapped && detRot != 0 && !autoRotOn) {
+            /* 显式方向 + 检不到脸：不自动改向，只留一条可自查的 WARN。
+             * 只在真的检不到时打，且每个会话一次 —— 用户改面板后 cfgRot_ 变化会
+             * 把 rotFallbackLogged_ 清掉，所以「改了再试」还能再报一次。 */
+            if (!rotFallbackLogged_) {
+                rotFallbackLogged_ = true;
+                NALOG(BEAUTY_LOG_WARNING,
+                      "[美颜] 输入方向 %d° 在本源上检不到脸；显式方向不会被自动改写"
+                      "（避免一次误检把整场美颜打掉）。若画面里人脸是正的，"
+                      "显式方向来自环境变量 BEAUTY_INPUT_ROT；"
+                      "若方向不对，改它或删掉它回到自动。",
+                      detRot);
             }
         }
         if (!detOk) {
@@ -3363,34 +3661,57 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                     NALOG(BEAUTY_LOG_DEBUG,
                           "[美颜] 自动方向探测开始（连续 %d 次无脸，w=%d h=%d mapped=%d）",
                           g_cfg.autoRotMiss, w, h, mapped ? 1 : 0);
-                    // 两个方向轮换着先试：源被转 +90° 和 −90° 都可能出现，
-                    // 固定先试 90 会让另一半用户每轮多付一次推理。
-                    const int first = autoProbeNext_;
-                    const int second = (first == 90) ? 270 : 90;
-                    autoProbeNext_ = second;
-                    const int cand[2] = {first, second};
+                    /* 3.3.1：**两个方向都试完再决定**，不能拿到第一个能出脸的就收工。
+                     *
+                     * 2026-11-15 真机实测（A7M3 竖装 / UGREEN 采集卡）：在 90° 和
+                     * 270° 下 YuNet **都能**出一个框 —— 倒立脸的召回只是低，不是 0。
+                     * 旧写法「先试 90，出脸就定 90」于是选到了反向 180° 的那个：
+                     * 掩码贴在脸上、脖子却朝上，随后检测反复失败、每 20 帧重探一次，
+                     * 用户看到的就是「输入方向/自动方向都没反应」。
+                     *
+                     * 判据：先比 score（正立脸更自信），分差 < 0.02 再比人脸面积
+                     * （倒立框通常更小）。代价是每轮多一次推理，只在「已经连续
+                     * 检不到脸」时发生且带 autoRotCool 冷却，可以接受。 */
+                    const int cand[2] = {90, 270};
+                    int bestRot = 0;
+                    float bestScore = 0.0f, bestArea = 0.0f;
+                    float sc90 = -1.0f, sc270 = -1.0f;   // 仅供日志
                     for (int c = 0; c < 2; c++) {
                         std::vector<beautycore::FaceBox> pf;
                         std::string pe;
-                        if (face_.detect(src, w, h, pf, pe, detConf, 0.3f, 4,
-                                         cand[c]) && !pf.empty()) {
-                            setEffRot(cand[c]);
-                            msgOut = ferr;   // 本帧仍然没有掩码
-                            facesOut = 0;
-                            if (!autoProbeLogged_) {
-                                autoProbeLogged_ = true;
-                                NALOG(BEAUTY_LOG_WARNING,
-                                      "[美颜] 连续 %d 次检不到脸，自动方向探测命中 %d°："
-                                      "本源的画面相对正立被转了 %d°，已自动补偿。"
-                                      "下一帧起改走全帧路径（不再用检测缩略图）。"
-                                      "若判定有误，设 BEAUTY_AUTO_ROT=0 关闭本功能。",
-                                      g_cfg.autoRotMiss, cand[c], cand[c]);
-                            }
-                            return false;
+                        if (!face_.detect(src, w, h, pf, pe, detConf, 0.3f, 4,
+                                          cand[c]) || pf.empty())
+                            continue;
+                        const float score = pf[0].score;
+                        const float area = pf[0].w * pf[0].h;
+                        if (cand[c] == 90) sc90 = score; else sc270 = score;
+                        const bool better =
+                            (bestRot == 0) ||
+                            (score > bestScore + 0.02f) ||
+                            (score > bestScore - 0.02f && area > bestArea);
+                        if (better) {
+                            bestRot = cand[c];
+                            bestScore = score;
+                            bestArea = area;
                         }
-                        /* 探测也失败：保持 effRot=0，宿主继续走缩略图。
-                         * 不在这里写「试过都不行」的状态 —— 人可能只是暂时走开，
-                         * 冷却 autoRotCool 次之后本来就该再试。 */
+                    }
+                    if (bestRot != 0) {
+                        setEffRot(bestRot);
+                        msgOut = ferr;   // 本帧仍然没有掩码（丢 1 帧最省事且无错）
+                        facesOut = 0;
+                        if (!autoProbeLogged_) {
+                            autoProbeLogged_ = true;
+                            NALOG(BEAUTY_LOG_WARNING,
+                                  "[美颜] 连续 %d 次检不到脸，自动方向选定 %d°"
+                                  "（90°=%.2f / 270°=%.2f）：本源的画面相对正立被转了"
+                                  " %d°，已自动补偿。下一帧起改走全帧路径。"
+                                  "若判定有误，可设环境变量 BEAUTY_INPUT_ROT=90/270"
+                                  "强制指定；BEAUTY_AUTO_ROT=0 关闭自动探测。",
+                                  g_cfg.autoRotMiss, bestRot,
+                                  sc90 < 0 ? 0.0 : (double)sc90,
+                                  sc270 < 0 ? 0.0 : (double)sc270, bestRot);
+                        }
+                        return false;
                     }
                 }
             }
@@ -3399,7 +3720,19 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
             return false;
         }
         // 反变换必须与「实际用的那个方向」一致：重试成功时它已经被改成 0。
-        const int invRot = effRot_;
+        // 3.3.0：mapped（缩略图）路径用宿主随缩略图交过来的 g_thumbRot —— 那张图
+        // 是宿主按**它自己**的方向转的，effRot_ 只描述「这台机器现在认定源被转了
+        // 多少度」，两者在本帧自动探测刚翻面的那一刻会不一样。用错就是几何整体
+        // 错 90°，而且不报错。
+        // 3.3.2：mapped（缩略图）路径用**随这份帧一起提交过来的** mapRot。
+        //
+        // 这里原来读全局 g_thumbRot —— 渲染线程每帧都在改它，而异步路径下
+        // buildMaskInto 跑在 worker 上、处理的是**上一帧提交**的缩略图。两边一旦
+        // 不同步（最常见：本帧没走缩略图 → 宿主 ClearThumbSource 把 g_thumbRot
+        // 清成 0，worker 正好在处理一张转过的缩略图），几何就**没有做反旋转**，
+        // 直接以「旋转后坐标系」交给掩码 shader —— 掩码落在画面另一处（实测：
+        // 脸在 (1200,600)，掩码画到 (600,706)，磨皮看起来完全失效）。
+        const int invRot = mapped ? mapRot : effRot_;
         // 检测在「旋转后整图」上跑，所以几何此刻是旋转后坐标系，必须立刻反变换回
         // 源坐标系。位置有两条硬约束：
         //   · 必须在 estimateSkinCenter 之前 —— 那个函数拿 faces 去采 src 的真实像素，
@@ -3431,12 +3764,18 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
          *   `仅色彩层：磨皮=0 …美白=79…｜引擎掩码 px=0 有脸=1`
          * `px=0` 不是没脸，而是**CPU 一个像素都没画**。
          * 修法：这种情况下强制走完整路径（CPU 画全帧掩码）。 */
+        /* 3.3.0（最多 4 人）：geomOnly 从「单脸」放宽到 1..BEAUTY_MASK_MAX_FACES。
+         * 依据：宿主侧的 GPU 掩码改成「逐脸画 + MAX 合并」后，与 CPU 的
+         * paintSkin(max) 逐像素同义，所以没有人脸数 == 1 这个前提了。
+         * 仍然保留两条回退：shape 带 bit2（脖子逐行扫描，shader 不支持）、
+         * 超过验证上限（多人掩码的画数量与半径都没验过）。 */
         const bool geomOnly = !forceCpuMask_ && (mapped || g_maskGeomOnly) &&
-                              diagOut && faces.size() == 1 &&
+                              diagOut &&
+                              faces.size() <= BEAUTY_MASK_MAX_FACES &&
                               !(g_maskShape & 4);
         if (mapped && !geomOnly) {
             /* 缩略图模式下 src 只有 w×h 那么大，而几何坐标与掩码缓冲都是全帧 ——
-             * 多脸 / shape 带 bit2 时**画不出全帧掩码**（没有像素）。
+             * 多脸（>上限）/ shape 带 bit2 时**画不出全帧掩码**（没有像素）。
              * 这里直接报「本帧没有可用掩码」，宿主据此整帧跳过并回退全帧回读。 */
             msgOut = "thumb: full-res mask needed";
             facesOut = 0;
@@ -3913,11 +4252,17 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                 paintProtectEllipse(protect, w, h, f.kps[0], f.kps[1], ex, ey);
                 paintProtectEllipse(protect, w, h, f.kps[2], f.kps[3], ex, ey);
             }
-            // 5b-2：记下第一张脸的眼睛几何（GPU 切片 1 只支持单脸）。
-            // 注意 hasEyes 的语义 = 「CPU 真的画了保护椭圆」——
-            // kpsSane 不通过时 CPU 一个像素都不画，GPU 也必须什么都不画。
-            if (diagOut && fi == 0 && diagOut->count > 0) {
-                BeautyMaskFace& mg = diagOut->faces[0];
+            /* 3.3.0（最多 4 人）：眼睛几何**逐脸**回填。
+             *
+             * 旧写法是 `fi == 0` —— GPU 掩码只支持单脸时没问题，但多人掩码
+             * （逐脸画 + MAX）会只给第一张脸画眼睛保护，其余人的眼睛不被保护，
+             * 磨皮/锐化会直接作用在眼周。2026-11-14 的 4 脸对拍就是这么抓到的：
+             * skin maxdiff=0（皮肤掩码逐像素相同）但 eye maxdiff=255、差异 5268 px。
+             *
+             * faces[fi] 与 diagOut->faces[fi] 同序：上面那段几何填充是同一个逐脸
+             * 循环、每张脸都会填（只有超过 8 张才会截断，而 GPU 路径只用 ≤4 张）。 */
+            if (diagOut && fi < (size_t)diagOut->count) {
+                BeautyMaskFace& mg = diagOut->faces[fi];
                 mg.hasEyes = 1;
                 mg.eye0x = f.kps[0]; mg.eye0y = f.kps[1];
                 mg.eye1x = f.kps[2]; mg.eye1y = f.kps[3];
@@ -4046,6 +4391,10 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
         int geomW = 0, geomH = 0;
         float mapScale = 0.0f;
         int mapOx = 0, mapOy = 0;
+        // 3.3.2：这张缩略图**构建时用的方向**（0/90/180/270）。必须随任务一起
+        // 提交 —— 全局 g_thumbRot 会被渲染线程下一帧改掉，worker 晚一拍读到就是
+        // 错的（见 buildMaskInto 里 invRot 的注释）。
+        int mapRot = 0;
         std::vector<unsigned char> mask;
         std::vector<unsigned char> protect;
         beautycore::RoiRect bounds;
@@ -4131,7 +4480,7 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
     // 排队没有意义，掩码只需要最新的那份。
     void submitAsync(const unsigned char* src, int w, int h,
                      int geomW = 0, int geomH = 0, float mapScale = 0.0f,
-                     int mapOx = 0, int mapOy = 0) {
+                     int mapOx = 0, int mapOy = 0, int mapRot = 0) {
         {
             std::lock_guard<std::mutex> lk(async_.m);
             if (async_.hasJob || async_.working) return;
@@ -4144,6 +4493,7 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
             async_.mapScale = mapScale;
             async_.mapOx = mapOx;
             async_.mapOy = mapOy;
+            async_.mapRot = mapRot;
         }
         // 拷贝放在锁外：1080p 下这是一次 8MB memcpy（约 0.7ms），
         // 持锁做会把 worker 的收尾也堵住。
@@ -4221,7 +4571,7 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
         for (;;) {
             std::vector<unsigned char> mask, protect;
             int w = 0, h = 0;
-            int geomW = 0, geomH = 0, mapOx = 0, mapOy = 0;
+            int geomW = 0, geomH = 0, mapOx = 0, mapOy = 0, mapRot = 0;
             float mapScale = 0.0f;
             {
                 std::unique_lock<std::mutex> lk(async_.m);
@@ -4236,6 +4586,7 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
                 mapScale = async_.mapScale;
                 mapOx = async_.mapOx;
                 mapOy = async_.mapOy;
+                mapRot = async_.mapRot;
                 async_.hasJob = false;
                 async_.working = true;
             }
@@ -4249,7 +4600,8 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
             const double t0 = nowMsCore();
             const bool ok = buildMaskInto(&async_.frame[0], w, h, mask, protect,
                                           b, fbox, px, faces, msg, &dgcol,
-                                          geomW, geomH, mapScale, mapOx, mapOy);
+                                          geomW, geomH, mapScale, mapOx, mapOy,
+                                          mapRot);
             inputSize = face_.inputSize();
             best = face_.lastBestScore();
             const double ms = nowMsCore() - t0;
@@ -4487,6 +4839,15 @@ bool buildMaskInto(const unsigned char* src, int w, int h,
     int  autoCool_ = 0;
     int  autoProbeNext_ = 90;
     bool autoProbeLogged_ = false;
+    // 3.3.5：低阈值重试只提示一次（避免每帧刷屏，也不影响检测本身）。
+    bool lowConfLogged_ = false;
+    // 3.3.5：±45° 滚转搜索只提示一次。
+    bool rollSearchLogged_ = false;
+    /* 滚转搜索的预算：拍到一个成功就补满 12；连续扫不到就递减，减到 0 停手，
+     * 等正常检测重新检到脸。防止「人根本不在画面里」时每轮白扫 8 个角度。 */
+    int  rollSweepBudget_ = 32;
+    // 上次滚转搜索命中的角度（0 = 没有）。头持续歪着时先试它，避免每轮白扫。
+    int  lastRollDeg_ = 0;
     /* 渲染线程 → 检测侧的单向信号：换源/换分辨率/改声明方向 → 自动结论作废。
      * 用 exchange 消费，天然只生效一次；两个线程各碰各的字段，没有共享写。 */
     std::atomic<bool> rotAutoReset_{false};
@@ -5179,7 +5540,7 @@ void beautyCoreSetMaskGeomOnly(bool on) {
 // 否则某帧回退全帧路径时引擎仍会去读上一帧的缩略图，几何直接错一帧。
 void beautyCoreSetThumbSource(const unsigned char *p, int tw, int th,
                               int fullW, int fullH, float scale,
-                              int ox, int oy) {
+                              int ox, int oy, int rot) {
     if (!p || tw <= 0 || th <= 0 || fullW <= 0 || fullH <= 0 ||
         !(scale > 0.0f)) {
         beautyCoreClearThumbSource();
@@ -5193,6 +5554,9 @@ void beautyCoreSetThumbSource(const unsigned char *p, int tw, int th,
     g_thumbScale = scale;
     g_thumbOx = ox;
     g_thumbOy = oy;
+    // 3.3.0：方向由宿主随缩略图一起给出（它才是真正转过那张图的人）。
+    const int r = ((rot % 360) + 360) % 360;
+    g_thumbRot = (r == 90 || r == 180 || r == 270) ? r : 0;
 }
 
 void beautyCoreClearThumbSource() {
@@ -5201,6 +5565,7 @@ void beautyCoreClearThumbSource() {
     g_thumbFullW = g_thumbFullH = 0;
     g_thumbScale = 0.0f;
     g_thumbOx = g_thumbOy = 0;
+    g_thumbRot = 0;
 }
 
 // 2.11.0（方案C）：运动判定的小图（RGBA8，stride = w*4）。

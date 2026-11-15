@@ -1372,6 +1372,14 @@ private:
 		if (curidx >= 0)
 			cb->setCurrentIndex(curidx);
 
+		/* 3.3.1：这个下拉只影响「人脸识别时把画面转多少度」，**不会旋转预览**。
+		 * 2026-11-15 真机反馈：用户选了 270° 后看到画面没转，以为功能坏了。
+		 * 标签已经写明「不改画面」，这里再用悬停提示把「该怎么转画面」说清楚。 */
+		if (key_s == "input_rot")
+			cb->setToolTip(QString::fromUtf8(
+				"只影响人脸识别方向，不会旋转预览画面。\n"
+				"要把画面转正：选中源 → 右键 → 变换 → 旋转 90°。"));
+
 		connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged),
 			[this, cb, fmt, key_s](int i) {
 				if (i < 0)

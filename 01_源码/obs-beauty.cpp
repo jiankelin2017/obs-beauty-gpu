@@ -434,6 +434,13 @@ struct beauty_filter {
 	int landmark_q;   // fuFaceProcessorSetFaceLandmarkQuality (面板: 识别模式)
 	int max_faces;    // fuSetMaxFaces (面板: 人物个数)
 	int input_rot;     // 2.10.0 方案 B：输入方向 0/90/180/270（检测缩略图旋转）
+	// 3.3.0（横竖屏适配）：input_rot 是用户显式声明的方向时为 false —— 引擎据此
+	// 关掉「自动方向探测」，也关掉「检不到脸就把方向改回 0」的兜底。
+	bool auto_rot;
+	// 3.3.0：本帧构建缩略图时实际用的方向。显式随 beautyCoreSetThumbSource 传给
+	// 引擎，几何反变换以它为准 —— 这样即使引擎在本帧 process 内部刚改了
+	// effectiveRot，缩略图与反变换也还是同一套坐标（rot_match 那套判据因此删掉）。
+	int thumb_rot;
 	double v[BEAUTY_NPARAM]; // panel units, 0..100
 	int slot;              // 引擎槽位（每个滤镜实例独占一份上下文）
 	bool dirty;            // 进程级检测选项待下发（渲染线程 flush）
@@ -644,6 +651,18 @@ struct beauty_filter {
 	bool detect_small;         // BEAUTY_DETECT_SMALL=0 回退全帧回读
 	gs_texrender_t *thumb_rt;  // S×S 检测缩略图（RGBA8，带 letterbox 黑边）
 	gs_stagesurf_t *thumb_stage;
+	/* 3.3.4：缩略图回读改双缓冲 —— 本帧只提交、map 的是**上一帧**那张。
+	 * 旧写法「本帧提交、本帧 map」实测 1.43 ms/帧（相机 1080p），几乎全是
+	 * 等 GPU 把本帧场景渲染完；而运动采样（mot_stage/mot_stage_alt）早就用
+	 * 这个手法把等待压到 0.05 ms。缩略图同理：晚一帧对检测没有影响（检测
+	 * 本来就是异步的），换来的是每帧省 ~1.2 ms。 */
+	gs_stagesurf_t *thumb_stage_alt;
+	int thumb_ping;            // 0/1 交替：本帧写哪张
+	bool thumb_primed;         // 已经提交过至少一张（首帧没有「上一帧」）
+	// 3.3.4：上一张已提交缩略图的映射参数。分辨率/方向一变，那张图就不能再用
+	// （否则会拿旧几何解释新画面，方向翻转时表现为「掩码整体错 90°」一帧）。
+	float thumb_prev_scale;
+	int thumb_prev_ox, thumb_prev_oy, thumb_prev_rot;
 	uint32_t thumb_w, thumb_h; // = S（默认 640）
 	gs_color_format thumb_fmt;  // 与 in_tex 同格式（sRGB 对称，避免色偏）
 	unsigned char *thumb_buf;  // 回读目标（S*S*4 字节）
@@ -752,6 +771,7 @@ static void beauty_filter_settings(struct beauty_filter *f, BeautySettings &s)
 	s.skin_detect = f->skin_detect ? 1 : 0;
 	s.smooth_mode = f->smooth_mode;
 	s.input_rot = f->input_rot;
+	s.auto_rot = f->auto_rot;
 }
 
 // Phase 3.5：GPU 磨皮生产路径的回调（实现在 beauty_gpu_smooth_selfcheck 之后）。
@@ -788,9 +808,36 @@ static void beauty_filter_read(struct beauty_filter *f, obs_data_t *s)
 	f->smooth_mode = (int)obs_data_get_int(s, "smooth_mode");
 	f->landmark_q = (int)obs_data_get_int(s, "landmark_q");
 	f->max_faces = (int)obs_data_get_int(s, "max_faces");
-	/* 2.15.2：面板项已删，这里不再读 `input_rot`（旧场景里存着的 90/270 会被忽略，
-	 * 免得升级后画面突然跟以前不一样）。需要的人用 BEAUTY_INPUT_ROT 显式打开。 */
-	f->input_rot = beauty_input_rot_from_env();
+	/* 3.3.0（横竖屏适配）：方向重新成为面板项，语义
+	 *   input_rot = -1              → 自动（检不到脸时引擎自己试 90/270）
+	 *   input_rot = 0/90/180/270    → 用户显式声明，自动探测关闭
+	 * 2.15.2~3.2.4 的「面板删掉、只留环境变量」是因为当时方向选错会让检测整段
+	 * 失效；现在显式方向不会再被兜底改写（见 buildMaskInto 的 autoRotAllowed_
+	 * 判据），面板才敢重新放出来。环境变量优先级仍在面板之上。 */
+	/* 旧场景里根本没有这个键 —— 必须按「自动」处理，不能把 get_int 的 0 当成
+	 * 「用户显式选了 0°」（那会把老用户的自动方向整段关掉，竖装相机直接瞎）。
+	 * 只有属性页真正写过这个键（user value）才算显式声明。 */
+	int rot = -1;
+	if (obs_data_has_user_value(s, "input_rot"))
+		rot = (int)obs_data_get_int(s, "input_rot");
+	if (rot != 0 && rot != 90 && rot != 180 && rot != 270)
+		rot = -1;                       // 其它值（含非法残留）一律按自动
+	f->auto_rot = (rot < 0);
+	f->input_rot = f->auto_rot ? 0 : rot;
+
+	{
+		const char *er = getenv("BEAUTY_INPUT_ROT");
+		if (er && er[0]) {
+			f->input_rot = beauty_input_rot_from_env();
+			f->auto_rot = false;
+		}
+		const char *ar = getenv("BEAUTY_AUTO_ROT");
+		if (ar && ar[0] == '0')
+			f->auto_rot = false;
+	}
+	// 缩略图方向在 render 里按「本帧有效方向」现算（见 beauty_thumb_build 的调用点）；
+	// 这里只记显式值，自动档在 render 里读 beautyCoreEffectiveRot()。
+	f->thumb_rot = f->input_rot;
 	for (int i = 0; i < BEAUTY_NPARAM; i++)
 		f->v[i] = obs_data_get_double(s, g_params[i].key);
 }
@@ -1270,6 +1317,8 @@ static void beauty_filter_destroy(void *data)
 		gs_texrender_destroy(f->thumb_rt);
 	if (f->thumb_stage)
 		gs_stagesurface_destroy(f->thumb_stage);
+	if (f->thumb_stage_alt)
+		gs_stagesurface_destroy(f->thumb_stage_alt);
 	if (f->thumb_buf)
 		bfree(f->thumb_buf);
 	// 2.11.0（方案C）：运动采样三件套
@@ -1299,6 +1348,8 @@ static void beauty_filter_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "skin_detect", true);
 	obs_data_set_default_int(settings, "landmark_q", 1);
 	obs_data_set_default_int(settings, "max_faces", 4);
+	// 3.3.0：输入方向。-1 = 自动（默认，与 3.2.4 行为一致）。
+	obs_data_set_default_int(settings, "input_rot", -1);
 	obs_data_set_default_int(settings, "param_version", BEAUTY_PARAM_VERSION);
 	for (int i = 0; i < BEAUTY_NPARAM; i++)
 		obs_data_set_default_double(settings, g_params[i].key, g_params[i].dflt);
@@ -1391,16 +1442,20 @@ static obs_properties_t *beauty_filter_properties(void *data)
 	obs_property_list_add_int(sm, "精细磨皮", 2);
 	obs_property_list_add_int(sm, "朦胧磨皮", 3);
 
-	/* 2.15.2：面板「输入方向」已**删除**（用户 2026-11-04 20:0x 反馈「没有一点效果」）。
+	/* 3.3.2：方向选项**从界面上撤掉**，永远走自动。
 	 *
-	 * 为什么删而不是留：这一档要解决的问题（源被转了 90°，检测吃不到正立的人脸）
-	 * 只对「摄像头物理侧装 / 采集卡输出横躺」这一种接法成立；对绝大多数用户，
-	 * 选任何一档都等于 0 —— 选错了还会让检测整段失效（YuNet 检不出 ±90° 的脸）。
-	 * 2.15.0 加的自动兜底又让它进一步退化成「选什么都一样」，留着只会误导。
+	 * 历史：3.3.0 把它作为下拉放回面板 → 3.3.1 改名并加提示。真机用完的结论是
+	 * 「只要这个控件在那儿就会误导」：它只影响**人脸检测**，不旋转预览；用户选了
+	 * 角度看不到画面变化，第一反应是功能坏了。而自动探测在 2026-11-15 的真机上
+	 * 已经能稳定选对（270°：90°=0.00 / 270°=0.87），没有必须手动的场景。
 	 *
-	 * 能力没有删：引擎侧的旋转、`invRotateFace`、`letterboxRgbRot` 全部保留，
-	 * 需要的人用环境变量 `BEAUTY_INPUT_ROT=90/180/270` 打开（见《开关总表》）。
-	 * 面板上不再有这一项，用户也不用再为「该选哪一档」试错。 */
+	 * 现在的语义：
+	 *   · 设置项 `input_rot` 仍然存在，默认 -1（自动）；老场景里存着的显式值
+	 *     （如 270）继续生效，不强制改写；
+	 *   · 环境变量 `BEAUTY_INPUT_ROT=90/180/270` 仍是强制指定方向的后门，
+	 *     优先级最高 —— 自动认错时用它兜底；
+	 *   · 面板/原生属性页都不再显示任何方向控件。
+	 * 要恢复下拉：把下面这段改回 3.3.1 的 obs_properties_add_list 即可。 */
 
 	// ---- 组 1：美颜（3.1.29 合并磨皮与肤色；3.1.30 改名为「美颜」）----
 	// 为什么合并：这两类是**天天要调的主参数**，分成两页反而每次都要切。
@@ -3639,33 +3694,38 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 				 uint32_t cx, uint32_t cy,
 				 const BeautyMaskDiag &md)
 {
-	if (!src || md.count != 1)
+	/* 3.3.0（最多 4 人）：mask.hlsl 是**单脸**实现，多人靠「逐脸画 + MAX 合并」。
+	 *
+	 * PS_Skin / PS_Eye 在脸/眼椭圆之外输出 0，而 CPU 的 paintSkin 语义正是
+	 * `mask[i] = max(mask[i], w)` —— 所以 MAX 混合与 CPU 全帧掩码逐像素同义，
+	 * 既不用改 shader，也不用碰 effect 解析器（这里用的是 C API gs_blend_op）。
+	 * 上限 BEAUTY_MASK_MAX_FACES = 4；超过就整帧回退 CPU（画面正确，只是慢）。 */
+	if (!src || md.count < 1 || md.count > BEAUTY_MASK_MAX_FACES)
 		return false;
 	gs_effect_t *fx = beauty_load_mask_effect(f);
 	if (!fx || !beauty_ensure_mask_rt(f, cx, cy))
 		return false;
 
-	const BeautyMaskFace &g = md.faces[0];
-
-	struct vec4 vr, vg, vn, vne, vell, ve0, ve1, vezero, vrot;
-	vec4_zero(&vezero);
-	vec4_set(&vr, (float)g.x0, (float)g.y0, (float)g.x1, (float)g.y1);
-	vec4_set(&vg, g.cx, g.cy, g.a, g.b);
-	vec4_set(&vn, (float)g.nx0, (float)g.nyLo, (float)g.nx1,
-		 (float)g.nyHi);
-	// 2.15.0：z/w 是脖子中心的 y/x（转过的脖子上它不再等于 cx/y1）。
-	vec4_set(&vne, g.neckA, g.neckB, g.neckCy, g.neckCx);
-	// 2.15.0：脸的滚转角，椭圆的距离场在脸自己的局部系里算。
-	vec4_set(&vrot, g.rc, g.rs, 0.0f, 0.0f);
-	vec4_set(&vell, md.cb, md.cr, md.ru, md.rv);
-	vec4_set(&ve0, g.eye0x, g.eye0y, g.eyeW, g.eyeH);
-	vec4_set(&ve1, g.eye1x, g.eye1y, g.eyeW, g.eyeH);
-
 	// **每趟 draw 之前都要重绑全部参数**（E2，3.1.52 踩过，3.1.64 又踩一次）：
 	// `gs_technique_begin_pass()` 会把参数值消耗掉。绑一次连画两趟时，第二趟会报
 	// `device_draw: Not all shader parameters were set` 并**静默跳过** ——
 	// 表现是「第二张纹理全 0」。2026-11-01 07:07 的 M1 眼睛掩码全零正是这个。
-	auto bind_all = [&]() {
+	// 多人时这一点更致命：逐脸循环里漏绑任何一个量，第二张脸起就整张不画。
+	auto bind_face = [&](const BeautyMaskFace &g) {
+		struct vec4 vr, vg, vn, vne, vell, ve0, ve1, vezero, vrot;
+		vec4_zero(&vezero);
+		vec4_set(&vr, (float)g.x0, (float)g.y0, (float)g.x1, (float)g.y1);
+		vec4_set(&vg, g.cx, g.cy, g.a, g.b);
+		vec4_set(&vn, (float)g.nx0, (float)g.nyLo, (float)g.nx1,
+			 (float)g.nyHi);
+		// 2.15.0：z/w 是脖子中心的 y/x（转过的脖子上它不再等于 cx/y1）。
+		vec4_set(&vne, g.neckA, g.neckB, g.neckCy, g.neckCx);
+		// 2.15.0：脸的滚转角，椭圆的距离场在脸自己的局部系里算。
+		vec4_set(&vrot, g.rc, g.rs, 0.0f, 0.0f);
+		vec4_set(&vell, md.cb, md.cr, md.ru, md.rv);
+		vec4_set(&ve0, g.eye0x, g.eye0y, g.eyeW, g.eyeH);
+		vec4_set(&ve1, g.eye1x, g.eye1y, g.eyeW, g.eyeH);
+
 		gs_eparam_t *p;
 		if ((p = gs_effect_get_param_by_name(fx, "faceRect")))
 			gs_effect_set_vec4(p, &vr);
@@ -3693,11 +3753,25 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 		smooth_bind_tex(fx, "image", src);
 	};
 
-	if (!smooth_rt_begin(f->mask_rt_a, cx, cy))
+	/* 逐脸画进同一张 RT：清屏由 smooth_rt_begin 做一次，之后每张脸都走 MAX。
+	 * smooth_rt_begin 已经 push 了 blend state（ONE/ZERO），smooth_rt_end 会 pop，
+	 * 所以这里改成 ONE/ONE + MAX 不会漏到后续的任何绘制里。
+	 * ⚠ 不要在这里再 push 一次：pop 的顺序必须与 begin/end 严格配对。 */
+	auto draw_faces = [&](gs_texrender_t *rt, const char *tech) {
+		if (!smooth_rt_begin(rt, cx, cy))
+			return false;
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ONE);
+		gs_blend_op(GS_BLEND_OP_MAX);
+		for (int i = 0; i < md.count; i++) {
+			bind_face(md.faces[i]);
+			smooth_draw(fx, tech, src, cx, cy);
+		}
+		smooth_rt_end(rt);
+		return true;
+	};
+
+	if (!draw_faces(f->mask_rt_a, "MaskSkinTech"))
 		return false;
-	bind_all();
-	smooth_draw(fx, "MaskSkinTech", src, cx, cy);
-	smooth_rt_end(f->mask_rt_a);
 
 	/* 2.15.6：可选的掩码落盘（`BEAUTY_MASK_DUMP=<目录>`）。
 	 *
@@ -3707,6 +3781,9 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 	{
 		const char *dd = getenv("BEAUTY_MASK_DUMP");
 		if (dd && dd[0] && f->mask_dump_n < 5 && (f->frame_tag % 90) == 0) {
+			// 落盘只关心「第一张脸 + 合并后的掩码」：MAX 合并后的形状才是
+			// 真正喂给磨皮/色调的那一张，而文本框只写得下一个人的几何。
+			const BeautyMaskFace &g = md.faces[0];
 			const size_t np = (size_t)cx * cy;
 			uint8_t *buf = (uint8_t *)bmalloc(np);
 			if (buf) {
@@ -3774,12 +3851,7 @@ static bool beauty_gpu_mask_into(struct beauty_filter *f, gs_texture_t *src,
 		}
 	}
 
-	if (!smooth_rt_begin(f->mask_rt_b, cx, cy))
-		return false;
-	bind_all();
-	smooth_draw(fx, "MaskEyeTech", src, cx, cy);
-	smooth_rt_end(f->mask_rt_b);
-	return true;
+	return draw_faces(f->mask_rt_b, "MaskEyeTech");
 }
 
 // 把一张 RGBA 读回并与 CPU 的 8-bit 缓冲逐像素比。
@@ -3940,16 +4012,12 @@ static void beauty_gpu_mask_selfcheck(struct beauty_filter *f,
 			f->mask_wait++;
 		return;
 	}
-	// 切片 1 只支持单脸；多脸要 blend 合并，尚未实现 —— 明确说出来，
-	// 否则日志里「一直没有对拍结果」会被误读成「对拍没生效」。
-	if (md.count > 1) {
-		blog(LOG_INFO,
-		     "[" PLUGIN_NAME "] GPU 掩码对拍跳过：本帧 %d 张脸，"
-		     "切片 1 只支持单脸（等单人画面会自动重试）",
-		     md.count);
+	// 3.3.0：掩码支持 1..BEAUTY_MASK_MAX_FACES 人（逐脸画 + MAX 合并），
+	// 所以对拍也放开到同一个上限 —— 4 人同框时的 GPU/CPU 等价就是靠这条验的。
+	// 超过上限时 CPU 走的是另一条路（全帧掩码 + 上传），没有可比对象。
+	if (md.count > BEAUTY_MASK_MAX_FACES) {
 		if (f->mask_wait < kMaskWaitMax)
 			f->mask_wait++;
-		// 多脸时每帧都会说一句没有意义，报过就收手。
 		if (f->mask_wait > 30)
 			f->gpu_mask_reported = true;
 		return;
@@ -4241,7 +4309,20 @@ static gs_texture_t *beauty_region_pass(struct beauty_filter *f,
 					const BeautyRegionGeom::Face &fc,
 					int ec)
 {
-	if (!smooth_rt_begin(f->region_rt[dst], cx, cy))
+	gs_texrender_t *rt = f->region_rt[dst];
+	/* 3.3.0（最多 4 人）：上一个人的输出可能正好是本趟的目标 —— RGBA 槽只有
+	 * 0/3 两个，多人循环里「第 2 个人的第 1 趟」很容易撞上一步的 rt0/rt3。
+	 * D3D11 里同一资源既当 SRV 又当 RTV 是未定义行为，这里换到另一个同格式槽；
+	 * 两个都撞上就返回 NULL（调用方不认领 REGION，整帧交回 CPU，宁可慢不可错）。 */
+	if ((dst == 0 || dst == 3) && src &&
+	    gs_texrender_get_texture(rt) == src) {
+		const int alt = (dst == 0) ? 3 : 0;
+		if (gs_texrender_get_texture(f->region_rt[alt]) != src)
+			rt = f->region_rt[alt];
+		else
+			return NULL;
+	}
+	if (!smooth_rt_begin(rt, cx, cy))
 		return NULL;
 	smooth_bind_tex(fx, "image", src);
 	smooth_bind_tex(fx, "skinMask", beauty_mask_skin(f));
@@ -4263,8 +4344,8 @@ static gs_texture_t *beauty_region_pass(struct beauty_filter *f,
 	if (aux && aux_name)
 		smooth_bind_tex(fx, aux_name, aux);
 	smooth_draw(fx, tech, src, cx, cy);
-	smooth_rt_end(f->region_rt[dst]);
-	return gs_texrender_get_texture(f->region_rt[dst]);
+	smooth_rt_end(rt);
+	return gs_texrender_get_texture(rt);
 }
 
 // 5b-2/五官：按 CPU 的次序把五官三族跑到 GPU 上（生产与对拍共用这一份）。
@@ -4284,9 +4365,13 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 	 * `job.mask == nullptr` → 五官链每帧在第一行就返回 NULL → REGION 不认领 →
 	 * 细节/美形被 `region_blocks` 连带挡住 → 整帧交回 CPU + 整帧回读。
 	 * 4K 开五官 54~58 ms 的主因在这里，不是"五官段没有 GPU 版本"（见 §9.17）。 */
-	if (!in_tex || (!job.mask && !f->mask_skin_use) || rg.faceCount != 1)
+	if (!in_tex || (!job.mask && !f->mask_skin_use))
 		return NULL;
-	const BeautyRegionGeom::Face &fc = rg.faces[0];
+	/* 3.3.0（最多 4 人）：从「只跑第一张脸」改成**逐脸**跑同一条 pass 序列。
+	 * 任何人脸失败都整段返回 NULL —— 认领必须是 flags 的前缀，少一个人就是
+	 * 「某个人没有五官」，比整段交回 CPU 更难查。上限与 GPU 掩码一致。 */
+	if (rg.faceCount < 1 || rg.faceCount > BEAUTY_MASK_MAX_FACES)
+		return NULL;
 	gs_effect_t *fx = beauty_load_region_effect(f);
 	if (!fx || !beauty_ensure_region_rt(f, cx, cy))
 		return NULL;
@@ -4302,13 +4387,23 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 		     "[" PLUGIN_NAME "] [region-dbg] mask=%d skin_use=%d "
 		     "geomskip=%d faces=%d els=%d naso=%d tail=%d spot=%d",
 		     job.mask ? 1 : 0, f->mask_skin_use ? 1 : 0, (int)job.maskGeomOnly,
-		     rg.faceCount, fc.elsCount, fc.nasoCount, fc.tailCount,
-		     rg.spotOn);
+		     rg.faceCount, rg.faces[0].elsCount, rg.faces[0].nasoCount,
+		     rg.faces[0].tailCount, rg.spotOn);
 
 	gs_texture_t *cur = in_tex;
+	for (int fi = 0; fi < rg.faceCount; fi++) {
+	const BeautyRegionGeom::Face &fc = rg.faces[fi];
+	/* 参数纹理只有 64 个 vec4（= 21 个椭圆 × 3 行），beauty_region_upload_els
+	 * 在 n>21 时是**静默不上传**的 —— 单人时后果是「这趟白跑」，多人时更糟：
+	 * 会用上一个人的椭圆画这一张脸。所以先在这里挡掉，整段交回 CPU。 */
+	if (fc.elsCount > 21 || fc.nasoCount > 21 || fc.tailCount > 21)
+		return NULL;
 	if (fc.elsCount > 0) {
 		beauty_region_upload_els(f, rg, fc, fc.elsBeg, fc.elsCount);
-		cur = beauty_region_pass(f, fx, "RegionEllipseTech", in_tex, NULL,
+		/* 3.3.0：输入必须是**上一个人跑完之后的图**（cur），不能是 in_tex ——
+		 * 否则第二个人起会把第一个人的效果整段覆盖掉。第一个人时 cur == in_tex，
+		 * 与旧行为逐字节相同。 */
+		cur = beauty_region_pass(f, fx, "RegionEllipseTech", cur, NULL,
 					 NULL, cx, cy, 0, rg, fc, fc.elsCount);
 		if (!cur)
 			return NULL;
@@ -4354,6 +4449,7 @@ static gs_texture_t *beauty_region_chain(struct beauty_filter *f,
 		if (!cur)
 			return NULL;
 	}
+	}   // end for (fi)：逐脸跑完，cur 是全部人脸叠加后的最终图
 	if (rg_dbg && (rg_dbg_n % 120) == 1)
 		blog(LOG_INFO, "[" PLUGIN_NAME "] [region-dbg] 出口：%s",
 		     (cur == in_tex) ? "**返回原图，一个 pass 都没跑**"
@@ -4640,7 +4736,9 @@ static unsigned beauty_chain_hook(void *user, const BeautyChainJob &job)
 	const bool gpu_mask_ok = f->gpu_mask_chain &&
 				 (job.mask || job.maskGeomOnly) &&
 				 (mg.fresh || job.maskGeomOnly) &&
-				 mg.count == 1 && !(mg.shape & 4);
+				 mg.count >= 1 &&
+				 mg.count <= BEAUTY_MASK_MAX_FACES &&
+				 !(mg.shape & 4);
 
 	gs_texture_t *ring = NULL;
 	/* 2.15.2：这里**不能**再要求 gpu_mask_ok。
@@ -5729,7 +5827,7 @@ static const uint32_t kThumbSide = 640;
 static bool beauty_ensure_thumb(struct beauty_filter *f, uint32_t side,
 				gs_color_format fmt)
 {
-	if (f->thumb_rt && f->thumb_stage && f->thumb_buf &&
+	if (f->thumb_rt && f->thumb_stage && f->thumb_stage_alt && f->thumb_buf &&
 	    f->thumb_w == side && f->thumb_h == side && f->thumb_fmt == fmt)
 		return true;
 	if (f->thumb_rt) {
@@ -5740,16 +5838,25 @@ static bool beauty_ensure_thumb(struct beauty_filter *f, uint32_t side,
 		gs_stagesurface_destroy(f->thumb_stage);
 		f->thumb_stage = NULL;
 	}
+	if (f->thumb_stage_alt) {
+		gs_stagesurface_destroy(f->thumb_stage_alt);
+		f->thumb_stage_alt = NULL;
+	}
 	if (f->thumb_buf) {
 		bfree(f->thumb_buf);
 		f->thumb_buf = NULL;
 	}
 	f->thumb_rt = gs_texrender_create(fmt, GS_ZS_NONE);
 	f->thumb_stage = gs_stagesurface_create(side, side, fmt);
+	f->thumb_stage_alt = gs_stagesurface_create(side, side, fmt);
 	f->thumb_buf = (unsigned char *)bzalloc((size_t)side * side * 4);
 	f->thumb_w = f->thumb_h = side;
 	f->thumb_fmt = fmt;
-	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_buf) {
+	f->thumb_ping = 0;
+	f->thumb_primed = false;
+	f->thumb_prev_scale = 0.0f;
+	f->thumb_prev_ox = f->thumb_prev_oy = f->thumb_prev_rot = 0;
+	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_stage_alt || !f->thumb_buf) {
 		blog(LOG_WARNING,
 		     "[" PLUGIN_NAME "] 检测缩略图资源不可用：本帧回退全帧回读"
 		     "（不影响画面，只是慢一点）");
@@ -5908,17 +6015,44 @@ static bool beauty_thumb_readback(struct beauty_filter *f)
 		}
 		return false;
 	};
-	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_buf)
+	if (!f->thumb_rt || !f->thumb_stage || !f->thumb_stage_alt || !f->thumb_buf)
 		return fail("resources");
 	const uint32_t S = f->thumb_w;
 	const double t0 = f->prof_on ? beauty_now_ms() : 0.0;
 	gs_texture_t *tex = gs_texrender_get_texture(f->thumb_rt);
 	if (!tex)
 		return fail("texrender texture null");
-	gs_stage_texture(f->thumb_stage, tex);
+	/* 3.3.4：双缓冲 —— 先把**本帧**排进 cur，map 的是**上一帧**那张 prev。
+	 * gs_stage_texture 只是排命令、不等 GPU；prev 是上一帧就提交的拷贝，到这一刻
+	 * 早已完成，map 几乎不等待。旧写法 1.43 ms/帧 里几乎全是「等本帧场景渲染完」，
+	 * 与运动采样（mot_stage/mot_stage_alt）同一个道理。
+	 * 代价：检测输入晚一帧（33ms）。检测本来就是异步的，多一帧不影响正确性。 */
+	gs_stagesurf_t *cur = f->thumb_ping ? f->thumb_stage_alt : f->thumb_stage;
+	gs_stagesurf_t *prev = f->thumb_ping ? f->thumb_stage : f->thumb_stage_alt;
+	f->thumb_ping ^= 1;
+	gs_stage_texture(cur, tex);
+	/* 映射参数变了（换分辨率 / 自动方向翻面）→ 上一张的地址就作废：
+	 * 宁可这一帧回退全帧，也不要拿旧 scale/rot 去解释新画面。 */
+	const bool geom_changed =
+		f->thumb_primed &&
+		(f->thumb_prev_scale != f->thumb_scale ||
+		 f->thumb_prev_ox != f->thumb_ox ||
+		 f->thumb_prev_oy != f->thumb_oy ||
+		 f->thumb_prev_rot != f->thumb_rot);
+	f->thumb_prev_scale = f->thumb_scale;
+	f->thumb_prev_ox = f->thumb_ox;
+	f->thumb_prev_oy = f->thumb_oy;
+	f->thumb_prev_rot = f->thumb_rot;
+	if (!f->thumb_primed || geom_changed) {
+		/* 首帧没有「上一帧」可读；参数刚变的那一帧同理。本帧回退全帧路径
+		 * （只此一帧），下一帧起就走双缓冲。绝不能用未初始化/错几何的
+		 * thumb_buf 喂检测。 */
+		f->thumb_primed = true;
+		return false;
+	}
 	uint8_t *ptr = NULL;
 	uint32_t linesize = 0;
-	if (!gs_stagesurface_map(f->thumb_stage, &ptr, &linesize) || !ptr)
+	if (!gs_stagesurface_map(prev, &ptr, &linesize) || !ptr)
 		return fail("stage map");
 	const size_t row = (size_t)S * 4;
 	if (linesize == row) {
@@ -5928,7 +6062,7 @@ static bool beauty_thumb_readback(struct beauty_filter *f)
 			memcpy(f->thumb_buf + (size_t)y * row,
 			       ptr + (size_t)y * linesize, row);
 	}
-	gs_stagesurface_unmap(f->thumb_stage);
+	gs_stagesurface_unmap(prev);
 	/* 取证用：BEAUTY_THUMB_DUMP=1 时把这张缩略图原样落盘一份（RGBA 裸数据）。
 	 * 缩略图一旦有翻转 / 通道错 / 黑边偏移，检测会检出一堆假脸，但日志只报个
 	 * 数字 —— 只有把图拿出来看才能一次定位。 */
@@ -5960,7 +6094,8 @@ static bool beauty_thumb_readback(struct beauty_filter *f)
 	return true;
 }
 static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
-			       uint32_t cx, uint32_t cy, bool read_back = true)
+			       uint32_t cx, uint32_t cy, int rot_deg,
+			       bool read_back = true)
 {
 	// 失败原因只报一次：这条路每帧都会试一次，不收敛的理由会刷屏。
 	auto fail = [](const char *why) {
@@ -5983,10 +6118,16 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 	if (!beauty_ensure_thumb(f, S, fmt))
 		return fail("ensure resources");
 
-	// 2.10.0 方案 B：输入旋转。检测缩略图按 input_rot 旋转后 letterbox 进 S×S，
-	// 使检测在「旋转后的人脸」上跑；引擎在 buildMaskInto 出口把 FaceBox/kps 反
-	// 变换回源坐标系。渲染/输出尺寸不变，用户对显示方向的场景项旋转照旧。
-	const int rot = ((f->input_rot % 360) + 360) % 360;
+	// 2.10.0 方案 B：输入旋转。检测缩略图按**本帧有效方向**旋转后 letterbox 进
+	// S×S，使检测在「旋转后的人脸」上跑；引擎在 buildMaskInto 出口把 FaceBox/kps
+	// 反变换回源坐标系。渲染/输出尺寸不变，用户对显示方向的场景项旋转照旧。
+	//
+	// 3.3.0（横竖屏适配）：不再读 f->input_rot，改由调用方传「本帧有效方向」
+	// （自动档下就是 beautyCoreEffectiveRot()）。旧写法只在两者相等时才敢走缩略图
+	// 路径（rot_match），于是自动探测一旦命中 90/270，整条快路径就被永久关掉 ——
+	// 竖装相机每帧白付 8.3 MB 全帧回读。方向本来就是「怎么转这张图」的参数，
+	// 让构建和反变换用同一个值即可，没有必须相等的理由。
+	const int rot = ((rot_deg % 360) + 360) % 360;
 	const bool swap = (rot == 90 || rot == 270);
 	const uint32_t Wr = swap ? cy : cx;   // 旋转后全帧宽
 	const uint32_t Hr = swap ? cx : cy;   // 旋转后全帧高
@@ -6046,6 +6187,8 @@ static bool beauty_thumb_build(struct beauty_filter *f, gs_texture_t *src,
 	f->thumb_scale = scale;
 	f->thumb_ox = ox;
 	f->thumb_oy = oy;
+	// 3.3.0：方向也一起交出去 —— 引擎在 mapped 路径上按它做几何反变换。
+	f->thumb_rot = rot;
 	// 画的那一段耗时先记；回读那一段由 beauty_thumb_readback 自己记。
 	if (f->prof_on)
 		f->prof_dl_thumb += beauty_now_ms() - t0;
@@ -6398,10 +6541,12 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			     px_note);
 		}
 	}
-	/* 2.15.0：引擎判定「面板这一档方向检不到脸、已改用 0°」时，缩略图不能再按
-	 * 面板值转 —— 转过一次的图是错的，检测会永远失败（于是美颜整段消失）。
-	 * 这时停用缩略图、改走全帧路径：那边引擎自己按有效方向做旋转重采样。 */
-	const bool rot_match = (f->input_rot == beautyCoreEffectiveRot());
+	/* 3.3.0（横竖屏适配）：本帧的**有效输入方向**。自动档下它就是引擎自动探测的
+	 * 结论；显式档下等于面板值。缩略图按它构建、并按同一个值交给引擎做几何反变换
+	 * —— 旧写法要求 `input_rot == effectiveRot` 才敢走缩略图（rot_match），
+	 * 一旦自动探测命中 90/270（A7M3 竖装就是这样），整条快路径被永久关掉，
+	 * 每帧白付 8.3 MB 全帧回读。方向只是「怎么转这张图」，两边一致即可。 */
+	const int eff_rot = beautyCoreEffectiveRot();
 	/* 2.15.9：**磨皮=0 时不要走缩略图路径**。
 	 *
 	 * 为什么：段区间钩子只在 `t > 0`（磨皮>0）时被调用；磨皮=0 时它一段都不认领，
@@ -6413,7 +6558,9 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	const bool want_thumb = f->detect_small && f->gpu_mask_chain &&
 				f->gpu_ring_ok && f->thumb_prev_ok &&
 				!f->stage_async && !f->mirror && f->verified &&
-				mkfaces0 == 1 && rot_match && thumb_blur_ok;
+				mkfaces0 >= 1 &&
+				mkfaces0 <= BEAUTY_MASK_MAX_FACES &&
+				thumb_blur_ok;
 	f->thumb_frame = false;
 	f->nopix_frame = false;   // 2.11.0（方案C）：每帧复位，见下方两段式分支
 	// S4b 一次性判据快照：缩略图路径「为什么会/不会生效」只看这一行。
@@ -6421,11 +6568,12 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		f->thumb_dbg_done = 1;
 		blog(LOG_INFO,
 		     "[" PLUGIN_NAME "] S4b 判据：detect_small=%d mask_chain=%d "
-		     "ring=%d prev_full=%d async=%d mirror=%d verified=%d",
+		     "ring=%d prev_full=%d async=%d mirror=%d verified=%d "
+		     "dir=%d° faces=%d",
 		     f->detect_small ? 1 : 0, f->gpu_mask_chain ? 1 : 0,
 		     f->gpu_ring_ok ? 1 : 0, f->thumb_prev_ok ? 1 : 0,
 		     f->stage_async ? 1 : 0, f->mirror ? 1 : 0,
-		     f->verified ? 1 : 0);
+		     f->verified ? 1 : 0, eff_rot, mkfaces0);
 	}
 	/* 2.11.0（方案C）：两段式。第一阶段只画缩略图（GPU，不读回）+ 采样 64×64
 	 * 运动小图（16 KB），问引擎「本帧要不要检测输入」；要才回读那 1.6 MB。
@@ -6433,7 +6581,8 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 	 * 照样要求「上一帧全认领」，认领不全就整帧跳过，代价与今天完全一样。 */
 	bool thumb_ready = false;
 	if (want_thumb && f->motion_gpu) {
-		if (beauty_thumb_build(f, in_tex, cx, cy, /*read_back=*/false) &&
+		if (beauty_thumb_build(f, in_tex, cx, cy, eff_rot,
+				       /*read_back=*/false) &&
 		    beauty_motion_sample(f)) {
 			const bool due = beautyCoreDetectDue();
 			beautyCoreClearMotionImage();
@@ -6451,7 +6600,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 			beautyCoreClearMotionImage();
 		}
 	} else if (want_thumb) {
-		thumb_ready = beauty_thumb_build(f, in_tex, cx, cy);
+		thumb_ready = beauty_thumb_build(f, in_tex, cx, cy, eff_rot);
 	}
 	if (thumb_ready) {
 		got = true;
@@ -6550,7 +6699,7 @@ static void beauty_filter_render(void *data, gs_effect_t *effect)
 		beautyCoreSetThumbSource(f->thumb_buf, (int)f->thumb_w,
 					 (int)f->thumb_h, (int)cx, (int)cy,
 					 f->thumb_scale, f->thumb_ox,
-					 f->thumb_oy);
+					 f->thumb_oy, f->thumb_rot);
 	else
 		beautyCoreClearThumbSource();
 	ring_sub0 = beautyCoreMaskSubmits();

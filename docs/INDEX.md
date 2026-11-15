@@ -1,9 +1,9 @@
 ---
 doc_type: INDEX
 title: 文档总表
-version: 0.1.9
-last_updated: 2026-11-10
-applies_to: 3.2.4
+version: 0.1.10
+last_updated: 2026-11-15
+applies_to: 3.3.6
 repo_baseline: 914f388
 maintainer: Jian
 status: Active
@@ -19,13 +19,13 @@ status: Active
 
 | 主题 | 路径 | 类型 | 状态 | 适用版本 | 维护人 | 最后核对 | 替代 / 归档 |
 |---|---|---|---|---|---|---|---|
-| 现状入口 | [`README.md`](README.md) | README | Active | 3.2.4 | Jian | 2026-11-10 | 替代根 `README.md`、`04_文档/README.md` |
-| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.2.4 | Jian | 2026-11-10 | 批 4 已合并 7 篇修复记录 + 结论稿摘要 |
+| 现状入口 | [`README.md`](README.md) | README | Active | 3.3.6 | Jian | 2026-11-15 | 替代根 `README.md`、`04_文档/README.md` |
+| 变更记录 | [`CHANGELOG.md`](CHANGELOG.md) | CHANGELOG | Active | 3.3.6 | Jian | 2026-11-15 | 批 4 已合并 7 篇修复记录 + 结论稿摘要；顶部另有 3.2.4→3.3.6 发布汇总 |
 | 第三方组件与许可 | [`../THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | NOTICES | Active | 3.2.2 | Jian | 2026-11-06 | 新建：登记 ONNX Runtime / YuNet / BiSeNet / MediaPipe / 手部模型的许可、入库与分发状态 |
 | 开发流程与计划 | [`guides/guide-development.md`](guides/guide-development.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `04_文档/开发流程与优化计划.md` |
 | 引擎 id 与 GPU 管线判读 | [`reference/reference-engine-id.md`](reference/reference-engine-id.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原根 `GPU_CPU_对比报告.md` |
-| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.2.2 | Jian | 2026-11-06 | 原 `04_文档/开关总表.md` |
-| 已知限制 | [`reference/reference-limits.md`](reference/reference-limits.md) | reference | Active | 3.2.4 | Jian | 2026-11-10 | 新建：由 `README.md` §3 迁出（主题名未改，承接旧 N1–N24 映射） |
+| 开关总表 | [`reference/reference-switches.md`](reference/reference-switches.md) | reference | Active | 3.3.6 | Jian | 2026-11-15 | 原 `04_文档/开关总表.md` |
+| 已知限制 | [`reference/reference-limits.md`](reference/reference-limits.md) | reference | Active | 3.3.6 | Jian | 2026-11-15 | 新建：由 `README.md` §3 迁出（主题名未改，承接旧 N1–N24 映射） |
 | 验证工具与坑 | [`guides/guide-verification.md`](guides/guide-verification.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `05_验证/README.md` |
 | 离线回归 | [`guides/guide-offline-regression.md`](guides/guide-offline-regression.md) | guides | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/README.md` |
 | 分割探针 | [`reference/reference-skinseg-probe.md`](reference/reference-skinseg-probe.md) | reference | Active | 3.2.2 | Jian | 2026-11-05 | 原 `06_离线验证/segtest/README.md`（原未跟踪，批 2 首次纳入） |
@@ -256,7 +256,7 @@ ADR 骨架：沿用上述 YAML 头（`doc_type: adr`，文件名 `adr-<主题>.m
 |---|---|---|
 | `version` | 该文档每次改动 | 普通修订 +0.0.1；与插件版本号无关 |
 | `last_updated` | 该文档每次改动 | 实际改动日期 `YYYY-MM-DD` |
-| `applies_to` | 产品发版时 | 全库统一，当前 `3.0.1` |
+| `applies_to` | 产品发版时 | 同步「当前版本」口径的那一批。3.3.6 发版同步了 README / CHANGELOG / INDEX / reference-limits / reference-switches 共五篇；历史 design / adr / guides 保留各自编写时的值，不随版批量改写 |
 | `repo_baseline` | 产品发版时 | **文档治理 commit 不推进**；当前恒为 `914f388` |
 | `status` | 归档时 | 只用 `Active` / `Deprecated`；Draft 走文首标注，不扩枚举 |
 | `supersedes` | 归档 / 合并时 | 必填，形成可追溯链；无替代写「无」 |
